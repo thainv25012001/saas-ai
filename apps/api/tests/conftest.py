@@ -17,7 +17,7 @@ os.environ.setdefault(
     "MIGRATION_DATABASE_URL",
     "postgresql+asyncpg://app_owner:app_owner_password@localhost:5432/saas_ai",
 )
-os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production")
+os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production-please")
 
 
 @pytest.fixture

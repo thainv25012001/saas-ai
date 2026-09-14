@@ -21,10 +21,19 @@ def tenant_from_bearer(request: Request) -> TenantContext:
     if payload.org is None or payload.role is None:
         raise AuthenticationError("token is missing organization context")
 
+    try:
+        role = MembershipRole(payload.role)
+    except ValueError as exc:
+        # A validly-signed token can still carry a role that no longer
+        # exists (a role rename, a deploy rollback). A token-shaped input
+        # must never produce a server error - treat it the same as any
+        # other malformed token.
+        raise AuthenticationError("token carries an unrecognized role") from exc
+
     return TenantContext(
         organization_id=payload.org,
         user_id=payload.sub,
-        role=MembershipRole(payload.role),
+        role=role,
         request_id=request_id_var.get(),
     )
 

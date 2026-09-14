@@ -37,6 +37,19 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
 
 
 def _client_key(request: Request) -> str:
+    # request.client.host is the DIRECT peer's address. Phase 1 runs with no
+    # proxy in front of this service, so that peer is the real client and
+    # this is correct as-is. It stops being correct the moment a load
+    # balancer or ingress sits in front: every client would then collapse
+    # into the proxy's one IP (5 registrations/hour globally; one attacker
+    # starving /login for everyone). Trusting X-Forwarded-For naively is NOT
+    # the fix - it lets an attacker mint a fresh rate-limit key on every
+    # request by forging the header. Before deploying behind a proxy,
+    # configure Starlette/uvicorn's ProxyHeadersMiddleware with an explicit
+    # trusted-hosts list (or run uvicorn with --proxy-headers
+    # --forwarded-allow-ips=<the proxy's real address>) so only a header set
+    # by that trusted hop is honored. Until then, this limiter is only
+    # correct for direct connections.
     return request.client.host if request.client else "unknown"
 
 
@@ -112,6 +125,7 @@ async def me(
             .where(
                 User.id == tenant.user_id,
                 Membership.organization_id == tenant.organization_id,
+                User.is_active.is_(True),
             )
         )
         row = result.first()

@@ -22,6 +22,14 @@ from app.db.models import Membership, MembershipRole, Organization, User
 
 _DENYLIST_PREFIX = "refresh:revoked:"
 
+# Computed once, at import time, and reused for every unknown-email login.
+# If this were computed per-request (`hash_password("dummy")` inline in
+# authenticate()), the unknown-email path would run TWO Argon2 operations
+# (hash + verify) against the known-email path's ONE (verify only) - a
+# measurable timing difference that re-introduces the exact oracle this
+# constant exists to remove. Keep it module-level; do not inline it.
+_DUMMY_PASSWORD_HASH = hash_password("dummy-password-for-constant-time-auth")
+
 
 class AuthService:
     def __init__(self, session: AsyncSession) -> None:
@@ -87,10 +95,15 @@ class AuthService:
         result = await self.session.execute(select(User).where(User.email == email))
         user = result.scalar_one_or_none()
 
-        # Hash even when the user is absent, so response time does not reveal
-        # whether an email is registered.
-        password_hash = user.password_hash if user else hash_password("dummy")
-        if not verify_password(password, password_hash) or user is None:
+        # Verify against a precomputed dummy hash when the user is absent, so
+        # response time does not reveal whether an email is registered. Both
+        # branches run exactly one Argon2 verify - see _DUMMY_PASSWORD_HASH.
+        password_hash = user.password_hash if user is not None else _DUMMY_PASSWORD_HASH
+        # Always call verify_password, unconditionally - `or` short-circuits,
+        # so "user is None or not verify_password(...)" would skip the verify
+        # entirely on the unknown-email path and reopen the timing oracle.
+        password_ok = verify_password(password, password_hash)
+        if user is None or not password_ok:
             raise AuthenticationError("invalid email or password")
         if not user.is_active:
             raise AuthenticationError("invalid email or password")

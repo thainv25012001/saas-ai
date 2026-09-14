@@ -119,6 +119,6 @@ def test_token_with_invalid_signature_raises_authentication_error() -> None:
         "iat": int(datetime.now(UTC).timestamp()),
     }
     # Sign with a different secret (not the one in Settings).
-    token = jwt.encode(claims, "some-other-secret", algorithm="HS256")
+    token = jwt.encode(claims, "some-other-secret-that-is-not-the-real-one", algorithm="HS256")
     with pytest.raises(AuthenticationError):
         decode_token(token, expected_type="access")
