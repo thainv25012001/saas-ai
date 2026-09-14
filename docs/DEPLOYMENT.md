@@ -60,13 +60,22 @@ The role split is what makes Row-Level Security real: `app_owner` owns the table
 RLS) and only runs migrations; `app_user` is what the application connects as and is subject to
 every policy. Neither role has `BYPASSRLS`.
 
-Connection strings must be rewritten for SQLAlchemy + asyncpg — `asyncpg` does not understand
-`sslmode` or `channel_binding`, so replace the query string Neon gives you with `?ssl=require`:
+Paste the connection strings Neon gives you as they are, only swapping in the `app_user` /
+`app_owner` credentials. `Settings` normalizes them on load (`_normalize_database_url` in
+`apps/api/app/core/config.py`): a driver-less `postgresql://` or legacy `postgres://` scheme becomes
+`postgresql+asyncpg://`, and libpq's `sslmode`/`channel_binding` become asyncpg's `ssl`. Without
+that, a driver-less scheme makes SQLAlchemy load psycopg2 and the container dies at import with
+`ModuleNotFoundError: No module named 'psycopg2'`, which points nowhere near the real cause.
+
+What the app ends up using:
 
 ```
 postgresql+asyncpg://app_user:<user-password>@<host>/neondb?ssl=require
 postgresql+asyncpg://app_owner:<owner-password>@<host>/neondb?ssl=require
 ```
+
+`ssl=require` encrypts the connection but does not verify Neon's certificate. Set
+`sslmode=verify-full` (or `ssl=verify-full`) for that, once the runtime has a CA bundle you trust.
 
 Use Neon's pooled host for `DATABASE_URL` and the direct (unpooled) host for
 `MIGRATION_DATABASE_URL`; DDL through a transaction pooler is a bad time.

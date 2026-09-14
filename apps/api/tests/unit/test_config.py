@@ -1,4 +1,4 @@
-from app.core.config import _find_env_file, get_settings
+from app.core.config import _find_env_file, _normalize_database_url, get_settings
 
 
 def test_find_env_file_walks_up_from_start_regardless_of_cwd(monkeypatch, tmp_path):
@@ -67,3 +67,73 @@ def test_cors_origins_single_value_without_comma_yields_one_element_list(monkeyp
         assert settings.cors_origins == ["http://solo.test"]
     finally:
         get_settings.cache_clear()
+
+
+class TestNormalizeDatabaseUrl:
+    """Neon (like Render, Heroku and Supabase) hands out libpq-shaped URLs:
+    a `postgresql://` scheme with no driver, and `sslmode`/`channel_binding`
+    in the query string. Both are wrong for this app in ways that fail late
+    and read as unrelated bugs — a driver-less scheme makes SQLAlchemy load
+    psycopg2 (`ModuleNotFoundError: No module named 'psycopg2'`, at import
+    time), and `sslmode` reaches `asyncpg.connect()` as an unexpected keyword
+    argument (at first connect). Pasting the URL the provider gives you has
+    to work."""
+
+    def test_driverless_scheme_becomes_asyncpg(self):
+        assert _normalize_database_url("postgresql://u:p@host/neondb") == (
+            "postgresql+asyncpg://u:p@host/neondb"
+        )
+
+    def test_legacy_postgres_scheme_becomes_asyncpg(self):
+        """`postgres://` is what several platforms still emit; SQLAlchemy
+        dropped the alias and answers `Can't load plugin`."""
+        assert _normalize_database_url("postgres://u:p@host/neondb") == (
+            "postgresql+asyncpg://u:p@host/neondb"
+        )
+
+    def test_sslmode_is_translated_and_channel_binding_dropped(self):
+        """asyncpg spells it `ssl`, and has no channel_binding parameter at
+        all. TLS is preserved — the requirement, not the spelling, is what
+        matters."""
+        normalized = _normalize_database_url(
+            "postgresql://u:p@host/neondb?sslmode=require&channel_binding=require"
+        )
+        assert normalized == "postgresql+asyncpg://u:p@host/neondb?ssl=require"
+
+    def test_stronger_sslmode_values_survive(self):
+        normalized = _normalize_database_url("postgresql://u:p@host/db?sslmode=verify-full")
+        assert normalized == "postgresql+asyncpg://u:p@host/db?ssl=verify-full"
+
+    def test_password_is_not_masked(self):
+        """URL.render_as_string() masks the password by default; a masked
+        password would turn this helper into an authentication failure."""
+        assert "s3cr3t" in _normalize_database_url("postgresql://u:s3cr3t@host/db")
+
+    def test_already_correct_url_is_unchanged(self):
+        url = "postgresql+asyncpg://u:p@host/db?ssl=require"
+        assert _normalize_database_url(url) == url
+
+    def test_explicit_ssl_wins_over_sslmode(self):
+        normalized = _normalize_database_url(
+            "postgresql://u:p@host/db?ssl=verify-full&sslmode=require"
+        )
+        assert normalized == "postgresql+asyncpg://u:p@host/db?ssl=verify-full"
+
+    def test_a_deliberately_chosen_driver_is_left_alone(self):
+        """Only the driver-less forms are assumed to be a paste from a
+        provider. Naming a driver is an explicit choice, so it is respected
+        rather than silently overridden."""
+        url = "postgresql+psycopg://u:p@host/db"
+        assert _normalize_database_url(url) == url
+
+    def test_settings_normalizes_both_database_urls(self, monkeypatch):
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@host/db?sslmode=require")
+        monkeypatch.setenv("MIGRATION_DATABASE_URL", "postgres://o:p@host/db?sslmode=require")
+        monkeypatch.setenv("JWT_SECRET", "test-secret")
+        get_settings.cache_clear()
+        try:
+            settings = get_settings()
+            assert settings.database_url == "postgresql+asyncpg://u:p@host/db?ssl=require"
+            assert settings.migration_database_url == "postgresql+asyncpg://o:p@host/db?ssl=require"
+        finally:
+            get_settings.cache_clear()
