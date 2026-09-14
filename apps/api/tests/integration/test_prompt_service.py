@@ -55,8 +55,15 @@ async def test_activating_a_version_deactivates_the_previous_one(tenant_a):
 
 
 async def test_exactly_one_version_is_active_after_repeated_switching(tenant_a):
-    """The partial unique index makes 'exactly one active' a database
-    guarantee. This test is what proves the index is actually there."""
+    """Covers activate_version's own bookkeeping across repeated switches.
+
+    This does NOT exercise the partial unique index itself: activate_version
+    already serialises deactivate-then-flush-then-activate, so exactly one
+    row is active at every step here whether or not the index exists. The
+    index is proven separately, by
+    test_two_active_versions_in_one_flush_violates_the_partial_unique_index,
+    which bypasses activate_version entirely.
+    """
     from sqlalchemy import func, select
 
     from app.db.models import PromptVersion
@@ -75,6 +82,48 @@ async def test_exactly_one_version_is_active_after_repeated_switching(tenant_a):
             .where(PromptVersion.prompt_id == prompt.id, PromptVersion.is_active)
         )
     assert count.scalar_one() == 1
+
+
+async def test_two_active_versions_in_one_flush_violates_the_partial_unique_index(tenant_a):
+    """Bypasses activate_version's careful statement ordering entirely, to
+    prove that the *database* -- not just the service's discipline -- refuses
+    two active versions for the same prompt.
+
+    Regression check performed manually while fixing this test: running it
+    against a database with `uq_prompt_versions_one_active` dropped
+    (`DROP INDEX uq_prompt_versions_one_active;`) makes this test FAIL (the
+    flush succeeds with two active rows instead of raising). Recreating the
+    index (`CREATE UNIQUE INDEX uq_prompt_versions_one_active ON
+    prompt_versions (prompt_id) WHERE is_active;`) makes it pass again. See
+    the task report for the verbatim before/after run.
+    """
+    from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
+
+    from app.db.models import PromptVersion
+
+    with pytest.raises(IntegrityError, match="uq_prompt_versions_one_active"):
+        async with tenant_session(tenant_a) as session:
+            service = PromptService(session, tenant_a)
+            prompt = await _prompt(session, tenant_a)
+            await service.create_version(prompt.id, CreateVersionInput(system_prompt="v2"))
+
+            result = await session.execute(
+                select(PromptVersion).where(PromptVersion.prompt_id == prompt.id)
+            )
+            versions = result.scalars().all()
+            assert len(versions) == 2
+            for version in versions:
+                version.is_active = True
+
+            await session.flush()
+
+
+async def test_created_by_records_the_creating_user(tenant_a):
+    async with tenant_session(tenant_a) as session:
+        prompt = await _prompt(session, tenant_a)
+        version = await PromptService(session, tenant_a).active_version(prompt.id)
+    assert version.created_by == tenant_a.user_id
 
 
 async def test_prompts_are_scoped_to_their_organization(tenant_a, tenant_b):

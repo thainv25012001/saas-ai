@@ -38,15 +38,7 @@ class PromptService:
 
     async def create_prompt(self, data: CreatePromptInput) -> Prompt:
         """A prompt is never useful without text, so version 1 is created with
-        it and activated immediately.
-
-        `created_by` is left unset here: nothing in this task's scope calls
-        this service with a `tenant.user_id` verified to reference a `users`
-        row (real requests derive it from a validated access token's `sub`
-        claim -- see app/auth/dependencies.py -- but this task adds no route
-        that does so yet). Wiring a real value through is for the caller that
-        eventually has one to supply explicitly.
-        """
+        it and activated immediately."""
         prompt = Prompt(
             id=uuid7(),
             organization_id=self.tenant.organization_id,
@@ -61,7 +53,7 @@ class PromptService:
             version=1,
             system_prompt=data.system_prompt,
             is_active=True,
-            created_by=None,
+            created_by=self.tenant.user_id,
         )
         self.session.add_all([prompt, version])
         try:
@@ -84,10 +76,14 @@ class PromptService:
             variables=data.variables,
             is_active=False,  # explicit activation is a separate, auditable act
             notes=data.notes,
-            created_by=None,  # see create_prompt's docstring
+            created_by=self.tenant.user_id,
         )
         self.session.add(version)
-        await self.session.flush()
+        try:
+            await self.session.flush()
+        except IntegrityError as exc:
+            # Two concurrent calls can compute the same max(version) + 1.
+            raise ConflictError("a version with that number already exists") from exc
         return version
 
     async def activate_version(self, version_id: uuid.UUID) -> PromptVersion:
@@ -107,6 +103,7 @@ class PromptService:
             update(PromptVersion)
             .where(
                 PromptVersion.prompt_id == version.prompt_id,
+                PromptVersion.organization_id == self.tenant.organization_id,
                 PromptVersion.is_active.is_(True),
             )
             .values(is_active=False)

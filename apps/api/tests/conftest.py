@@ -101,7 +101,7 @@ async def _make_tenant(
     from app.core.tenancy import TenantContext
     from app.db.models import MembershipRole
 
-    org_id, user_id = uuid7(), uuid7()
+    org_id, user_id, membership_id = uuid7(), uuid7(), uuid7()
     slug = f"{name.lower().replace(' ', '-')}-{org_id.hex[:8]}"
     await owner_connection.execute(
         text(
@@ -109,6 +109,27 @@ async def _make_tenant(
             "VALUES (:id, :name, :slug, 'free', '{}')"
         ),
         {"id": org_id, "name": name, "slug": slug},
+    )
+    # A real users row backs user_id so any FK to users.id (e.g.
+    # PromptVersion.created_by) can be populated from this fixture's
+    # TenantContext without violating referential integrity.
+    await owner_connection.execute(
+        text(
+            "INSERT INTO users (id, email, password_hash, full_name) "
+            "VALUES (:id, :email, 'not-a-real-hash', :full_name)"
+        ),
+        {
+            "id": user_id,
+            "email": f"{name.lower().replace(' ', '-')}-{user_id.hex[:8]}@example.com",
+            "full_name": name,
+        },
+    )
+    await owner_connection.execute(
+        text(
+            "INSERT INTO memberships (id, organization_id, user_id, role) "
+            "VALUES (:id, :org_id, :user_id, 'owner')"
+        ),
+        {"id": membership_id, "org_id": org_id, "user_id": user_id},
     )
     await owner_connection.commit()
 
@@ -120,4 +141,5 @@ async def _make_tenant(
     )
 
     await owner_connection.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": org_id})
+    await owner_connection.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_id})
     await owner_connection.commit()
