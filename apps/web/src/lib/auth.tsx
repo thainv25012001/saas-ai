@@ -3,7 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { apiFetch } from "@/lib/api";
 
-type TokenResponse = { access_token: string; expires_in: number };
+export type TokenResponse = { access_token: string; expires_in: number };
 type Me = {
   user_id: string;
   email: string;
@@ -20,6 +20,13 @@ type AuthValue = {
   login: (email: string, password: string) => Promise<void>;
   register: (input: RegisterInput) => Promise<void>;
   logout: () => Promise<void>;
+  /**
+   * Lets the urql auth exchange push a rotated access token back into React
+   * state after an in-session silent refresh, so the token that survives a
+   * re-render (and the next memoised Client rebuild) is the fresh one, not
+   * a stale value trapped in the exchange's own closure.
+   */
+  setAccessToken: (token: string | null) => void;
 };
 
 type RegisterInput = {
@@ -75,18 +82,43 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [loadUser],
   );
 
+  const login = useCallback(
+    (email: string, password: string) =>
+      authenticate("/api/v1/auth/login", { email, password }),
+    [authenticate],
+  );
+
+  const register = useCallback(
+    (input: RegisterInput) => authenticate("/api/v1/auth/register", input),
+    [authenticate],
+  );
+
+  // Stable across renders (deps are only the setState functions, which React
+  // guarantees never change identity) so UrqlProvider's useMemo can depend on
+  // it without rebuilding the Client on every unrelated re-render.
+  //
+  // State is cleared in `finally`, not just after a successful call: a
+  // caller (the urql auth exchange, on a failed silent refresh) relies on
+  // this to actually end the local session even if the network request
+  // itself fails (offline, API down) - otherwise the app would keep
+  // presenting a "logged in" state it can no longer back up.
+  const logout = useCallback(async () => {
+    try {
+      await apiFetch<void>("/api/v1/auth/logout", { method: "POST" });
+    } finally {
+      setAccessToken(null);
+      setUser(null);
+    }
+  }, []);
+
   const value: AuthValue = {
     accessToken,
     user,
     loading,
-    login: (email, password) =>
-      authenticate("/api/v1/auth/login", { email, password }),
-    register: (input) => authenticate("/api/v1/auth/register", input),
-    logout: async () => {
-      await apiFetch<void>("/api/v1/auth/logout", { method: "POST" });
-      setAccessToken(null);
-      setUser(null);
-    },
+    login,
+    register,
+    logout,
+    setAccessToken,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

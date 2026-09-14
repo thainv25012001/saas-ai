@@ -6,6 +6,25 @@ from app.core.security import create_access_token
 
 pytestmark = pytest.mark.anyio
 
+
+def _cookie_attributes(set_cookie_header: str) -> dict[str, str]:
+    """Parse a Set-Cookie header into a case-insensitive attribute map.
+
+    A plain substring check like ``"Path=/" in cookie`` also matches
+    ``"Path=/api/v1/auth"``, so it cannot catch the cookie being scoped back
+    to the narrower path. Parsing on ";" and comparing the value exactly is
+    what actually pins the attribute.
+    """
+    attributes: dict[str, str] = {}
+    for part in set_cookie_header.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        key, _, value = part.partition("=")
+        attributes[key.strip().lower()] = value.strip()
+    return attributes
+
+
 REGISTRATION = {
     "email": "owner@example.com",
     "password": "correct-horse-battery",
@@ -27,11 +46,14 @@ async def test_register_sets_an_httponly_refresh_cookie(client, clean_users):
     cookie = response.headers.get("set-cookie", "")
     assert "refresh_token=" in cookie
     assert "HttpOnly" in cookie
-    assert "SameSite=lax" in cookie.replace("SameSite=Lax", "SameSite=lax")
-    # Path must stay "/" (not narrowed to "/api/v1/auth"): the Next.js
+    attributes = _cookie_attributes(cookie)
+    assert attributes["samesite"].lower() == "lax"
+    # Path must be EXACTLY "/" (not narrowed to "/api/v1/auth"): the Next.js
     # dashboard middleware guard reads this cookie on /dashboard routes and
-    # would stop seeing it if the path were ever tightened back.
-    assert "Path=/" in cookie
+    # would stop seeing it if the path were ever tightened back. Comparing
+    # the parsed attribute, not a substring of the raw header, is what makes
+    # this actually fail if that happens.
+    assert attributes["path"] == "/"
 
 
 async def test_register_creates_org_user_and_owner_membership(client, clean_users):
