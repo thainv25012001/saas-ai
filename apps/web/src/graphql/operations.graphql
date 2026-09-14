@@ -1,7 +1,3 @@
-query Me {
-  me { userId email fullName organizationId organizationName role }
-}
-
 query Agents {
   agents { id name slug status model provider createdAt }
 }

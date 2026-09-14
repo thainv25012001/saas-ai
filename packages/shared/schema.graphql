@@ -74,6 +74,14 @@ type Mutation {
   activatePromptVersion(versionId: UUID!): PromptVersion!
 }
 
+type Organization {
+  id: UUID!
+  name: String!
+  slug: String!
+  plan: String!
+  createdAt: DateTime!
+}
+
 type Prompt {
   id: UUID!
   name: String!
@@ -93,6 +101,7 @@ type PromptVersion {
 
 type Query {
   me: Me!
+  organization: Organization!
   agents: [Agent!]!
   agent(id: UUID!): Agent!
   prompts: [Prompt!]!

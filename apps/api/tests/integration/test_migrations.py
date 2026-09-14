@@ -52,16 +52,18 @@ async def test_identity_tables_do_not_have_rls(owner_connection, table):
 async def test_tenant_tables_have_rls_enabled_with_a_tenant_isolation_policy(
     owner_connection, table
 ):
-    """The GraphQL layer has at least one code path (`Context._load_configs`,
-    the `agent { config }` dataloader) that filters only by a non-tenant key
-    and relies entirely on RLS for tenant isolation — see
-    tests/integration/test_tenant_isolation.py. That means RLS being both
-    *enabled* and carrying the `tenant_isolation` policy is itself a security
-    invariant these business tables must hold, not just an implementation
-    detail: if a future migration silently dropped the policy from one of
-    these tables, every isolation test that happens to route through a
-    service-layer ownership check first would stay green while this one
-    table quietly lost its only line of defence."""
+    """RLS being both *enabled* and carrying the `tenant_isolation` policy is
+    itself a security invariant these business tables must hold, not just an
+    implementation detail: if a future migration silently dropped the policy
+    from one of these tables, every isolation test that routes through a
+    service-layer ownership check first would stay green while that table
+    quietly lost a whole layer of defence.
+
+    This test only asserts the policy *exists* — it says nothing about what
+    the predicate does, so a policy weakened to `USING (true)` would still
+    pass here. What the predicate actually enforces, with no service filter
+    in the picture, is asserted in tests/integration/test_isolation_layers.py
+    ::test_rls_alone_hides_another_orgs_agents_from_raw_sql."""
     enabled = await owner_connection.execute(
         text(
             "SELECT relrowsecurity FROM pg_class "

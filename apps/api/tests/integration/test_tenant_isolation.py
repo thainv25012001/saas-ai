@@ -158,11 +158,10 @@ async def test_b_gets_no_data_when_nesting_config_under_as_agent(two_accounts, c
     closed with a clean `not_found` and no partial `data` payload, for a
     query shape (`agent(id) { config { ... } }`) distinct from the
     `updateAgentConfig` mutation above. The dataloader itself
-    (`Context._load_configs` in app/graphql/context.py) filters only by
-    `agent_id`, with no `organization_id` predicate of its own — its actual
-    tenant boundary is Postgres RLS on `agent_configs`, which is asserted
-    directly in tests/integration/test_migrations.py::
-    test_tenant_tables_have_rls_enabled_with_a_tenant_isolation_policy."""
+    (`Context._load_configs` in app/graphql/context.py) carries both layers
+    independently — an `organization_id` predicate of its own plus Postgres
+    RLS on `agent_configs` — and each of those is exercised on its own in
+    tests/integration/test_isolation_layers.py."""
     _a, headers_b, agent_a_id, _prompt = two_accounts
     response = await _graphql(
         client,
@@ -270,6 +269,21 @@ async def test_me_reports_each_owners_own_organization(two_accounts, client):
     b = await _graphql(client, "{ me { organizationName } }", headers=headers_b)
     assert a.json()["data"]["me"]["organizationName"] == "Ada Motors A"
     assert b.json()["data"]["me"]["organizationName"] == "Ada Motors B"
+
+
+async def test_organization_query_reports_each_owners_own_organization(two_accounts, client):
+    """The `organization` query takes no id, so the only thing deciding which
+    row comes back is the caller's own token. Two accounts must therefore see
+    two different organizations."""
+    headers_a, headers_b, _agent, _prompt = two_accounts
+    query = "{ organization { id name slug plan } }"
+    a = (await _graphql(client, query, headers=headers_a)).json()["data"]["organization"]
+    b = (await _graphql(client, query, headers=headers_b)).json()["data"]["organization"]
+
+    assert a["name"] == "Ada Motors A"
+    assert b["name"] == "Ada Motors B"
+    assert a["id"] != b["id"]
+    assert a["slug"] != b["slug"]
 
 
 async def test_a_can_still_see_its_own_agent(two_accounts, client):

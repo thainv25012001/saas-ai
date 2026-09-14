@@ -7,6 +7,7 @@ import strawberry
 from app.core.errors import AuthenticationError
 from app.db.models import Agent as AgentModel
 from app.db.models import AgentConfig as AgentConfigModel
+from app.db.models import Organization as OrganizationModel
 from app.db.models import Prompt as PromptModel
 from app.db.models import PromptVersion as PromptVersionModel
 from app.graphql.context import Context
@@ -27,6 +28,25 @@ class Me:
     organization_id: uuid.UUID
     organization_name: str
     role: str
+
+
+@strawberry.type
+class Organization:
+    id: uuid.UUID
+    name: str
+    slug: str
+    plan: str
+    created_at: datetime
+
+    @classmethod
+    def from_model(cls, model: OrganizationModel) -> "Organization":
+        return cls(
+            id=model.id,
+            name=model.name,
+            slug=model.slug,
+            plan=model.plan,
+            created_at=model.created_at,
+        )
 
 
 @strawberry.type

@@ -1,16 +1,42 @@
-from pathlib import Path
-
 from app.core.config import _find_env_file, get_settings
 
 
-def test_find_env_file_locates_repo_root_env_regardless_of_cwd(monkeypatch, tmp_path):
-    """Settings.env_file must resolve from this module's own location, not the
-    process cwd — alembic and the app are launched from different directories."""
-    expected = Path(__file__).resolve().parents[4] / ".env"
-    assert expected.is_file(), "sanity check: repo-root .env is expected to exist"
+def test_find_env_file_walks_up_from_start_regardless_of_cwd(monkeypatch, tmp_path):
+    """Settings.env_file must resolve from the module's own location, not the
+    process cwd — alembic and the app are launched from different directories.
 
-    monkeypatch.chdir(tmp_path)
-    assert _find_env_file() == expected
+    Built entirely inside tmp_path rather than asserting on the real repo's
+    .env: that file is gitignored, so a fresh checkout (CI, where config
+    arrives as real environment variables) has none and the assertion would
+    fail before testing any behaviour. The cwd is moved to a directory that
+    contains no .env at all, so a cwd-relative implementation finds nothing
+    and this test fails.
+    """
+    repo_root = tmp_path / "repo"
+    module_path = repo_root / "apps" / "api" / "app" / "core" / "config.py"
+    module_path.parent.mkdir(parents=True)
+    expected = repo_root / ".env"
+    expected.write_text("JWT_SECRET=from-the-walk\n", encoding="utf-8")
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    assert _find_env_file(start=module_path) == expected
+
+
+def test_find_env_file_prefers_the_nearest_env_walking_upwards(tmp_path):
+    """The walk stops at the first .env above the start, so a nearer one
+    shadows the repo-root one rather than both being ambiguous."""
+    repo_root = tmp_path / "repo"
+    api_root = repo_root / "apps" / "api"
+    module_path = api_root / "app" / "core" / "config.py"
+    module_path.parent.mkdir(parents=True)
+    (repo_root / ".env").write_text("JWT_SECRET=far\n", encoding="utf-8")
+    nearer = api_root / ".env"
+    nearer.write_text("JWT_SECRET=near\n", encoding="utf-8")
+
+    assert _find_env_file(start=module_path) == nearer
 
 
 def test_find_env_file_returns_none_when_no_env_exists_above(tmp_path):

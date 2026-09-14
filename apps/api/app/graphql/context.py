@@ -38,10 +38,22 @@ class Context(BaseContext):
 
     async def _load_configs(self, agent_ids: Sequence[uuid.UUID]) -> list[AgentConfig | None]:
         """Batches `agents { config { ... } }` into one query instead of one
-        per agent. Without this, listing 50 agents issues 51 queries."""
+        per agent. Without this, listing 50 agents issues 51 queries.
+
+        The `organization_id` predicate is redundant with Postgres RLS on
+        `agent_configs`, and deliberately so: Layer 1 (application-layer
+        tenant filtering) admits no exceptions, and this loader was the only
+        tenant-table query in the codebase defended by RLS alone.
+        `AgentConfig` carries its own `organization_id`, so this costs no
+        join.
+        """
         assert self.session is not None
+        assert self.tenant is not None
         result = await self.session.execute(
-            select(AgentConfig).where(AgentConfig.agent_id.in_(list(agent_ids)))
+            select(AgentConfig).where(
+                AgentConfig.agent_id.in_(list(agent_ids)),
+                AgentConfig.organization_id == self.tenant.organization_id,
+            )
         )
         by_agent = {config.agent_id: config for config in result.scalars().all()}
         return [by_agent.get(agent_id) for agent_id in agent_ids]

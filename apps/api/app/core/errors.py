@@ -1,3 +1,7 @@
+from collections.abc import Iterable, Mapping
+from typing import Any
+
+
 class AppError(Exception):
     """Base for every error the application raises deliberately.
 
@@ -41,3 +45,24 @@ class ValidationError(AppError):
 class RateLimitError(AppError):
     code = "rate_limited"
     status_code = 429
+
+
+def format_validation_errors(errors: Iterable[Mapping[str, Any]]) -> str:
+    """Render pydantic's structured error list as one human-readable message.
+
+    Shared by both surfaces so REST and GraphQL say the same thing about the
+    same rejected payload: `app/main.py`'s RequestValidationError handler and
+    `app/graphql/resolvers.py`'s `_build`.
+
+    Deliberately reads only `loc` and `msg`. A pydantic error dict also
+    carries `input` — the value the caller submitted, which for a
+    registration is the plaintext password — and `url`, a link to
+    errors.pydantic.dev that leaks the library's internals. Neither belongs
+    in a response body, so neither is read here.
+    """
+    rendered: list[str] = []
+    for error in errors:
+        location = ".".join(str(part) for part in error.get("loc", ()))
+        message = str(error.get("msg", "")).strip()
+        rendered.append(f"{location}: {message}" if location and message else location or message)
+    return "; ".join(part for part in rendered if part) or "invalid input"

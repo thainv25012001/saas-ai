@@ -47,6 +47,38 @@ async def test_me_returns_the_current_user_and_org(client, auth_headers):
     }
 
 
+async def test_organization_returns_the_callers_own_org(client, auth_headers):
+    response = await graphql(
+        client,
+        "{ organization { id name slug plan createdAt } }",
+        headers=auth_headers,
+    )
+    organization = response.json()["data"]["organization"]
+    assert organization["name"] == "Ada Motors GQL"
+    assert organization["plan"] == "free"
+    assert organization["slug"]
+    assert organization["createdAt"]
+
+    me = await graphql(client, "{ me { organizationId } }", headers=auth_headers)
+    assert organization["id"] == me.json()["data"]["me"]["organizationId"]
+
+
+async def test_organization_requires_authentication(client):
+    response = await graphql(client, "{ organization { name } }")
+    assert response.json()["errors"][0]["extensions"]["code"] == "unauthenticated"
+
+
+async def test_organization_takes_no_id_argument(client, auth_headers):
+    """Scoping is a server-side decision: there is deliberately no way for a
+    caller to name which organization it wants."""
+    response = await graphql(
+        client,
+        'query { organization(id: "00000000-0000-0000-0000-000000000000") { name } }',
+        headers=auth_headers,
+    )
+    assert response.json()["errors"], "an id argument must not be accepted"
+
+
 async def test_create_agent_mutation(client, auth_headers):
     response = await graphql(
         client,

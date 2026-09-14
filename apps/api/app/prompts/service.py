@@ -65,7 +65,10 @@ class PromptService:
     async def create_version(self, prompt_id: uuid.UUID, data: CreateVersionInput) -> PromptVersion:
         await self.get_prompt(prompt_id)
         highest = await self.session.execute(
-            select(func.max(PromptVersion.version)).where(PromptVersion.prompt_id == prompt_id)
+            select(func.max(PromptVersion.version)).where(
+                PromptVersion.prompt_id == prompt_id,
+                PromptVersion.organization_id == self.tenant.organization_id,
+            )
         )
         version = PromptVersion(
             id=uuid7(),

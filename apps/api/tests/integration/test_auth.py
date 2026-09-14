@@ -117,11 +117,56 @@ async def test_email_uniqueness_is_case_insensitive(client, clean_users):
     assert response.status_code == 409
 
 
+SHORT_PASSWORD = "tooshortpw"  # distinctive: searched for verbatim below
+
+
 async def test_short_password_is_rejected(client, clean_users):
     response = await client.post(
-        "/api/v1/auth/register", json={**REGISTRATION, "password": "short"}
+        "/api/v1/auth/register", json={**REGISTRATION, "password": SHORT_PASSWORD}
     )
     assert response.status_code == 422
+
+
+async def test_short_password_rejection_uses_the_error_envelope(client, clean_users):
+    """FastAPI's built-in RequestValidationError handler answers
+    `{"detail": [...]}`, which apps/web/src/lib/api.ts cannot read a code out
+    of — every server-side validation failure would render as the generic
+    "Something went wrong. Please try again."."""
+    response = await client.post(
+        "/api/v1/auth/register", json={**REGISTRATION, "password": SHORT_PASSWORD}
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "invalid_input"
+    assert "password" in body["error"]["message"]
+    assert "detail" not in body
+
+
+async def test_rejected_registration_never_echoes_the_submitted_password(client, clean_users):
+    """Each entry in pydantic's error list carries an `input` key holding the
+    rejected value verbatim, so FastAPI's default handler ships the plaintext
+    password straight back in the response body. Asserting on the whole raw
+    text, not just the message, so no future envelope field can reintroduce
+    it."""
+    response = await client.post(
+        "/api/v1/auth/register", json={**REGISTRATION, "password": SHORT_PASSWORD}
+    )
+    assert SHORT_PASSWORD not in response.text
+    assert "errors.pydantic.dev" not in response.text
+
+
+async def test_unknown_route_uses_the_error_envelope(client):
+    """Starlette raises HTTPException for a path no route matches; without a
+    handler it answers `{"detail": "Not Found"}`, off-envelope."""
+    response = await client.get("/api/v1/auth/no-such-endpoint")
+    assert response.status_code == 404
+    assert response.json() == {"error": {"code": "not_found", "message": "Not Found"}}
+
+
+async def test_wrong_method_uses_the_error_envelope(client):
+    response = await client.get("/api/v1/auth/register")
+    assert response.status_code == 405
+    assert response.json()["error"]["code"] == "invalid_input"
 
 
 async def test_login_with_wrong_password_is_rejected(client, clean_users):

@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from app.agents import schemas as agent_schemas
 from app.agents.service import AgentService
-from app.core.errors import AuthenticationError
+from app.core.errors import AuthenticationError, format_validation_errors
 from app.core.errors import ValidationError as AppValidationError
 from app.db.models import Membership, Organization
 from app.db.models import User as UserModel
@@ -36,16 +36,15 @@ def _build[ModelT: BaseModel](schema_cls: type[ModelT], **fields: Any) -> ModelT
     client as a raw pydantic message (field paths, constraint internals, an
     errors.pydantic.dev URL) with no `extensions.code`. Route it through the
     app's own `ValidationError` instead, so it renders as `invalid_input`
-    with an actionable message.
+    with an actionable message. The rendering itself lives in
+    `app.core.errors.format_validation_errors`, shared with the REST
+    `RequestValidationError` handler so both surfaces say the same thing -
+    and so neither ever echoes the rejected `input` value back.
     """
     try:
         return schema_cls(**fields)
     except PydanticValidationError as exc:
-        detail = "; ".join(
-            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
-            for error in exc.errors()
-        )
-        raise AppValidationError(detail) from exc
+        raise AppValidationError(format_validation_errors(exc.errors())) from exc
 
 
 def _require_tenant(info: Info) -> None:
@@ -85,6 +84,9 @@ class Query:
             .join(Organization, Organization.id == Membership.organization_id)
             .where(
                 UserModel.id == tenant.user_id,
+                # REST /me rejects a deactivated account; without this the
+                # two surfaces disagree about who is still allowed in.
+                UserModel.is_active.is_(True),
                 Membership.organization_id == tenant.organization_id,
             )
         )
@@ -100,6 +102,26 @@ class Query:
             organization_name=organization.name,
             role=membership.role.value,
         )
+
+    @strawberry.field
+    async def organization(self, info: Info) -> gql.Organization:
+        """The caller's own organization. Takes no id argument on purpose: in
+        Phase 1 a token carries exactly one `org` claim and a caller belongs
+        to exactly one organization, so an id parameter would be a
+        tenant-scoping decision handed to the client — the one thing the
+        tenancy model never does."""
+        _require_tenant(info)
+        tenant = info.context.tenant
+        session = info.context.session
+        assert tenant is not None
+        assert session is not None
+        result = await session.execute(
+            select(Organization).where(Organization.id == tenant.organization_id)
+        )
+        organization = result.scalar_one_or_none()
+        if organization is None:
+            raise AuthenticationError("organization no longer exists")
+        return gql.Organization.from_model(organization)
 
     @strawberry.field
     async def agents(self, info: Info) -> list[gql.Agent]:
