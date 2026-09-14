@@ -1,0 +1,34 @@
+# Render blueprint for the API. Import it once (Render → Blueprints → New), then
+# fill in the secrets marked `sync: false` in the dashboard. Deploys are driven
+# by .github/workflows/deploy.yml, not by Render's own git watcher.
+services:
+  - type: web
+    name: saas-ai-api
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: ./apps/api
+    healthCheckPath: /health
+    # CI must pass and migrations must run before new code serves traffic, so
+    # the GitHub Actions workflow triggers deploys instead of a push doing it.
+    autoDeploy: false
+    envVars:
+      # Neon pooled connection as app_user, Neon direct/owner as app_owner.
+      # asyncpg does not understand `sslmode`; the URLs must end in `?ssl=require`.
+      - key: DATABASE_URL
+        sync: false
+      - key: MIGRATION_DATABASE_URL
+        sync: false
+      # Upstash TLS endpoint: rediss://default:<password>@<host>:6379
+      - key: REDIS_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      # The deployed Vercel origin(s), comma separated.
+      - key: CORS_ORIGINS
+        sync: false
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
