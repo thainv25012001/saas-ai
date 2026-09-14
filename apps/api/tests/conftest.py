@@ -8,6 +8,8 @@ from httpx import ASGITransport, AsyncClient
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncConnection
 
+    from app.core.tenancy import TenantContext
+
 # Set before importing the app: Settings reads the environment at import time.
 os.environ.setdefault(
     "DATABASE_URL",
@@ -75,3 +77,47 @@ async def _flush_rate_limits() -> None:
     keys = [key async for key in redis.scan_iter("ratelimit:*")]
     if keys:
         await redis.delete(*keys)
+
+
+@pytest.fixture
+async def tenant_a(owner_connection: "AsyncConnection") -> AsyncIterator["TenantContext"]:
+    """A real organization plus a TenantContext for it, torn down after."""
+    async for context in _make_tenant(owner_connection, "Tenant A"):
+        yield context
+
+
+@pytest.fixture
+async def tenant_b(owner_connection: "AsyncConnection") -> AsyncIterator["TenantContext"]:
+    async for context in _make_tenant(owner_connection, "Tenant B"):
+        yield context
+
+
+async def _make_tenant(
+    owner_connection: "AsyncConnection", name: str
+) -> AsyncIterator["TenantContext"]:
+    from sqlalchemy import text
+
+    from app.core.ids import uuid7
+    from app.core.tenancy import TenantContext
+    from app.db.models import MembershipRole
+
+    org_id, user_id = uuid7(), uuid7()
+    slug = f"{name.lower().replace(' ', '-')}-{org_id.hex[:8]}"
+    await owner_connection.execute(
+        text(
+            "INSERT INTO organizations (id, name, slug, plan, settings) "
+            "VALUES (:id, :name, :slug, 'free', '{}')"
+        ),
+        {"id": org_id, "name": name, "slug": slug},
+    )
+    await owner_connection.commit()
+
+    yield TenantContext(
+        organization_id=org_id,
+        user_id=user_id,
+        role=MembershipRole.OWNER,
+        request_id="test",
+    )
+
+    await owner_connection.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": org_id})
+    await owner_connection.commit()
