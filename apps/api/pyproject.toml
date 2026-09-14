@@ -16,6 +16,7 @@ dependencies = [
     "redis>=5.2",
     "python-slugify>=8.0",
     "email-validator>=2.2",
+    "strawberry-graphql[fastapi,cli]>=0.248",
 ]
 
 [dependency-groups]

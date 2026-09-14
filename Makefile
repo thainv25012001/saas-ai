@@ -30,3 +30,8 @@ migrate:
 
 revision:
 	cd apps/api && uv run alembic revision -m "$(m)"
+
+.PHONY: schema
+
+schema:
+	cd apps/api && uv run strawberry export-schema app.graphql.schema:schema > ../../packages/shared/schema.graphql

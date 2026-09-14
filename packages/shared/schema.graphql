@@ -1,0 +1,123 @@
+type Agent {
+  id: UUID!
+  name: String!
+  slug: String!
+  status: AgentStatus!
+  provider: String!
+  model: String!
+  temperature: Float!
+  maxTokens: Int!
+  promptId: UUID
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  config: AgentConfig
+}
+
+type AgentConfig {
+  id: UUID!
+  tone: String!
+  language: String!
+  persona: String
+  greeting: String
+  fallbackMessage: String!
+  enabledToolNames: [String!]!
+  retrievalTopK: Int!
+  retrievalMinScore: Float!
+  maxAgentSteps: Int!
+}
+
+enum AgentStatus {
+  DRAFT
+  ACTIVE
+  DISABLED
+}
+
+input CreateAgentInput {
+  name: String!
+  provider: String! = "openai"
+  model: String! = "gpt-4o-mini"
+  temperature: Float! = 0.3
+  maxTokens: Int! = 1024
+}
+
+input CreatePromptInput {
+  name: String!
+  key: String!
+  systemPrompt: String!
+  description: String = null
+}
+
+input CreatePromptVersionInput {
+  systemPrompt: String!
+  notes: String = null
+}
+
+"""Date with time (isoformat)"""
+scalar DateTime
+
+type Me {
+  userId: UUID!
+  email: String!
+  fullName: String!
+  organizationId: UUID!
+  organizationName: String!
+  role: String!
+}
+
+type Mutation {
+  createAgent(input: CreateAgentInput!): Agent!
+  updateAgent(id: UUID!, input: UpdateAgentInput!): Agent!
+  updateAgentConfig(agentId: UUID!, input: UpdateAgentConfigInput!): AgentConfig!
+  deleteAgent(id: UUID!): Boolean!
+  createPrompt(input: CreatePromptInput!): Prompt!
+  createPromptVersion(promptId: UUID!, input: CreatePromptVersionInput!): PromptVersion!
+  activatePromptVersion(versionId: UUID!): PromptVersion!
+}
+
+type Prompt {
+  id: UUID!
+  name: String!
+  key: String!
+  description: String
+  createdAt: DateTime!
+}
+
+type PromptVersion {
+  id: UUID!
+  version: Int!
+  systemPrompt: String!
+  isActive: Boolean!
+  notes: String
+  createdAt: DateTime!
+}
+
+type Query {
+  me: Me!
+  agents: [Agent!]!
+  agent(id: UUID!): Agent!
+  prompts: [Prompt!]!
+  prompt(id: UUID!): Prompt!
+}
+
+scalar UUID
+
+input UpdateAgentConfigInput {
+  persona: String = null
+  tone: String = null
+  language: String = null
+  greeting: String = null
+  fallbackMessage: String = null
+  enabledToolNames: [String!] = null
+  retrievalTopK: Int = null
+  retrievalMinScore: Float = null
+  maxAgentSteps: Int = null
+}
+
+input UpdateAgentInput {
+  name: String = null
+  status: AgentStatus = null
+  provider: String = null
+  model: String = null
+  temperature: Float = null
+  maxTokens: Int = null
+}

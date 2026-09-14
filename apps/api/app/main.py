@@ -50,6 +50,23 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(auth.router)
+
+    from strawberry.fastapi import GraphQLRouter
+
+    from app.graphql.context import build_context
+    from app.graphql.schema import schema
+
+    app.include_router(
+        GraphQLRouter(
+            schema,
+            context_getter=build_context,
+            # strawberry-graphql>=0.250 renamed the boolean `graphiql` flag to
+            # `graphql_ide`, which takes the IDE name or None.
+            graphql_ide="graphiql" if settings.environment == "local" else None,
+        ),
+        prefix="/graphql",
+    )
+
     return app
 
 
