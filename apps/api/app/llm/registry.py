@@ -50,9 +50,9 @@ def _build(name: str) -> LLMProvider:
         # the fake-provider path everything in this phase runs against — keeps
         # importing cleanly before it exists, and so a missing optional SDK at
         # runtime never breaks the fake path.
-        from app.llm.openai_provider import OpenAIProvider  # type: ignore[import-not-found]
+        from app.llm.openai_provider import OpenAIProvider
 
-        return OpenAIProvider(api_key=settings.openai_api_key)  # type: ignore[no-any-return]
+        return OpenAIProvider(api_key=settings.openai_api_key)
 
     if not settings.anthropic_api_key:
         raise LLMConfigurationError(

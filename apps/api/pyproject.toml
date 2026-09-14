@@ -18,6 +18,7 @@ dependencies = [
     "email-validator>=2.2",
     "strawberry-graphql[fastapi]>=0.248",
     "anthropic>=0.40",
+    "openai>=1.50",
 ]
 
 [dependency-groups]
