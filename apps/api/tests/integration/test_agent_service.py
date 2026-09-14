@@ -2,7 +2,7 @@ import pytest
 
 from app.agents.schemas import CreateAgentInput, UpdateAgentConfigInput, UpdateAgentInput
 from app.agents.service import AgentService
-from app.core.errors import ConflictError, NotFoundError
+from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.core.tenancy import tenant_session
 
 pytestmark = pytest.mark.anyio
@@ -81,6 +81,24 @@ async def test_update_agent_changes_only_supplied_fields(tenant_a):
     assert updated.model == "gpt-4o-mini"
 
 
+async def test_update_agent_with_an_invalid_status_is_a_validation_error(tenant_a):
+    async with tenant_session(tenant_a) as session:
+        service = AgentService(session, tenant_a)
+        agent = await service.create_agent(CreateAgentInput(name="Sales Bot"))
+        with pytest.raises(ValidationError):
+            await service.update_agent(agent.id, UpdateAgentInput(status="bogus"))
+
+
+async def test_update_agent_from_another_org_raises_not_found(tenant_a, tenant_b):
+    async with tenant_session(tenant_a) as session:
+        agent = await AgentService(session, tenant_a).create_agent(CreateAgentInput(name="A Bot"))
+    async with tenant_session(tenant_b) as session:
+        with pytest.raises(NotFoundError):
+            await AgentService(session, tenant_b).update_agent(
+                agent.id, UpdateAgentInput(temperature=0.5)
+            )
+
+
 async def test_update_config_persists(tenant_a):
     async with tenant_session(tenant_a) as session:
         service = AgentService(session, tenant_a)
@@ -90,6 +108,16 @@ async def test_update_config_persists(tenant_a):
         )
     assert config.tone == "formal"
     assert config.retrieval_top_k == 8
+
+
+async def test_update_config_from_another_org_raises_not_found(tenant_a, tenant_b):
+    async with tenant_session(tenant_a) as session:
+        agent = await AgentService(session, tenant_a).create_agent(CreateAgentInput(name="A Bot"))
+    async with tenant_session(tenant_b) as session:
+        with pytest.raises(NotFoundError):
+            await AgentService(session, tenant_b).update_config(
+                agent.id, UpdateAgentConfigInput(tone="formal")
+            )
 
 
 async def test_delete_removes_the_agent(tenant_a):

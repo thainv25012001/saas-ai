@@ -12,7 +12,7 @@ from app.agents.schemas import (
     UpdateAgentConfigInput,
     UpdateAgentInput,
 )
-from app.core.errors import ConflictError, NotFoundError
+from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.core.ids import uuid7
 from app.core.tenancy import TenantContext
 from app.db.models import Agent, AgentConfig, AgentStatus
@@ -91,7 +91,19 @@ class AgentService:
         if "name" in updates:
             agent.slug = slugify(updates["name"])[:120] or "agent"
         if "status" in updates:
-            agent.status = AgentStatus(updates.pop("status"))
+            raw_status = updates.pop("status")
+            try:
+                agent.status = AgentStatus(raw_status)
+            except ValueError as exc:
+                # A caller-supplied string, not a token or any other trusted
+                # input - name the valid options so the caller can act on it.
+                # See app/auth/dependencies.py for the same ValueError ->
+                # domain-error conversion for MembershipRole; here the value
+                # comes from the request, not from a signed token, so
+                # ValidationError (422, invalid_input) is the right domain
+                # error rather than an auth error.
+                valid = ", ".join(status.value for status in AgentStatus)
+                raise ValidationError(f"status must be one of: {valid}") from exc
         for field, value in updates.items():
             setattr(agent, field, value)
 
