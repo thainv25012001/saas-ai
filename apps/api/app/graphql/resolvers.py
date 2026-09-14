@@ -1,11 +1,15 @@
 import uuid
+from typing import Any
 
 import strawberry
+from pydantic import BaseModel
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import select
 
 from app.agents import schemas as agent_schemas
 from app.agents.service import AgentService
 from app.core.errors import AuthenticationError
+from app.core.errors import ValidationError as AppValidationError
 from app.db.models import Membership, Organization
 from app.db.models import User as UserModel
 from app.graphql import types as gql
@@ -14,6 +18,34 @@ from app.prompts import schemas as prompt_schemas
 from app.prompts.service import PromptService
 
 Info = strawberry.Info[Context, None]
+
+
+def _build[ModelT: BaseModel](schema_cls: type[ModelT], **fields: Any) -> ModelT:
+    """Construct a pydantic input model from GraphQL input fields.
+
+    Named `schema_cls`/`fields` rather than `model`/`kwargs`: several of the
+    schemas being built (e.g. `CreateAgentInput`) have their own field
+    literally named `model` (the LLM model id), which would collide with a
+    parameter of that name.
+
+    `agent_schemas`/`prompt_schemas` models carry constraints (e.g.
+    `temperature: ge=0.0, le=2.0`) that the GraphQL input types themselves do
+    not enforce. `pydantic.ValidationError` is a different class from
+    `app.core.errors.ValidationError`, so without this translation it would
+    fall through the schema's `AppErrorExtension` unrecognised - reaching the
+    client as a raw pydantic message (field paths, constraint internals, an
+    errors.pydantic.dev URL) with no `extensions.code`. Route it through the
+    app's own `ValidationError` instead, so it renders as `invalid_input`
+    with an actionable message.
+    """
+    try:
+        return schema_cls(**fields)
+    except PydanticValidationError as exc:
+        detail = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+            for error in exc.errors()
+        )
+        raise AppValidationError(detail) from exc
 
 
 def _require_tenant(info: Info) -> None:
@@ -91,7 +123,8 @@ class Mutation:
     @strawberry.mutation
     async def create_agent(self, info: Info, input: gql.CreateAgentInput) -> gql.Agent:
         agent = await _agents(info).create_agent(
-            agent_schemas.CreateAgentInput(
+            _build(
+                agent_schemas.CreateAgentInput,
                 name=input.name,
                 provider=input.provider,
                 model=input.model,
@@ -105,7 +138,8 @@ class Mutation:
     async def update_agent(
         self, info: Info, id: uuid.UUID, input: gql.UpdateAgentInput
     ) -> gql.Agent:
-        payload = agent_schemas.UpdateAgentInput(
+        payload = _build(
+            agent_schemas.UpdateAgentInput,
             name=input.name,
             status=input.status.value if input.status else None,
             provider=input.provider,
@@ -122,7 +156,8 @@ class Mutation:
         agent_id: uuid.UUID,
         input: gql.UpdateAgentConfigInput,
     ) -> gql.AgentConfig:
-        payload = agent_schemas.UpdateAgentConfigInput(
+        payload = _build(
+            agent_schemas.UpdateAgentConfigInput,
             persona=input.persona,
             tone=input.tone,
             language=input.language,
@@ -144,7 +179,8 @@ class Mutation:
     @strawberry.mutation
     async def create_prompt(self, info: Info, input: gql.CreatePromptInput) -> gql.Prompt:
         prompt = await _prompts(info).create_prompt(
-            prompt_schemas.CreatePromptInput(
+            _build(
+                prompt_schemas.CreatePromptInput,
                 name=input.name,
                 key=input.key,
                 description=input.description,
@@ -162,7 +198,11 @@ class Mutation:
     ) -> gql.PromptVersion:
         version = await _prompts(info).create_version(
             prompt_id,
-            prompt_schemas.CreateVersionInput(system_prompt=input.system_prompt, notes=input.notes),
+            _build(
+                prompt_schemas.CreateVersionInput,
+                system_prompt=input.system_prompt,
+                notes=input.notes,
+            ),
         )
         return gql.PromptVersion.from_model(version)
 

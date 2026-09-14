@@ -111,6 +111,17 @@ class AgentService:
             await self.session.flush()
         except IntegrityError as exc:
             raise ConflictError("an agent with that name already exists") from exc
+
+        # `updated_at` (onupdate=func.now()) is expired by the flush above
+        # rather than populated eagerly, because this UPDATE only recomputes
+        # it when the row already exists (unlike an INSERT, where `flush()`
+        # eagerly returns every server-generated column). A later plain
+        # attribute access - e.g. GraphQL's Agent.from_model reading
+        # `model.updated_at` - would trigger a lazy reload synchronously,
+        # which raises `MissingGreenlet` outside of an active async context.
+        # `refresh()` reloads it here, through the session's own async path,
+        # while we can still safely await.
+        await self.session.refresh(agent)
         return agent
 
     async def update_config(self, agent_id: uuid.UUID, data: UpdateAgentConfigInput) -> AgentConfig:

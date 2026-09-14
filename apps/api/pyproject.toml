@@ -16,7 +16,7 @@ dependencies = [
     "redis>=5.2",
     "python-slugify>=8.0",
     "email-validator>=2.2",
-    "strawberry-graphql[fastapi,cli]>=0.248",
+    "strawberry-graphql[fastapi]>=0.248",
 ]
 
 [dependency-groups]
@@ -26,6 +26,10 @@ dev = [
     "httpx>=0.27",
     "ruff>=0.7",
     "mypy>=1.13",
+    # Only for `uv run strawberry export-schema` (see Makefile's `schema`
+    # target). The CLI needs typer/rich/etc, which have no business in the
+    # production dependency closure just so a developer command works.
+    "strawberry-graphql[cli]",
 ]
 
 [tool.pytest.ini_options]
@@ -46,3 +50,13 @@ plugins = []
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+[tool.uv]
+# strawberry-graphql's `cli` extra (dev-only, above) caps websockets<17 for
+# its own dev-server/subscriptions tooling. uv resolves one shared
+# environment for base + dev dependencies, so without this override that cap
+# would silently drag the whole project's websockets down from 17.x to
+# 16.x - a package uvicorn[standard] also depends on, with no such cap. The
+# `cli` extra is only ever used here for `strawberry export-schema`, which
+# does not touch websockets at all, so forcing >=17 is safe.
+override-dependencies = ["websockets>=17"]

@@ -49,7 +49,24 @@ class Context(BaseContext):
 
 async def build_context(request: Request) -> AsyncIterator[Context]:
     """A generator dependency: FastAPI holds it open for the whole request, so
-    the tenant session and its transaction stay alive while resolvers run."""
+    the tenant session and its transaction stay alive while resolvers run.
+
+    Trade-off, documented rather than latent: one transaction spans the whole
+    GraphQL operation. For the normal shape of a client request - one query
+    or one mutation per operation - this is exactly what we want: `me` and
+    `agents` see a consistent snapshot, and a failed mutation rolls back
+    everything it touched.
+
+    It does mean a multi-root operation with several top-level mutation
+    fields, e.g. `mutation { a: createAgent(...) b: createAgent(...) }`,
+    does not get per-field atomicity: if `b` fails after `a` already flushed,
+    `data.a` still comes back populated in the response even though `a` was
+    never committed (the whole transaction rolls back when the request ends
+    without a commit), and any resolver that runs after the failure raises
+    SQLAlchemy's `PendingRollbackError` because the session is left in a
+    failed-transaction state. Client code that only ever sends single-root
+    operations - the normal case - never observes this.
+    """
     try:
         tenant = tenant_from_bearer(request)
     except AuthenticationError:
