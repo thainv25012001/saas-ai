@@ -68,11 +68,12 @@ async def test_targeting_another_tenants_row_by_id_returns_nothing(two_orgs):
 
 
 async def test_insert_for_another_tenant_is_rejected(two_orgs):
-    """WITH CHECK: a tenant cannot write a row it would not be able to read."""
+    """A tenant cannot write a row it would not be able to read: the policy
+    rejects the cross-tenant insert rather than silently scoping it."""
     from sqlalchemy.exc import DBAPIError
 
     org_a, org_b = two_orgs
-    with pytest.raises(DBAPIError):
+    with pytest.raises(DBAPIError, match="row-level security"):
         async with tenant_session(_context(org_a)) as session:
             await session.execute(
                 text(
@@ -87,7 +88,7 @@ async def test_update_cannot_move_a_row_to_another_tenant(two_orgs):
     from sqlalchemy.exc import DBAPIError
 
     org_a, org_b = two_orgs
-    with pytest.raises(DBAPIError):
+    with pytest.raises(DBAPIError, match="row-level security"):
         async with tenant_session(_context(org_a)) as session:
             await session.execute(
                 text("UPDATE rls_probe SET organization_id = :org"), {"org": org_b}
@@ -103,28 +104,52 @@ async def test_setting_does_not_leak_between_sessions(two_orgs):
     value, which would make this test pass even if the underlying
     set_config used session scope (is_local=false) instead of transaction
     scope. Instead it opens a bare, un-tenanted session on the same pool
-    (only one connection has ever been opened at this point, so the
-    checkout below is guaranteed to be that exact connection) and checks
-    that org_a's setting did not survive past its transaction's commit.
+    and checks that org_a's setting did not survive past its transaction's
+    commit.
+
+    `current != str(org_a)` alone would also pass if the pool simply handed
+    back a *different*, never-used backend (where the setting is NULL) --
+    that would prove nothing about leaking. pg_backend_pid() pins both
+    blocks to the same physical backend, so the second assertion is
+    actually exercising this connection's post-commit state, not a fresh
+    one. And per NULLIF's contract (see enable_rls), a warm backend whose
+    tenant transaction has ended reports '' -- not NULL -- so that is the
+    literal value asserted here, rather than a looser not-equal check.
+    """
+    from app.db.session import session_factory
+
+    org_a, _org_b = two_orgs
+    async with tenant_session(_context(org_a)) as session:
+        pid_during = (await session.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+
+    async with session_factory() as session:
+        async with session.begin():
+            pid_after = (await session.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+            current = (
+                await session.execute(text("SELECT current_setting('app.current_org_id', true)"))
+            ).scalar_one()
+    assert pid_after == pid_during
+    assert current == ""
+
+
+async def test_missing_tenant_setting_yields_no_rows(two_orgs):
+    """An unset context must be an empty result, never an error and never
+    every row -- including on a connection that has already served a
+    tenant request.
+
+    A virgin backend that has never run SET LOCAL app.current_org_id
+    reports it as NULL. But once any transaction on a backend has set it,
+    the custom GUC placeholder does not revert to NULL when that
+    transaction ends -- it reverts to the empty string. A pooled
+    connection is exactly this: warm, not virgin. So this test
+    deliberately runs a tenant_session first, on the same pooled
+    connection, before performing the untenanted read.
     """
     from app.db.session import session_factory
 
     org_a, _org_b = two_orgs
     async with tenant_session(_context(org_a)) as session:
         await session.execute(text("SELECT 1"))
-
-    async with session_factory() as session:
-        async with session.begin():
-            current = (
-                await session.execute(text("SELECT current_setting('app.current_org_id', true)"))
-            ).scalar_one()
-    assert current != str(org_a)
-
-
-async def test_missing_tenant_setting_yields_no_rows(two_orgs):
-    """An unset context must be an empty result, never an error and never
-    every row."""
-    from app.db.session import session_factory
 
     async with session_factory() as session:
         async with session.begin():

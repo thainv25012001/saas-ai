@@ -52,14 +52,25 @@ def enable_rls(op: Any, table: str) -> None:
 
     The policy reads a per-transaction setting written by the tenant session
     dependency (see app/core/tenancy.py). The `true` second argument to
-    current_setting makes a missing setting return NULL rather than raise,
-    so an unset context yields zero rows instead of a 500.
+    current_setting makes a *virgin* backend -- one that has never run
+    `SET LOCAL app.current_org_id` -- report it as NULL rather than raise.
+
+    That is not the only case that matters. Once any transaction on a
+    backend has set this custom GUC, the placeholder Postgres creates for
+    it does not revert to NULL when that transaction ends: it reverts to
+    the empty string ''. A pooled connection that has already served one
+    tenant request is exactly this warmed state, and `''::uuid` raises
+    `invalid input syntax for type uuid`, not "no rows". NULLIF(..., '')
+    collapses that empty string back to NULL before the cast, so both a
+    virgin backend and a warm, previously-tenanted one fail closed to zero
+    rows instead of a 500.
     """
+    guarded = "NULLIF(current_setting('app.current_org_id', true), '')::uuid"
     op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
     op.execute(
         f"CREATE POLICY tenant_isolation ON {table} "
-        "USING (organization_id = current_setting('app.current_org_id', true)::uuid) "
-        "WITH CHECK (organization_id = current_setting('app.current_org_id', true)::uuid)"
+        f"USING (organization_id = {guarded}) "
+        f"WITH CHECK (organization_id = {guarded})"
     )
 
 

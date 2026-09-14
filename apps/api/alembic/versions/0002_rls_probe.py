@@ -1,5 +1,14 @@
 """rls_probe: a minimal tenant-owned table used to test RLS itself
 
+WARNING for anyone running `alembic revision --autogenerate`: rls_probe has
+no ORM model (it exists only as a migration-defined fixture for
+tests/integration/test_rls.py), and alembic/env.py's target_metadata has no
+include_object filter excluding it. Autogenerate will therefore diff this
+table against Base.metadata, find it unrepresented, and propose
+`op.drop_table("rls_probe")` -- silently deleting the fixture the entire RLS
+test suite depends on. Reject that op if it ever appears in a generated
+migration.
+
 Revision ID: 0002_rls_probe
 Revises: 0001_identity
 """
