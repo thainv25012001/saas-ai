@@ -10,12 +10,14 @@ from app.chat.service import (
     ChatTextDelta,
 )
 from app.conversations.service import ConversationService
+from app.core.config import get_settings
 from app.core.errors import NotFoundError
 from app.core.tenancy import tenant_session
 from app.db.models import MessageRole
-from app.llm.errors import LLMUnavailableError
+from app.llm.errors import LLMConfigurationError, LLMUnavailableError
 from app.llm.fake_provider import FakeProvider
 from app.llm.pricing import estimate_cost
+from app.llm.registry import reset_providers
 from app.llm.types import Usage
 from app.prompts.schemas import CreatePromptInput, CreateVersionInput
 from app.prompts.service import PromptService
@@ -74,6 +76,9 @@ async def test_user_and_assistant_messages_are_persisted_with_sequential_seq(ten
     assert [m.seq for m in history] == [1, 2]
     assert history[0].content == "Hello"
     assert history[1].content == "Hi there"
+    # No prompt was configured on the agent, so the fallback default was
+    # used -- prompt_version_id must be None, not a fabricated id.
+    assert history[1].prompt_version_id is None
 
 
 async def test_assistant_message_records_the_estimated_cost(tenant_a):
@@ -120,11 +125,18 @@ async def test_system_prompt_uses_the_active_prompt_version_not_an_older_one(ten
         await session.flush()
 
         service = ChatService(session, tenant_a, provider_override=provider)
-        _ = [event async for event in service.send(agent.id, "Hello")]
+        events = [event async for event in service.send(agent.id, "Hello")]
 
     assert provider.last_request is not None
     assert "v2 UNIQUE MARKER" in provider.last_request.system
     assert "v1 text" not in provider.last_request.system
+
+    # The persisted assistant message must record *which* version answered --
+    # this is the traceability link PHASE-2.md ties Phase 5's evaluation to.
+    conversation_id = next(e.conversation_id for e in events if isinstance(e, ChatMessageStart))
+    async with tenant_session(tenant_a) as session:
+        history = await ConversationService(session, tenant_a).history(conversation_id)
+    assert history[1].prompt_version_id == v2.id
 
 
 async def test_company_name_is_substituted_and_no_placeholder_remains(tenant_a):
@@ -305,3 +317,36 @@ async def test_without_a_provider_override_it_resolves_the_provider_via_the_regi
 
     deltas = "".join(e.text for e in events if isinstance(e, ChatTextDelta))
     assert deltas != ""
+
+
+async def test_provider_resolution_happens_before_any_conversation_is_created(
+    tenant_a, monkeypatch
+):
+    """`send()` resolves the provider right after loading the agent/config --
+    before the conversation is created or the user message is persisted --
+    so a misconfigured provider (a missing API key) never leaves an orphan
+    conversation behind. Patches what the registry actually reads rather than
+    relying on the ambient environment lacking a key, mirroring
+    tests/unit/test_registry.py's own `openai_without_a_key` test.
+
+    Verified by hand that moving the `get_provider(agent.provider)` call in
+    `ChatService.send` to after `self._conversations.create(...)` makes this
+    test fail: the conversation is created (so `conversations == []` no
+    longer holds) before `LLMConfigurationError` is raised. See the task
+    report for the verbatim before/after run.
+    """
+    base = get_settings()
+    no_key_settings = base.model_copy(update={"anthropic_api_key": None})
+    monkeypatch.setattr("app.llm.registry.get_settings", lambda: no_key_settings)
+    reset_providers()
+    try:
+        async with tenant_session(tenant_a) as session:
+            agent = await _agent(session, tenant_a, provider="anthropic", model="claude-sonnet-5")
+            service = ChatService(session, tenant_a)  # no override: forces the registry lookup
+            with pytest.raises(LLMConfigurationError):
+                _ = [event async for event in service.send(agent.id, "Hello")]
+
+            conversations = await ConversationService(session, tenant_a).list_for_agent(agent.id)
+        assert conversations == []
+    finally:
+        reset_providers()

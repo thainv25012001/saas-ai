@@ -191,6 +191,13 @@ class ChatService:
         started_at = time.monotonic()
 
         try:
+            # `StreamEvent` also declares `ErrorEvent`, deliberately unhandled
+            # here: no provider today constructs one -- every provider
+            # signals failure by *raising* (caught below as `AppError`), not
+            # by yielding an in-band error event. If a future provider ever
+            # signals failure that way instead, this loop would currently
+            # treat the truncated stream as a normal success. Whoever adds
+            # such a provider needs to add a branch here for it.
             async for event in provider.stream(request):
                 if event.type == "text_delta":
                     accumulated.append(event.text)
