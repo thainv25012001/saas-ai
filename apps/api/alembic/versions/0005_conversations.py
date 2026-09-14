@@ -15,6 +15,21 @@ down_revision = "0004_prompts"
 branch_labels = None
 depends_on = None
 
+_TIMESTAMPS = (
+    sa.Column(
+        "created_at",
+        sa.DateTime(timezone=True),
+        server_default=sa.func.now(),
+        nullable=False,
+    ),
+    sa.Column(
+        "updated_at",
+        sa.DateTime(timezone=True),
+        server_default=sa.func.now(),
+        nullable=False,
+    ),
+)
+
 
 def upgrade() -> None:
     op.create_table(
@@ -47,12 +62,15 @@ def upgrade() -> None:
         sa.Column("title", sa.String(255), nullable=True),
         sa.Column("summary", sa.Text(), nullable=True),
         sa.Column("metadata", postgresql.JSONB(), nullable=False, server_default="{}"),
-        sa.Column(
-            "started_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.func.now(),
-            nullable=False,
-        ),
+        # Deviation from ARCHITECTURE.md §3.5's literal field list (which
+        # names `started_at` instead of created_at/updated_at), resolved by
+        # review during Task 5 in favor of §3's blanket "created_at /
+        # updated_at on every table" rule and Phase 1's precedent
+        # (prompts/prompt_versions use the same pair despite a similar
+        # per-table omission). `created_at` already *is* "when this
+        # conversation started", so a separate `started_at` column would
+        # only duplicate it.
+        *_TIMESTAMPS,
         sa.Column("last_message_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("closed_at", sa.DateTime(timezone=True), nullable=True),
     )
@@ -99,12 +117,10 @@ def upgrade() -> None:
         sa.Column("latency_ms", sa.Integer(), nullable=True),
         sa.Column("finish_reason", sa.String(50), nullable=True),
         sa.Column("error", sa.Text(), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.func.now(),
-            nullable=False,
-        ),
+        # `messages` rows are append-only — `updated_at` is never touched
+        # after insert — but it is carried anyway for consistency with every
+        # other table in the schema. See the note on `conversations` above.
+        *_TIMESTAMPS,
         sa.UniqueConstraint("conversation_id", "seq", name="uq_message_conversation_seq"),
     )
     op.create_index("ix_messages_organization_id", "messages", ["organization_id"])
@@ -141,12 +157,7 @@ def upgrade() -> None:
         sa.Column("input_tokens", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("output_tokens", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("cost_usd", sa.Numeric(12, 6), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.func.now(),
-            nullable=False,
-        ),
+        *_TIMESTAMPS,
     )
     op.create_index("ix_usage_events_organization_id", "usage_events", ["organization_id"])
     enable_rls(op, "usage_events")

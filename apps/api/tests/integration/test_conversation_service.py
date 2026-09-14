@@ -10,7 +10,7 @@ from app.conversations.schemas import (
     RecordUsageInput,
 )
 from app.conversations.service import ConversationService
-from app.core.errors import NotFoundError
+from app.core.errors import ConflictError, NotFoundError
 from app.core.ids import uuid7
 from app.core.tenancy import tenant_session
 from app.db.models import ConversationChannel, ConversationMessage, MessageRole, UsageKind
@@ -56,6 +56,37 @@ async def test_create_for_an_agent_from_another_tenant_raises_not_found(tenant_a
         with pytest.raises(NotFoundError):
             await ConversationService(session, tenant_b).create(
                 agent.id, CreateConversationInput(channel=ConversationChannel.PLAYGROUND)
+            )
+
+
+async def test_append_message_with_a_colliding_seq_raises_conflict(tenant_a):
+    """`next_seq`'s `SELECT MAX(seq) + 1` is a best-effort computation, not a
+    lock: two concurrent appends can compute the same next value. The
+    `(conversation_id, seq)` unique constraint is the real backstop, and
+    `append_message` must translate the resulting `IntegrityError` into
+    `ConflictError` rather than letting it propagate raw.
+
+    Forces the collision deterministically — by making `next_seq` return an
+    already-used value — rather than relying on a genuine race under test,
+    which would be flaky. Verified by hand that removing the `try/except`
+    around the flush in `append_message` makes this fail (with a raw
+    `IntegrityError` instead of `ConflictError`), and that every other test
+    still passes: this branch is not free to delete."""
+    async with tenant_session(tenant_a) as session:
+        service = ConversationService(session, tenant_a)
+        conversation = await _conversation(session, tenant_a)
+        await service.append_message(
+            conversation.id, AppendMessageInput(role=MessageRole.USER, content="first")
+        )
+
+        async def _always_seq_one(_conversation_id: object) -> int:
+            return 1
+
+        service.next_seq = _always_seq_one  # type: ignore[method-assign]
+
+        with pytest.raises(ConflictError):
+            await service.append_message(
+                conversation.id, AppendMessageInput(role=MessageRole.USER, content="collides")
             )
 
 
@@ -177,3 +208,42 @@ async def test_record_usage_writes_a_row_scoped_to_the_tenant(tenant_a):
     assert event.organization_id == tenant_a.organization_id
     assert event.input_tokens == 100
     assert event.cost_usd == Decimal("0.000123")
+
+
+async def test_record_usage_with_an_agent_from_another_tenant_raises_not_found(tenant_a, tenant_b):
+    """Without this check, record_usage would happily INSERT a usage_events
+    row whose agent_id FK genuinely references another org's agent: the FK
+    constraint is enforced with elevated privileges and does not consult
+    this session's RLS policy, so it would not stop the write. RLS still
+    hides the resulting row from tenant_b afterwards, but the accounting
+    substrate would be left holding a cross-tenant reference no query ever
+    validated."""
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+    async with tenant_session(tenant_b) as session:
+        with pytest.raises(NotFoundError):
+            await ConversationService(session, tenant_b).record_usage(
+                RecordUsageInput(
+                    agent_id=agent.id,
+                    kind=UsageKind.LLM,
+                    provider="openai",
+                    model="gpt-4o-mini",
+                )
+            )
+
+
+async def test_record_usage_with_a_conversation_from_another_tenant_raises_not_found(
+    tenant_a, tenant_b
+):
+    async with tenant_session(tenant_a) as session:
+        conversation = await _conversation(session, tenant_a)
+    async with tenant_session(tenant_b) as session:
+        with pytest.raises(NotFoundError):
+            await ConversationService(session, tenant_b).record_usage(
+                RecordUsageInput(
+                    conversation_id=conversation.id,
+                    kind=UsageKind.LLM,
+                    provider="openai",
+                    model="gpt-4o-mini",
+                )
+            )

@@ -17,6 +17,11 @@ class ConversationService:
         self.tenant = tenant
 
     async def create(self, agent_id: uuid.UUID, data: CreateConversationInput) -> Conversation:
+        # Load-bearing, not belt-and-braces: a Postgres FK check bypasses the
+        # referencing session's RLS policy, so without this explicit,
+        # tenant-scoped SELECT the INSERT below would happily create a
+        # conversation whose agent_id FK points at another org's agent. See
+        # the longer note on record_usage(), which has the same shape.
         result = await self.session.execute(
             select(Agent.id).where(
                 Agent.id == agent_id,
@@ -60,7 +65,7 @@ class ConversationService:
                 Conversation.agent_id == agent_id,
                 Conversation.organization_id == self.tenant.organization_id,
             )
-            .order_by(Conversation.started_at.desc())
+            .order_by(Conversation.created_at.desc())
         )
         return list(result.scalars().all())
 
@@ -140,6 +145,28 @@ class ConversationService:
         return message
 
     async def record_usage(self, data: RecordUsageInput) -> UsageEvent:
+        # Postgres FK integrity checks run with elevated privileges and are
+        # not subject to the referencing session's RLS `USING` policy — a
+        # SELECT under this tenant's RLS sees zero rows for another org's
+        # agent/conversation, but an INSERT whose FK merely points at that
+        # row still succeeds. RLS therefore protects reads of this table
+        # (nobody outside the org can see the row afterwards) but does
+        # nothing to stop it from being *written* with a dangling
+        # cross-tenant reference. These explicit, tenant-scoped existence
+        # checks are what actually close that gap, mirroring `create()`'s
+        # agent check and `append_message()`'s `self.get()` call.
+        if data.agent_id is not None:
+            result = await self.session.execute(
+                select(Agent.id).where(
+                    Agent.id == data.agent_id,
+                    Agent.organization_id == self.tenant.organization_id,
+                )
+            )
+            if result.scalar_one_or_none() is None:
+                raise NotFoundError("agent not found")
+        if data.conversation_id is not None:
+            await self.get(data.conversation_id)
+
         event = UsageEvent(
             id=uuid7(),
             organization_id=self.tenant.organization_id,

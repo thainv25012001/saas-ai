@@ -4,13 +4,13 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base, TenantMixin, UUIDPrimaryKeyMixin
+from app.db.base import Base, TenantMixin, TimestampMixin, UUIDPrimaryKeyMixin
 
 
 class ConversationChannel(enum.StrEnum):
@@ -36,14 +36,19 @@ class UsageKind(enum.StrEnum):
     EMBEDDING = "embedding"
 
 
-class Conversation(UUIDPrimaryKeyMixin, TenantMixin, Base):
+class Conversation(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
     """A conversation thread with one agent.
 
-    No TimestampMixin here: `started_at`/`last_message_at`/`closed_at` are
-    the domain timestamps the spec (ARCHITECTURE.md §3.5) actually calls
-    for, and a generic `created_at`/`updated_at` pair would just duplicate
-    `started_at` while adding nothing `updated_at`'s onupdate could
-    meaningfully track.
+    Deviation from ARCHITECTURE.md §3.5's literal per-table field list,
+    resolved by review during Task 5: §3.5 lists `started_at` instead of
+    `created_at`/`updated_at`, but §3's blanket rule ("created_at / updated_at
+    on every table") and Phase 1's precedent (`prompts`/`prompt_versions` use
+    TimestampMixin despite a similar per-table omission) both point the other
+    way. `TimestampMixin` wins here for consistency with every other table in
+    the schema; `created_at` already *is* "when this conversation started",
+    so a separate `started_at` column would only duplicate it. `last_message_at`
+    and `closed_at` remain — they carry information `created_at`/`updated_at`
+    do not.
     """
 
     __tablename__ = "conversations"
@@ -76,14 +81,11 @@ class Conversation(UUIDPrimaryKeyMixin, TenantMixin, Base):
     metadata_: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSONB, nullable=False, default=dict
     )
-    started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
-class Message(UUIDPrimaryKeyMixin, TenantMixin, Base):
+class Message(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
     """A single turn in a conversation.
 
     Import this as `ConversationMessage` in any module that also needs
@@ -91,8 +93,9 @@ class Message(UUIDPrimaryKeyMixin, TenantMixin, Base):
     `app/db/models/__init__.py`, which exports both names for this class.
 
     Append-only: rows are written once by `ConversationService.append_message`
-    and never edited afterwards, so unlike `Agent`/`Prompt` there is no
-    `updated_at` to maintain — only `created_at`.
+    and never edited afterwards, so `updated_at` (from `TimestampMixin`) is
+    never touched after insert. Carried anyway for consistency with every
+    other table in the schema — see the deviation note on `Conversation`.
     """
 
     __tablename__ = "messages"
@@ -133,15 +136,12 @@ class Message(UUIDPrimaryKeyMixin, TenantMixin, Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     finish_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
 
 
-class UsageEvent(UUIDPrimaryKeyMixin, TenantMixin, Base):
+class UsageEvent(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
     """The substrate billing would later read — not billing itself.
 
-    Append-only, like `Message`: `created_at` only, no `updated_at`.
+    Append-only, like `Message`: see the note there about `updated_at`.
     """
 
     __tablename__ = "usage_events"
@@ -169,6 +169,3 @@ class UsageEvent(UUIDPrimaryKeyMixin, TenantMixin, Base):
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
