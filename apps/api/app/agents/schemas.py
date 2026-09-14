@@ -3,7 +3,11 @@ from pydantic import BaseModel, Field
 
 class CreateAgentInput(BaseModel):
     name: str = Field(min_length=1, max_length=255)
-    provider: str = "openai"
+    # None means "caller expressed no preference" and is resolved by
+    # AgentService.create_agent to Settings.default_llm_provider — "fake"
+    # until a real API key is configured, so a fresh clone gets a working
+    # agent with no key required.
+    provider: str | None = None
     model: str = "gpt-4o-mini"
     temperature: float = Field(default=0.3, ge=0.0, le=2.0)
     max_tokens: int = Field(default=1024, ge=1, le=32_000)

@@ -12,6 +12,7 @@ from app.agents.schemas import (
     UpdateAgentConfigInput,
     UpdateAgentInput,
 )
+from app.core.config import get_settings
 from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.core.ids import uuid7
 from app.core.tenancy import TenantContext
@@ -58,13 +59,18 @@ class AgentService:
         return config
 
     async def create_agent(self, data: CreateAgentInput) -> Agent:
+        # `data.provider` is None when the caller expressed no preference.
+        # Resolving it to the configured default here — rather than in the
+        # chat service at request time — means an agent's provider is fixed
+        # at creation and never silently drifts if the default changes later.
+        provider = data.provider or get_settings().default_llm_provider
         agent = Agent(
             id=uuid7(),
             organization_id=self.tenant.organization_id,
             name=data.name,
             slug=slugify(data.name)[:120] or "agent",
             status=AgentStatus.DRAFT,
-            provider=data.provider,
+            provider=provider,
             model=data.model,
             temperature=data.temperature,
             max_tokens=data.max_tokens,
