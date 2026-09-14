@@ -18,10 +18,12 @@ for role in app_owner app_user; do
   echo "ok: $role"
 done
 
-echo "== app_user must NOT bypass RLS =="
-bypass=$(psql_owner "SELECT rolbypassrls FROM pg_roles WHERE rolname = 'app_user'")
-[ "$bypass" = "f" ] || { echo "FAIL: app_user has BYPASSRLS"; exit 1; }
-echo "ok: app_user is subject to RLS"
+echo "== roles must NOT have BYPASSRLS =="
+for role in app_owner app_user; do
+  bypass=$(psql_owner "SELECT rolbypassrls FROM pg_roles WHERE rolname = '$role'")
+  [ "$bypass" = "f" ] || { echo "FAIL: $role has BYPASSRLS"; exit 1; }
+  echo "ok: $role is subject to RLS"
+done
 
 echo "== redis =="
 docker compose exec -T redis redis-cli ping | grep -q PONG || { echo "FAIL: redis"; exit 1; }
