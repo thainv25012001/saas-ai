@@ -1,0 +1,156 @@
+name: Deploy
+
+# Production deploys are a consequence of CI going green on main, never of a
+# push on its own. workflow_dispatch is the manual re-run escape hatch.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Deploys queue rather than race; cancelling one mid-flight could leave the
+# database migrated but the services on old code.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  # workflow_run reports the commit CI actually tested; dispatch uses the ref
+  # it was started from.
+  DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  migrate:
+    name: Migrate database (Neon)
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: apps/api/uv.lock
+
+      # Migrations run here, once, rather than in the API container, where they
+      # would run once per replica and race on a multi-instance plan.
+      - name: Alembic upgrade head
+        working-directory: apps/api
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          uv sync --locked
+          uv run alembic upgrade head
+
+  api:
+    name: Deploy API (Render)
+    needs: migrate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+
+    steps:
+      - name: Trigger Render deploy
+        id: trigger
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          deploy_id=$(curl -fsS -X POST \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"clearCache":"do_not_clear"}' \
+            "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys" | jq -r '.id')
+          [ -n "$deploy_id" ] && [ "$deploy_id" != "null" ] || { echo "Render did not return a deploy id"; exit 1; }
+          echo "id=$deploy_id" >> "$GITHUB_OUTPUT"
+          echo "Render deploy $deploy_id started"
+
+      - name: Wait for the deploy to go live
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+          DEPLOY_ID: ${{ steps.trigger.outputs.id }}
+        run: |
+          for _ in $(seq 1 60); do
+            status=$(curl -fsS -H "Authorization: Bearer $RENDER_API_KEY" \
+              "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys/$DEPLOY_ID" \
+              | jq -r '.status')
+            echo "status: $status"
+            case "$status" in
+              live) exit 0 ;;
+              build_failed|update_failed|pre_deploy_failed|canceled|deactivated)
+                echo "Render deploy ended as $status"; exit 1 ;;
+            esac
+            sleep 15
+          done
+          echo "Timed out waiting for the Render deploy to go live"
+          exit 1
+
+      # Live means the container started; this asserts it can actually reach
+      # Neon and Upstash before the web deploy points users at it.
+      - name: Verify readiness
+        env:
+          API_URL: ${{ vars.API_URL }}
+        run: |
+          for _ in $(seq 1 20); do
+            body=$(curl -fsS "$API_URL/health/ready") || { sleep 5; continue; }
+            echo "$body"
+            [ "$(echo "$body" | jq -r '.status')" = "ready" ] && exit 0
+            sleep 5
+          done
+          echo "API never reported ready"
+          exit 1
+
+  web:
+    name: Deploy web (Vercel)
+    needs: api
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install the Vercel CLI
+        run: npm install --global vercel@latest
+
+      # Build here rather than on Vercel: the same commit CI verified is the one
+      # that ships, and NEXT_PUBLIC_API_URL comes from the project's production
+      # environment that `vercel pull` fetches.
+      - name: Pull Vercel project settings
+        working-directory: apps/web
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+
+      - name: Build
+        working-directory: apps/web
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+
+      - name: Deploy
+        working-directory: apps/web
+        run: vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"

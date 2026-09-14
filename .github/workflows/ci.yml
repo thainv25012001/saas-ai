@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push to the same PR makes the in-flight run irrelevant; main is never
+# cancelled so every commit on it keeps a real status.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  api:
+    name: API — lint, types, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      db:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: saas_ai
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d saas_ai"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+
+    env:
+      # The service container gets no docker-entrypoint-initdb.d mount, so the
+      # roles are created by an explicit step below instead. Everything after
+      # that connects exactly as it does locally.
+      DATABASE_URL: postgresql+asyncpg://app_user:app_user_password@localhost:5432/saas_ai
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://app_owner:app_owner_password@localhost:5432/saas_ai
+      REDIS_URL: redis://localhost:6379/0
+      JWT_SECRET: ci-secret-not-for-production
+      # Must be "local": app/graphql/schema.py disables introspection and
+      # app/main.py drops the GraphiQL IDE outside environment == "local",
+      # and test_introspection_still_works_in_the_test_environment (plus the
+      # schema/codegen freshness checks, which round-trip through
+      # introspection-adjacent tooling) assumes it is local, exactly as it is
+      # in every developer's own unset-by-default environment.
+      ENVIRONMENT: local
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Provision roles and extensions
+        run: |
+          PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h localhost -U postgres \
+            -d saas_ai -f infrastructure/postgres/init.sql
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: apps/api/uv.lock
+
+      - name: Install dependencies
+        working-directory: apps/api
+        # --locked fails if uv.lock is stale relative to pyproject.toml, so a
+        # dependency edit that never reached the lockfile is caught here.
+        run: uv sync --locked
+
+      - name: Ruff lint
+        working-directory: apps/api
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        working-directory: apps/api
+        run: uv run ruff format --check .
+
+      - name: Mypy
+        working-directory: apps/api
+        run: uv run mypy app/
+
+      - name: Migrate
+        working-directory: apps/api
+        run: uv run alembic upgrade head
+
+      - name: Pytest
+        working-directory: apps/api
+        run: uv run pytest -v
+
+      - name: GraphQL schema is up to date
+        working-directory: apps/api
+        # packages/shared/schema.graphql is the contract the web codegen reads.
+        # Re-export it and fail if it differs from what was committed.
+        run: |
+          uv run strawberry export-schema app.graphql.schema:schema \
+            > ../../packages/shared/schema.graphql
+          git diff --exit-code -- ../../packages/shared/schema.graphql
+
+  web:
+    name: Web — lint, types, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Generated GraphQL types are up to date
+        working-directory: apps/web
+        # src/graphql/generated.ts is committed so this job stays independent of
+        # a running API; regenerating from the committed schema must be a no-op.
+        run: |
+          npm run codegen
+          git diff --exit-code -- src/graphql/generated.ts
+
+      - name: ESLint
+        working-directory: apps/web
+        run: npm run lint
+
+      - name: Typecheck
+        working-directory: apps/web
+        run: npm run typecheck
+
+      - name: Build
+        working-directory: apps/web
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+        run: npm run build

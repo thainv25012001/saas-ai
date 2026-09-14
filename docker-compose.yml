@@ -1,0 +1,93 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: saas_ai
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d saas_ai"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # NOTE: this container runs `alembic upgrade head` as part of its startup
+  # command below. That is convenient for local development (clone, compose
+  # up, and the schema is always current) and wrong for production: with
+  # more than one replica, every replica would race to apply the same
+  # migration concurrently. In production, migrations belong in a separate
+  # one-shot job/step that runs once before the new replicas start, not in
+  # the container's own entrypoint.
+  api:
+    build: ./apps/api
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgresql+asyncpg://app_user:app_user_password@db:5432/saas_ai
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://app_owner:app_owner_password@db:5432/saas_ai
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-local-development-secret-change-me}
+      ENVIRONMENT: local
+      CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./apps/api:/app
+      # Anonymous volume: without it, bind-mounting the host apps/api
+      # directory over /app would also shadow /app/.venv with whatever
+      # (possibly non-Linux, possibly absent) .venv exists on the host,
+      # hiding the Linux virtualenv `uv sync` just built in the image. Same
+      # trick as web's node_modules line below.
+      - /app/.venv
+    command: >
+      sh -c "uv run alembic upgrade head &&
+             uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    healthcheck:
+      # No curl in python:3.12-slim; urllib is already there. Not "healthy"
+      # until this succeeds, which only happens once migrations have
+      # finished and uvicorn has started — exactly the signal
+      # `docker compose up -d --wait` (see README) needs before it is safe
+      # to run anything against the API, e.g. `make seed`.
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=2)\"",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
+  web:
+    build: ./apps/web
+    depends_on:
+      - api
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+
+volumes:
+  pgdata:
+  redisdata:
