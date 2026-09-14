@@ -60,9 +60,9 @@ def _build(name: str) -> LLMProvider:
         )
     # Task 4 adds this module; see the OpenAI branch above for why the import
     # is lazy.
-    from app.llm.anthropic_provider import AnthropicProvider  # type: ignore[import-not-found]
+    from app.llm.anthropic_provider import AnthropicProvider
 
-    return AnthropicProvider(api_key=settings.anthropic_api_key)  # type: ignore[no-any-return]
+    return AnthropicProvider(api_key=settings.anthropic_api_key)
 
 
 def reset_providers() -> None:

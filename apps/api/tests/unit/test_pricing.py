@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from app.llm.pricing import MODEL_PRICING, estimate_cost
+from app.llm.registry import DEFAULT_MODELS
 from app.llm.types import Usage
 
 
@@ -35,3 +36,10 @@ def test_claude_opus_5_is_priced():
     """The Anthropic default model must be in the table or every Anthropic
     conversation records a NULL cost."""
     assert "claude-opus-5" in MODEL_PRICING
+
+
+def test_every_default_model_is_priced():
+    """Nothing enforces that DEFAULT_MODELS and MODEL_PRICING agree. Adding a
+    provider (or changing its default model) without a matching price entry
+    would silently produce agents whose cost is permanently NULL."""
+    assert set(DEFAULT_MODELS.values()) <= set(MODEL_PRICING)
