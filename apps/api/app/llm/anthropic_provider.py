@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import anthropic
+from anthropic.types import RawContentBlockDeltaEvent
 
 from app.core.logging import get_logger
 from app.llm.base import ModelCapabilities, SchemaT
@@ -26,27 +27,40 @@ logger = get_logger(__name__)
 
 # Sampling was REMOVED from these models: sending `temperature` returns a 400.
 # Thinking is adaptive and on by default; depth is set with output_config.effort.
+# Output ceiling is the documented 128K for this generation (verified against
+# Anthropic's public model docs 2026-09-14, not `client.models.retrieve()` —
+# that would be authoritative but needs a live API key this module does not
+# have at capability-table-authoring time).
 _NO_SAMPLING = ModelCapabilities(
     supports_sampling=False,
     supports_thinking=True,
     thinking_style="adaptive",
     supports_effort=True,
-    max_output_tokens=64_000,
+    max_output_tokens=128_000,
 )
 
-# Older models keep the classic sampling + explicit thinking-budget surface.
+# Older models keep the classic sampling surface. `supports_thinking` is
+# honestly False here rather than claiming a "budget" style the code below
+# never implements: extended thinking for these models is driven by a
+# `budget_tokens` parameter, and sending that to ANY model in our table is
+# exactly the mistake this capability table exists to prevent. If budget-style
+# thinking is ever wired up, this record is where that support gets declared.
+# Documented output ceiling for this generation is 64K.
 _CLASSIC = ModelCapabilities(
     supports_sampling=True,
-    supports_thinking=True,
-    thinking_style="budget",
+    supports_thinking=False,
+    thinking_style="none",
     supports_effort=False,
-    max_output_tokens=8_192,
+    max_output_tokens=64_000,
 )
 
 _CAPABILITIES: dict[str, ModelCapabilities] = {
     "claude-opus-5": _NO_SAMPLING,
     "claude-sonnet-5": _NO_SAMPLING,
     "claude-opus-4-8": _NO_SAMPLING,
+    "claude-opus-4-7": _NO_SAMPLING,
+    "claude-opus-4-6": _CLASSIC,
+    "claude-sonnet-4-6": _CLASSIC,
     "claude-haiku-4-5": _CLASSIC,
 }
 
@@ -65,9 +79,19 @@ class AnthropicProvider:
 
     def _build_kwargs(self, request: CompletionRequest) -> dict[str, Any]:
         caps = self.capabilities(request.model)
+
+        max_tokens = min(request.max_tokens, caps.max_output_tokens)
+        if max_tokens < request.max_tokens:
+            logger.debug(
+                "clamped_max_tokens",
+                requested=request.max_tokens,
+                allowed=caps.max_output_tokens,
+                model=request.model,
+            )
+
         kwargs: dict[str, Any] = {
             "model": request.model,
-            "max_tokens": min(request.max_tokens, caps.max_output_tokens),
+            "max_tokens": max_tokens,
             # Anthropic takes the system prompt top-level, NOT as a message.
             "system": request.system,
             "messages": [
@@ -100,24 +124,46 @@ class AnthropicProvider:
         try:
             async with self._client.messages.stream(**kwargs) as stream:
                 yield MessageStartEvent(model=request.model)
+                emitted_text = False
                 async for raw_event in stream:
-                    # The SDK's real stream yields a large discriminated union of
-                    # event types (content block start/stop, citations, thinking,
-                    # signature, …) that only `content_block_delta` /
-                    # `text_delta` events carry a `.delta.text` on. Narrowing that
-                    # union member-by-member would buy nothing here — the shape
-                    # is checked at runtime by the `type` comparisons below — so
-                    # treat it as `Any` rather than fight mypy over an SDK type
-                    # this module does not otherwise care about.
-                    event: Any = raw_event
-                    if event.type == "content_block_delta" and event.delta.type == "text_delta":
-                        yield TextDeltaEvent(text=event.delta.text)
+                    # `RawContentBlockDeltaEvent` is the single member of the
+                    # SDK's stream-event union that carries `.delta.text` — the
+                    # isinstance check narrows `.delta` (itself a discriminated
+                    # union) down to `TextDelta` once `.type == "text_delta"`,
+                    # so this is fully typed with no `Any` and no `# type:
+                    # ignore`. That matters beyond tidiness: if a discriminator
+                    # string is ever renamed upstream, this comparison simply
+                    # stops matching — silently, with no exception — and a
+                    # paid, billed response would come back with empty text.
+                    # The `emitted_text` check below is the runtime tripwire
+                    # for that same failure; this isinstance check is the
+                    # compile-time one mypy can still catch if the SDK's type
+                    # itself changes shape.
+                    if (
+                        isinstance(raw_event, RawContentBlockDeltaEvent)
+                        and raw_event.delta.type == "text_delta"
+                    ):
+                        emitted_text = True
+                        yield TextDeltaEvent(text=raw_event.delta.text)
 
                 final = await stream.get_final_message()
                 usage = Usage(
                     input_tokens=final.usage.input_tokens,
                     output_tokens=final.usage.output_tokens,
                 )
+                if usage.output_tokens > 0 and not emitted_text:
+                    # We were billed for output tokens but never emitted a
+                    # single text delta. This should be impossible; if it
+                    # happens, either the model returned a content type this
+                    # loop does not recognize, or a discriminator string above
+                    # no longer matches what the SDK actually sends. Either
+                    # way this is a paid request returning empty text with no
+                    # exception, so it must be visible in logs.
+                    logger.warning(
+                        "no_text_delta_despite_output_tokens",
+                        model=request.model,
+                        output_tokens=usage.output_tokens,
+                    )
                 yield UsageEvent(usage=usage)
                 yield MessageEndEvent(
                     stop_reason=final.stop_reason, usage=usage, model=request.model
@@ -127,9 +173,21 @@ class AnthropicProvider:
         except (anthropic.APITimeoutError, anthropic.APIConnectionError) as exc:
             raise LLMUnavailableError("could not reach the model provider") from exc
         except anthropic.APIStatusError as exc:
-            # 401/403 is an operator problem (bad or missing key), not a user one.
-            if exc.status_code in (401, 403):
-                raise LLMConfigurationError("the model provider rejected our credentials") from exc
+            # 401/403 is an operator problem (bad or missing key). Any other
+            # 4xx (400, 404, 422, …) means we sent a request the model will
+            # never accept — e.g. a capability-table miss letting an
+            # unsupported parameter through, which is the exact failure this
+            # whole provider exists to prevent. Neither is transient:
+            # retrying resends the identical bad request. Only a 5xx is
+            # actually "try again later".
+            if 400 <= exc.status_code < 500:
+                if exc.status_code in (401, 403):
+                    raise LLMConfigurationError(
+                        "the model provider rejected our credentials"
+                    ) from exc
+                raise LLMConfigurationError(
+                    f"the model provider rejected our request ({exc.status_code})"
+                ) from exc
             raise LLMUnavailableError(f"the model provider returned {exc.status_code}") from exc
 
     def stream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
