@@ -48,7 +48,6 @@ async def test_identity_tables_do_not_have_rls(owner_connection, table):
     assert result.scalar_one() is False
 
 
-async def test_readiness_reports_database_up(client):
+async def test_readiness_reports_dependencies_up(client):
     response = await client.get("/health/ready")
-    assert response.status_code == 200
-    assert response.json()["checks"]["database"] is True
+    assert response.json()["checks"] == {"database": True, "redis": True}

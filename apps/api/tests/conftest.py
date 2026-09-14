@@ -47,3 +47,31 @@ async def owner_connection() -> AsyncIterator["AsyncConnection"]:
     async with engine.connect() as connection:
         yield connection
     await engine.dispose()
+
+
+@pytest.fixture
+async def clean_users(owner_connection: "AsyncConnection") -> AsyncIterator[None]:
+    """Auth tests share a database. Remove test rows before and after so each
+    test starts from a known state, and rate-limit counters do not bleed."""
+    from sqlalchemy import text
+
+    async def _purge() -> None:
+        await owner_connection.execute(text("DELETE FROM users WHERE email LIKE '%@example.com'"))
+        await owner_connection.execute(
+            text("DELETE FROM organizations WHERE slug LIKE 'ada-motors%'")
+        )
+        await owner_connection.commit()
+
+    await _purge()
+    await _flush_rate_limits()
+    yield
+    await _purge()
+
+
+async def _flush_rate_limits() -> None:
+    from app.core.redis import get_redis
+
+    redis = get_redis()
+    keys = [key async for key in redis.scan_iter("ratelimit:*")]
+    if keys:
+        await redis.delete(*keys)

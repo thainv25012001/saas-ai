@@ -16,8 +16,18 @@ async def _dispose_shared_engine() -> AsyncIterator[None]:
 
     Scoped to tests/integration only: unit tests are plain synchronous
     functions with no event loop, and this fixture requires one.
+
+    app.core.redis.get_redis() is the same shape of problem: it is
+    lru_cache'd, so it would otherwise hand a later test's loop a
+    redis-py connection pool created under an earlier, now-closed loop —
+    surfacing as "RuntimeError: Event loop is closed" deep in asyncio's
+    proactor transport. Close and drop the cached client alongside the
+    database engine, for the same reason.
     """
     yield
+    from app.core.redis import get_redis
     from app.db.session import engine
 
     await engine.dispose()
+    await get_redis().aclose()
+    get_redis.cache_clear()
