@@ -117,7 +117,7 @@ class ConversationService:
         # concurrent appends computing the same next value.
         seq = await self.next_seq(conversation_id)
         message = ConversationMessage(
-            id=uuid7(),
+            id=data.id or uuid7(),
             organization_id=self.tenant.organization_id,
             conversation_id=conversation_id,
             seq=seq,

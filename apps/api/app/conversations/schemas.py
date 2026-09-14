@@ -13,6 +13,13 @@ class CreateConversationInput(BaseModel):
 
 
 class AppendMessageInput(BaseModel):
+    # None means "let the service generate one" (every caller before Task 6).
+    # The chat service pre-generates this id so it can hand the assistant's
+    # message id to the caller in a `message_start` event *before* the
+    # message's content is known, then persist under that same id once
+    # streaming finishes -- so the id a client was told to expect is the id
+    # the row actually gets.
+    id: UUID | None = None
     role: MessageRole
     content: str | None = None
     content_blocks: list[dict[str, Any]] | None = None
