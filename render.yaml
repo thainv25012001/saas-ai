@@ -15,7 +15,8 @@ services:
     autoDeploy: false
     envVars:
       # Neon pooled connection as app_user, Neon direct/owner as app_owner.
-      # asyncpg does not understand `sslmode`; the URLs must end in `?ssl=require`.
+      # Paste Neon's URLs verbatim: Settings rewrites the scheme to asyncpg and
+      # translates libpq's `sslmode` on load. See docs/DEPLOYMENT.md.
       - key: DATABASE_URL
         sync: false
       - key: MIGRATION_DATABASE_URL

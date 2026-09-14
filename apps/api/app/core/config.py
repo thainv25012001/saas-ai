@@ -4,6 +4,7 @@ from typing import Annotated
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 
 def _find_env_file(start: Path | None = None) -> Path | None:
@@ -21,6 +22,44 @@ def _find_env_file(start: Path | None = None) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+def _normalize_database_url(value: str) -> str:
+    """Accept the connection URL a managed Postgres hands you, unchanged.
+
+    Neon, Render, Supabase and Heroku all emit libpq-shaped URLs, and every
+    one of them breaks this app in a way that names something else:
+
+    * no driver in the scheme (`postgresql://`, or the legacy `postgres://`)
+      makes SQLAlchemy load its default DBAPI, psycopg2, which this project
+      does not depend on - so a production boot dies at import time with
+      `ModuleNotFoundError: No module named 'psycopg2'`, which says nothing
+      about the actual mistake;
+    * `sslmode` and `channel_binding` are libpq parameter names. The asyncpg
+      dialect forwards unknown query parameters straight to
+      `asyncpg.connect()`, which has no such keyword arguments, so the first
+      query fails with a TypeError long after startup looked healthy.
+
+    Only the driver-less schemes are rewritten. Naming a driver explicitly is
+    a deliberate choice and is left alone.
+    """
+    url = make_url(value)
+    if url.drivername in ("postgres", "postgresql"):
+        url = url.set(drivername="postgresql+asyncpg")
+    if url.drivername != "postgresql+asyncpg":
+        return url.render_as_string(hide_password=False)
+
+    query = dict(url.query)
+    sslmode = query.pop("sslmode", None)
+    # asyncpg has no channel binding parameter. TLS itself is preserved below;
+    # only the SCRAM channel-binding negotiation, which asyncpg cannot be told
+    # to require, is dropped.
+    query.pop("channel_binding", None)
+    if sslmode is not None and "ssl" not in query:
+        query["ssl"] = sslmode
+    # hide_password=False: the default masks the password as ***, which would
+    # turn this helper into an authentication failure.
+    return url.set(query=query).render_as_string(hide_password=False)
 
 
 class Settings(BaseSettings):
@@ -41,6 +80,11 @@ class Settings(BaseSettings):
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000"]
     )
+
+    @field_validator("database_url", "migration_database_url", mode="after")
+    @classmethod
+    def normalize_postgres_dsn(cls, value: str) -> str:
+        return _normalize_database_url(value)
 
     @field_validator("cors_origins", mode="before")
     @classmethod
