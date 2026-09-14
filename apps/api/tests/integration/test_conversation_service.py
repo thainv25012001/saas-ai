@@ -45,6 +45,20 @@ async def test_get_from_another_tenant_raises_not_found(tenant_a, tenant_b):
             await ConversationService(session, tenant_b).get(conversation.id)
 
 
+async def test_create_for_an_agent_from_another_tenant_raises_not_found(tenant_a, tenant_b):
+    """create() must check the agent's tenant itself: with RLS alone, the
+    agent lookup silently sees zero rows for a foreign id, and it is this
+    explicit check, not RLS, that turns that into a NotFoundError instead of
+    creating a conversation no agent in this tenant owns."""
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+    async with tenant_session(tenant_b) as session:
+        with pytest.raises(NotFoundError):
+            await ConversationService(session, tenant_b).create(
+                agent.id, CreateConversationInput(channel=ConversationChannel.PLAYGROUND)
+            )
+
+
 async def test_append_message_assigns_sequential_seq(tenant_a):
     async with tenant_session(tenant_a) as session:
         service = ConversationService(session, tenant_a)
