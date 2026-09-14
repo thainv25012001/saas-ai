@@ -48,6 +48,40 @@ async def test_identity_tables_do_not_have_rls(owner_connection, table):
     assert result.scalar_one() is False
 
 
+@pytest.mark.parametrize("table", ["agents", "agent_configs", "prompts", "prompt_versions"])
+async def test_tenant_tables_have_rls_enabled_with_a_tenant_isolation_policy(
+    owner_connection, table
+):
+    """The GraphQL layer has at least one code path (`Context._load_configs`,
+    the `agent { config }` dataloader) that filters only by a non-tenant key
+    and relies entirely on RLS for tenant isolation — see
+    tests/integration/test_tenant_isolation.py. That means RLS being both
+    *enabled* and carrying the `tenant_isolation` policy is itself a security
+    invariant these business tables must hold, not just an implementation
+    detail: if a future migration silently dropped the policy from one of
+    these tables, every isolation test that happens to route through a
+    service-layer ownership check first would stay green while this one
+    table quietly lost its only line of defence."""
+    enabled = await owner_connection.execute(
+        text(
+            "SELECT relrowsecurity FROM pg_class "
+            "WHERE relname = :table AND relnamespace = 'public'::regnamespace"
+        ),
+        {"table": table},
+    )
+    assert enabled.scalar_one() is True
+
+    policy_count = await owner_connection.execute(
+        text(
+            "SELECT COUNT(*) FROM pg_policy "
+            "JOIN pg_class ON pg_class.oid = pg_policy.polrelid "
+            "WHERE pg_class.relname = :table AND pg_policy.polname = 'tenant_isolation'"
+        ),
+        {"table": table},
+    )
+    assert policy_count.scalar_one() == 1
+
+
 async def test_readiness_reports_dependencies_up(client):
     response = await client.get("/health/ready")
     assert response.json()["checks"] == {"database": True, "redis": True}

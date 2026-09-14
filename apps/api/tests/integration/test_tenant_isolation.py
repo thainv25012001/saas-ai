@@ -65,9 +65,16 @@ async def two_accounts(client, clean_users):
 
 
 async def test_b_does_not_see_as_agents_in_a_list(two_accounts, client):
-    _a, headers_b, _agent, _prompt = two_accounts
-    response = await _graphql(client, "{ agents { name } }", headers=headers_b)
-    assert response.json()["data"]["agents"] == []
+    """A positive control alongside the negative assertion: if `list_agents`
+    ever regressed to returning an empty list unconditionally, the assertion
+    on B alone would stay green. Also querying as A in the same setup state
+    proves the list endpoint does return data when there is data to return."""
+    headers_a, headers_b, _agent, _prompt = two_accounts
+    response_b = await _graphql(client, "{ agents { name } }", headers=headers_b)
+    assert response_b.json()["data"]["agents"] == []
+
+    response_a = await _graphql(client, "{ agents { name } }", headers=headers_a)
+    assert [a["name"] for a in response_a.json()["data"]["agents"]] == ["Secret A Bot"]
 
 
 async def test_b_cannot_read_as_agent_by_id(two_accounts, client):
@@ -82,7 +89,9 @@ async def test_b_cannot_read_as_agent_by_id(two_accounts, client):
 
 
 async def test_b_cannot_update_as_agent(two_accounts, client):
-    _a, headers_b, agent_a_id, _prompt = two_accounts
+    """A denial that still wrote first and raised second would pass on the
+    error code alone, so also confirm as A that the name never changed."""
+    headers_a, headers_b, agent_a_id, _prompt = two_accounts
     response = await _graphql(
         client,
         'mutation U($id: UUID!) { updateAgent(id: $id, input: {name: "Hijacked"}) { name } }',
@@ -91,9 +100,16 @@ async def test_b_cannot_update_as_agent(two_accounts, client):
     )
     assert response.json()["errors"][0]["extensions"]["code"] == "not_found"
 
+    check = await _graphql(
+        client, "query A($id: UUID!) { agent(id: $id) { name } }", {"id": agent_a_id}, headers_a
+    )
+    assert check.json()["data"]["agent"]["name"] == "Secret A Bot"
+
 
 async def test_b_cannot_delete_as_agent(two_accounts, client):
-    _a, headers_b, agent_a_id, _prompt = two_accounts
+    """As above: confirm as A that the agent still exists after B's denied
+    delete, not just that B's own call returned `not_found`."""
+    headers_a, headers_b, agent_a_id, _prompt = two_accounts
     response = await _graphql(
         client,
         "mutation D($id: UUID!) { deleteAgent(id: $id) }",
@@ -102,9 +118,17 @@ async def test_b_cannot_delete_as_agent(two_accounts, client):
     )
     assert response.json()["errors"][0]["extensions"]["code"] == "not_found"
 
+    check = await _graphql(
+        client, "query A($id: UUID!) { agent(id: $id) { name } }", {"id": agent_a_id}, headers_a
+    )
+    assert check.json()["data"]["agent"]["name"] == "Secret A Bot"
+
 
 async def test_b_cannot_read_as_agent_config(two_accounts, client):
-    _a, headers_b, agent_a_id, _prompt = two_accounts
+    """As above: confirm as A that the config's `tone` is still the
+    server-side default ("friendly"), not the "rude" value B's denied
+    mutation tried to write."""
+    headers_a, headers_b, agent_a_id, _prompt = two_accounts
     response = await _graphql(
         client,
         """
@@ -117,14 +141,28 @@ async def test_b_cannot_read_as_agent_config(two_accounts, client):
     )
     assert response.json()["errors"][0]["extensions"]["code"] == "not_found"
 
+    check = await _graphql(
+        client,
+        "query A($id: UUID!) { agent(id: $id) { config { tone } } }",
+        {"id": agent_a_id},
+        headers_a,
+    )
+    assert check.json()["data"]["agent"]["config"]["tone"] == "friendly"
 
-async def test_b_cannot_read_as_agent_config_via_nested_field(two_accounts, client):
-    """`agent(id) { config { ... } }` resolves `config` through a dataloader
-    rather than through AgentService — a different code path from
-    `updateAgentConfig` above. The outer `agent(id)` lookup is expected to
-    fail closed before the nested field ever runs, so this must still come
-    back as a clean `not_found` rather than leaking a partial `data` payload
-    with `agent: null` and a config value alongside it."""
+
+async def test_b_gets_no_data_when_nesting_config_under_as_agent(two_accounts, client):
+    """This does NOT exercise the `config` dataloader's own tenant check —
+    `agent(id)` raises `not_found` inside `Query.agent` before the nested
+    `config` field ever resolves, so the dataloader never runs here. What
+    this proves is narrower but still worth having: the outer lookup fails
+    closed with a clean `not_found` and no partial `data` payload, for a
+    query shape (`agent(id) { config { ... } }`) distinct from the
+    `updateAgentConfig` mutation above. The dataloader itself
+    (`Context._load_configs` in app/graphql/context.py) filters only by
+    `agent_id`, with no `organization_id` predicate of its own — its actual
+    tenant boundary is Postgres RLS on `agent_configs`, which is asserted
+    directly in tests/integration/test_migrations.py::
+    test_tenant_tables_have_rls_enabled_with_a_tenant_isolation_policy."""
     _a, headers_b, agent_a_id, _prompt = two_accounts
     response = await _graphql(
         client,
@@ -138,9 +176,15 @@ async def test_b_cannot_read_as_agent_config_via_nested_field(two_accounts, clie
 
 
 async def test_b_does_not_see_as_prompts(two_accounts, client):
-    _a, headers_b, _agent, _prompt = two_accounts
-    response = await _graphql(client, "{ prompts { key } }", headers=headers_b)
-    assert response.json()["data"]["prompts"] == []
+    """Positive control for the same reason as the agents-list test above:
+    prove A's prompt is actually returned by this same query, not just that
+    B's query happens to come back empty."""
+    headers_a, headers_b, _agent, _prompt = two_accounts
+    response_b = await _graphql(client, "{ prompts { key } }", headers=headers_b)
+    assert response_b.json()["data"]["prompts"] == []
+
+    response_a = await _graphql(client, "{ prompts { key } }", headers=headers_a)
+    assert [p["key"] for p in response_a.json()["data"]["prompts"]] == ["a_secret"]
 
 
 async def test_b_cannot_read_as_prompt_by_id(two_accounts, client):
@@ -169,13 +213,23 @@ async def test_b_cannot_add_a_version_to_as_prompt(two_accounts, client):
     assert response.json()["errors"][0]["extensions"]["code"] == "not_found"
 
 
-async def test_b_cannot_activate_a_version_of_as_prompt(two_accounts, client):
+async def test_b_cannot_activate_a_version_of_as_prompt(two_accounts, client, owner_connection):
     """`activatePromptVersion` is `createPromptVersion`'s sibling mutation and
     the one that actually changes which prompt version an agent serves. B
     must not be able to activate a version that belongs to A's prompt, even
     though B never learns A's version id through any legitimate query — the
     id here comes from A's own setup, standing in for a leaked or guessed
-    id."""
+    id.
+
+    A denial that wrote first and raised second — plausible here, since
+    `activate_version` both deactivates the previously-active version and
+    activates the target one — would pass on the error code alone. This
+    schema has no query exposing a PromptVersion's `isActive` by id (`Prompt`
+    does not expose its versions at all), so there is no way to check that
+    "v1 is still active and v2 still is not" through the public API. The
+    attack itself is still driven entirely through GraphQL; only this one
+    read-only postcondition check falls back to `owner_connection`, because
+    the front door has no way to ask the question."""
     headers_a, headers_b, _agent, prompt_a_id = two_accounts
     version = await _graphql(
         client,
@@ -196,6 +250,18 @@ async def test_b_cannot_activate_a_version_of_as_prompt(two_accounts, client):
         headers_b,
     )
     assert response.json()["errors"][0]["extensions"]["code"] == "not_found"
+
+    from sqlalchemy import text
+
+    rows = await owner_connection.execute(
+        text("SELECT id, is_active FROM prompt_versions WHERE prompt_id = :prompt_id"),
+        {"prompt_id": prompt_a_id},
+    )
+    active_by_id = {str(row.id): row.is_active for row in rows}
+    assert active_by_id[version_a_id] is False
+    # v1 and v2 are the only two versions of this prompt; exactly one
+    # (v1) is still active, proving B's denied call deactivated nothing.
+    assert sum(1 for is_active in active_by_id.values() if is_active) == 1
 
 
 async def test_me_reports_each_owners_own_organization(two_accounts, client):
