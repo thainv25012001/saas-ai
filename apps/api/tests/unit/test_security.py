@@ -1,8 +1,10 @@
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
+import jwt
 import pytest
 
+from app.core.config import get_settings
 from app.core.errors import AuthenticationError
 from app.core.ids import uuid7
 from app.core.security import (
@@ -81,3 +83,42 @@ def test_expired_token_is_rejected(monkeypatch):
     time.sleep(0.01)
     with pytest.raises(AuthenticationError):
         security.decode_token(token, expected_type="access")
+
+
+def test_token_missing_required_claim_raises_authentication_error() -> None:
+    """Regression test: validly-signed tokens missing required claims must raise
+    AuthenticationError (not pydantic.ValidationError), maintaining the contract
+    that decode_token never escapes validation errors to the caller."""
+    # Create a token with a valid signature but missing the required 'jti' claim.
+    # The token is signed with the correct secret, so jwt.decode will succeed.
+    # But TokenPayload.model_validate will fail because jti is missing.
+    # We must catch that ValidationError and convert it to AuthenticationError.
+    claims = {
+        "sub": str(uuid7()),
+        "typ": "access",
+        "exp": int((datetime.now(UTC) + timedelta(hours=1)).timestamp()),
+        "iat": int(datetime.now(UTC).timestamp()),
+        # Note: 'jti' is deliberately omitted.
+    }
+    token = jwt.encode(claims, get_settings().jwt_secret, algorithm="HS256")
+    with pytest.raises(AuthenticationError):
+        decode_token(token, expected_type="access")
+
+
+def test_token_with_invalid_signature_raises_authentication_error() -> None:
+    """Verify that signature verification is enforced: a token signed with
+    a different secret must be rejected, even if it has all required claims."""
+    user_id = uuid7()
+    claims = {
+        "sub": str(user_id),
+        "org": str(uuid7()),
+        "role": "owner",
+        "jti": str(uuid7()),
+        "typ": "access",
+        "exp": int((datetime.now(UTC) + timedelta(hours=1)).timestamp()),
+        "iat": int(datetime.now(UTC).timestamp()),
+    }
+    # Sign with a different secret (not the one in Settings).
+    token = jwt.encode(claims, "some-other-secret", algorithm="HS256")
+    with pytest.raises(AuthenticationError):
+        decode_token(token, expected_type="access")

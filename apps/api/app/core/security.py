@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import jwt
 from argon2 import PasswordHasher
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.core.config import get_settings
 from app.core.errors import AuthenticationError
@@ -77,10 +77,10 @@ def create_refresh_token(*, user_id: uuid.UUID) -> tuple[str, str]:
 def decode_token(token: str, *, expected_type: str) -> TokenPayload:
     try:
         raw = jwt.decode(token, get_settings().jwt_secret, algorithms=[_ALGORITHM])
-    except jwt.PyJWTError as exc:
+        payload = TokenPayload.model_validate(raw)
+    except (jwt.PyJWTError, ValidationError) as exc:
         raise AuthenticationError("invalid or expired token") from exc
 
-    payload = TokenPayload.model_validate(raw)
     if payload.typ != expected_type:
         raise AuthenticationError("invalid or expired token")
     return payload
