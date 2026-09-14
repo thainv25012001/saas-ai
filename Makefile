@@ -40,3 +40,17 @@ schema:
 
 seed:
 	cd apps/api && uv run python -m app.db.seed
+
+.PHONY: web web-codegen web-typecheck web-lint
+
+web:
+	cd apps/web && npm run dev
+
+web-codegen:
+	cd apps/web && npm run codegen
+
+web-typecheck:
+	cd apps/web && npm run typecheck
+
+web-lint:
+	cd apps/web && npm run lint

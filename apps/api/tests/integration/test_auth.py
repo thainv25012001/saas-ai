@@ -28,6 +28,10 @@ async def test_register_sets_an_httponly_refresh_cookie(client, clean_users):
     assert "refresh_token=" in cookie
     assert "HttpOnly" in cookie
     assert "SameSite=lax" in cookie.replace("SameSite=Lax", "SameSite=lax")
+    # Path must stay "/" (not narrowed to "/api/v1/auth"): the Next.js
+    # dashboard middleware guard reads this cookie on /dashboard routes and
+    # would stop seeing it if the path were ever tightened back.
+    assert "Path=/" in cookie
 
 
 async def test_register_creates_org_user_and_owner_membership(client, clean_users):
