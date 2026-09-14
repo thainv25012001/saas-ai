@@ -105,6 +105,13 @@ jobs:
         env:
           API_URL: ${{ vars.API_URL }}
         run: |
+          # An unset variable would otherwise spend 100 seconds curling
+          # "/health/ready" with no host and report it as the API being down.
+          if [ -z "$API_URL" ]; then
+            echo "::error::The API_URL variable is empty. gh variable set API_URL --env production --body https://<service>.onrender.com"
+            exit 1
+          fi
+
           for _ in $(seq 1 20); do
             body=$(curl -fsS "$API_URL/health/ready") || { sleep 5; continue; }
             echo "$body"
@@ -136,6 +143,20 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
+
+      - name: Check the Vercel credentials are present
+        # The CLI's own error for an absent token is "Error: No existing
+        # credentials found", which reads like a login problem rather than an
+        # unset secret.
+        run: |
+          missing=""
+          [ -n "$VERCEL_TOKEN" ] || missing="$missing VERCEL_TOKEN"
+          [ -n "$VERCEL_ORG_ID" ] || missing="$missing VERCEL_ORG_ID"
+          [ -n "$VERCEL_PROJECT_ID" ] || missing="$missing VERCEL_PROJECT_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing production environment secret(s):$missing"
+            exit 1
+          fi
 
       - name: Install the Vercel CLI
         run: npm install --global vercel@latest
