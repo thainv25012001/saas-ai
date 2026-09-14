@@ -60,6 +60,21 @@ services:
     command: >
       sh -c "uv run alembic upgrade head &&
              uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    healthcheck:
+      # No curl in python:3.12-slim; urllib is already there. Not "healthy"
+      # until this succeeds, which only happens once migrations have
+      # finished and uvicorn has started — exactly the signal
+      # `docker compose up -d --wait` (see README) needs before it is safe
+      # to run anything against the API, e.g. `make seed`.
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=2)\"",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
 
   web:
     build: ./apps/web
