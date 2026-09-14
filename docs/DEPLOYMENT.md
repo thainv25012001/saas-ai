@@ -56,6 +56,21 @@ ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA public
   GRANT USAGE, SELECT ON SEQUENCES TO app_user;
 ```
 
+Run this **before the first deploy**. `ALTER DEFAULT PRIVILEGES` only applies to tables created
+after it, so if migrations run first, `app_user` ends up with no privileges at all and the API
+answers every request with `permission denied for table organizations` while the migrate job
+reports success. If that already happened, grant the existing tables directly (as `app_owner`):
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_user;
+```
+
+The `citext` extension is also created by migration `0001` (`CREATE EXTENSION IF NOT EXISTS`), so a
+database that is bare but whose migration role may create extensions provisions itself. On Neon a
+role created with plain `CREATE ROLE` usually may not, which is why the statement above stays in the
+bootstrap: skipping it fails the migrate job with `type "citext" does not exist`.
+
 The role split is what makes Row-Level Security real: `app_owner` owns the tables (and so bypasses
 RLS) and only runs migrations; `app_user` is what the application connects as and is subject to
 every policy. Neither role has `BYPASSRLS`.
