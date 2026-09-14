@@ -163,9 +163,16 @@ class Prompt:
 
 @strawberry.input
 class CreateAgentInput:
+    """`provider`/`model` default to `None`, matching `UpdateAgentInput`
+    below and `app.agents.schemas.CreateAgentInput`: this is the only path a
+    real user creates an agent through, so a hardcoded literal default here
+    would always win over `AgentService.create_agent`'s own
+    `data.provider or default_llm_provider` resolution — the config setting
+    would never actually apply outside the dev seed script."""
+
     name: str
-    provider: str = "openai"
-    model: str = "gpt-4o-mini"
+    provider: str | None = None
+    model: str | None = None
     temperature: float = 0.3
     max_tokens: int = 1024
 

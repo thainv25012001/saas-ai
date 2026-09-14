@@ -40,6 +40,16 @@ class FakeProvider:
     ) -> None:
         self._script = script if script is not None else list(_DEFAULT_SCRIPT)
         self._usage = usage or Usage(input_tokens=10, output_tokens=5)
+        if fail_with is not None and not self._script:
+            # The documented contract is "raises after at least one chunk has
+            # streamed" — that is the whole point of `fail_with` (Task 6 needs
+            # to reproduce tokens already reaching the browser before the
+            # provider dies). An empty script has no chunk to fail after, so
+            # this would either silently fail before any output or raise from
+            # `generate()` with nothing to distinguish it from any other
+            # failure mode. Reject it at construction instead of yielding a
+            # contract violation later.
+            raise ValueError("fail_with requires a non-empty script")
         self._fail_with = fail_with
         self.last_request: CompletionRequest | None = None
 

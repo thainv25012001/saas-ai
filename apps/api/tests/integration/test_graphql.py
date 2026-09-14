@@ -95,6 +95,31 @@ async def test_create_agent_mutation(client, auth_headers):
     assert agent["status"] == "DRAFT"
 
 
+async def test_create_agent_mutation_resolves_provider_and_model_from_settings(
+    client, auth_headers
+):
+    """Regression test: the GraphQL input type used to declare its own
+    `provider: str = "openai"` default and pass it straight through, which
+    short-circuited `AgentService.create_agent`'s `data.provider or
+    default_llm_provider` resolution to a hardcoded "openai" for every agent
+    created through the dashboard — the only path a real user exercises.
+    `model` has the same failure mode: it must resolve to the *chosen*
+    provider's own default model, not a hardcoded OpenAI model string paired
+    with (e.g.) the `fake` provider."""
+    from app.core.config import get_settings
+    from app.llm.registry import DEFAULT_MODELS
+
+    response = await graphql(
+        client,
+        'mutation { createAgent(input: {name: "Default Provider Bot"}) { provider model } }',
+        headers=auth_headers,
+    )
+    agent = response.json()["data"]["createAgent"]
+    default_provider = get_settings().default_llm_provider
+    assert agent["provider"] == default_provider
+    assert agent["model"] == DEFAULT_MODELS[default_provider]
+
+
 async def test_agents_query_lists_created_agents(client, auth_headers):
     await graphql(
         client,

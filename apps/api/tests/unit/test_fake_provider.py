@@ -1,4 +1,5 @@
 import pytest
+from pydantic import BaseModel
 
 from app.llm.errors import LLMUnavailableError
 from app.llm.fake_provider import FakeProvider
@@ -72,3 +73,24 @@ async def test_last_request_is_recorded_for_assertions():
     await provider.generate(_request())
     assert provider.last_request is not None
     assert provider.last_request.system == "you are a test"
+
+
+def test_fail_with_requires_a_nonempty_script():
+    """An empty script has no chunk for `fail_with` to raise after, which would
+    silently violate the documented "raises after at least one chunk" contract.
+    Reject the nonsensical construction outright instead of leaving Task 6 to
+    discover it by surprise."""
+    with pytest.raises(ValueError):
+        FakeProvider(script=[], fail_with=LLMUnavailableError("gone"))
+
+
+class _Extraction(BaseModel):
+    label: str = "unset"
+    confidence: float = 0.0
+
+
+async def test_generate_structured_returns_an_instance_of_the_requested_schema():
+    provider = FakeProvider(script=["x"])
+    result = await provider.generate_structured(_request(), _Extraction)
+    assert isinstance(result, _Extraction)
+    assert provider.last_request is not None

@@ -7,6 +7,16 @@ from app.llm.fake_provider import FakeProvider
 _PROVIDERS: dict[str, LLMProvider] = {}
 _KNOWN = ("fake", "openai", "anthropic")
 
+# Per PHASE-2.md §2.4. Used to resolve an agent's model when the caller
+# names a provider but not a model: each provider's own idiomatic default,
+# not a single hardcoded literal that would otherwise pair (e.g.) the
+# `fake` provider with an OpenAI model string.
+DEFAULT_MODELS: dict[str, str] = {
+    "fake": "fake-1",
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-opus-5",
+}
+
 
 def get_provider(name: str) -> LLMProvider:
     """Resolve a provider by name, constructing it at most once.
