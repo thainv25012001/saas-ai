@@ -35,3 +35,8 @@ revision:
 
 schema:
 	cd apps/api && uv run strawberry export-schema app.graphql.schema:schema > ../../packages/shared/schema.graphql
+
+.PHONY: seed
+
+seed:
+	cd apps/api && uv run python -m app.db.seed

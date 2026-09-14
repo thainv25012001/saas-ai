@@ -60,7 +60,7 @@ async def clean_users(owner_connection: "AsyncConnection") -> AsyncIterator[None
     async def _purge() -> None:
         await owner_connection.execute(text("DELETE FROM users WHERE email LIKE '%@example.com'"))
         await owner_connection.execute(
-            text("DELETE FROM organizations WHERE slug LIKE 'ada-motors%'")
+            text("DELETE FROM organizations WHERE name LIKE 'Ada Motors%'")
         )
         await owner_connection.commit()
 
