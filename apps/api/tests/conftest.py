@@ -1,8 +1,12 @@
 import os
 from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncConnection
 
 # Set before importing the app: Settings reads the environment at import time.
 os.environ.setdefault(
@@ -29,3 +33,17 @@ async def client() -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+
+
+@pytest.fixture
+async def owner_connection() -> AsyncIterator["AsyncConnection"]:
+    """A connection as app_owner — bypasses RLS. Use it to assert on schema
+    and to set up fixture data across organizations."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.core.config import get_settings
+
+    engine = create_async_engine(get_settings().migration_database_url)
+    async with engine.connect() as connection:
+        yield connection
+    await engine.dispose()

@@ -22,3 +22,11 @@ test:
 
 lint:
 	cd apps/api && uv run ruff check . && uv run ruff format --check . && uv run mypy app/
+
+.PHONY: migrate revision
+
+migrate:
+	cd apps/api && uv run alembic upgrade head
+
+revision:
+	cd apps/api && uv run alembic revision -m "$(m)"

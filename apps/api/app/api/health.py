@@ -15,11 +15,14 @@ async def health() -> dict[str, str]:
 
 @router.get("/ready")
 async def ready() -> dict[str, Any]:
-    """Readiness: dependencies are reachable.
+    """Readiness: dependencies are reachable. Redis is added in Task 6."""
+    from app.db.session import check_database
 
-    Task 3 adds the database check and Task 6 adds Redis.
-    """
-    return {"status": "ready", "checks": {}}
+    database_ok = await check_database()
+    return {
+        "status": "ready" if database_ok else "degraded",
+        "checks": {"database": database_ok},
+    }
 
 
 @router.get("/boom")
