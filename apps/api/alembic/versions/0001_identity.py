@@ -16,6 +16,16 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # users.email below is CITEXT, so this migration cannot run on a database
+    # that lacks the extension. Locally and in CI it is already there, created
+    # by infrastructure/postgres/init.sql; a managed Postgres (Neon) starts
+    # bare, and the failure there is a bewildering `type "citext" does not
+    # exist` rather than anything about extensions. IF NOT EXISTS is a no-op
+    # where it is already installed - even for a role that would not be
+    # allowed to create it - so this is safe everywhere and self-provisioning
+    # wherever the migration role has the privilege.
+    op.execute("CREATE EXTENSION IF NOT EXISTS citext")
+
     op.create_table(
         "organizations",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
