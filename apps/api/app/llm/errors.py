@@ -14,7 +14,15 @@ class LLMError(AppError):
 
 
 class LLMRateLimitError(LLMError):
-    code = "rate_limited"
+    """The upstream LLM provider is throttling us — distinct from `RateLimitError`
+    in `app/core/errors.py`, which fires when *our own* API throttles a caller
+    (failed logins, registration attempts). Both flow through the same handler and
+    render `code` verbatim to clients and structured logs, so the codes must not
+    collide: callers and on-call dashboards need to tell "you're being throttled by
+    us" apart from "the LLM provider is rate limiting us, retry shortly."
+    """
+
+    code = "llm_rate_limited"
     status_code = 429
 
 

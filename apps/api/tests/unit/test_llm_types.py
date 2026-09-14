@@ -1,4 +1,5 @@
 import pytest
+from pydantic import TypeAdapter
 from pydantic import ValidationError as PydanticValidationError
 
 from app.core.errors import AppError
@@ -11,7 +12,9 @@ from app.llm.errors import (
 )
 from app.llm.types import (
     CompletionRequest,
+    ErrorEvent,
     Message,
+    StreamEvent,
     TextBlock,
     ToolUseBlock,
     Usage,
@@ -39,11 +42,26 @@ def test_text_content_joins_only_text_blocks():
 
 
 def test_content_blocks_discriminate_on_type():
-    message = Message(
-        role="assistant",
-        content=[TextBlock(text="a"), ToolUseBlock(id="t", name="n", input={})],
+    """Round-trips raw dicts (not Python objects) through validation, the only path
+    where pydantic's discriminator actually does anything. A regression here would
+    let a `tool_use` payload silently parse as the wrong block class."""
+    message = Message.model_validate(
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "t", "name": "n", "input": {}},
+                {"type": "text", "text": "x"},
+            ],
+        }
     )
-    assert [block.type for block in message.content] == ["text", "tool_use"]
+    assert isinstance(message.content[0], ToolUseBlock)
+    assert isinstance(message.content[1], TextBlock)
+
+
+def test_stream_events_discriminate_on_type():
+    """Same guard as above, for the StreamEvent union used by the SSE layer."""
+    event = TypeAdapter(StreamEvent).validate_python({"type": "error", "code": "c", "message": "m"})
+    assert isinstance(event, ErrorEvent)
 
 
 def test_completion_request_defaults_temperature_to_none():
@@ -67,7 +85,7 @@ def test_usage_totals():
 @pytest.mark.parametrize(
     ("error_cls", "code", "status"),
     [
-        (LLMRateLimitError, "rate_limited", 429),
+        (LLMRateLimitError, "llm_rate_limited", 429),
         (LLMUnavailableError, "llm_unavailable", 503),
         (LLMConfigurationError, "llm_misconfigured", 500),
         (LLMEmptyResponseError, "llm_empty_response", 502),
