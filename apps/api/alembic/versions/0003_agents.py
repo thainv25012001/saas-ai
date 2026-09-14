@@ -53,10 +53,7 @@ def upgrade() -> None:
         sa.Column("model", sa.String(100), nullable=False, server_default="gpt-4o-mini"),
         sa.Column("temperature", sa.Float(), nullable=False, server_default="0.3"),
         sa.Column("max_tokens", sa.Integer(), nullable=False, server_default="1024"),
-        # No foreign key yet: `prompts` doesn't exist until Task 8 creates
-        # it. Task 8 owes an `op.create_foreign_key(...)` here to match the
-        # `ForeignKey(...)` it restores on the Agent.prompt_id ORM column
-        # (see app/db/models/agent.py) -- both sides need updating together.
+        # 0004_prompts adds the fk_agents_prompt_id constraint once `prompts` exists.
         sa.Column("prompt_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("public_key", sa.String(64), nullable=False, unique=True),
         *_TIMESTAMPS,

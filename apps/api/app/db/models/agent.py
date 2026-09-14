@@ -36,14 +36,9 @@ class Agent(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
     model: Mapped[str] = mapped_column(String(100), nullable=False, default="gpt-4o-mini")
     temperature: Mapped[float] = mapped_column(Float, nullable=False, default=0.3)
     max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=1024)
-    # No ForeignKey here (nor in the migration): `prompts` does not exist as
-    # a table -- in the database or in Base.metadata -- until Task 8 adds
-    # it. A ForeignKey("prompts.id") on an unmapped table blows up at flush
-    # time (NoReferencedTableError from the unit of work's table sort), not
-    # just at migration time, so this stays a plain nullable UUID until
-    # Task 8 creates the target and can add the constraint on both sides.
     prompt_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
+        ForeignKey("prompts.id", ondelete="SET NULL"),
         nullable=True,
     )
     public_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
