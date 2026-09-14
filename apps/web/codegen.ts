@@ -5,7 +5,16 @@ const config: CodegenConfig = {
   documents: ["src/**/*.graphql"],
   generates: {
     "src/graphql/generated.ts": {
-      plugins: ["typescript", "typescript-operations", "typed-document-node"],
+      // No "typescript" (base schema types) plugin: with everything emitted
+      // into one file, it and "typescript-operations" both declare any
+      // enum/input type an operation touches (e.g. AgentStatus,
+      // UpdateAgentInput), which collides as a duplicate identifier under
+      // strict tsc. "typescript-operations" alone is self-contained - it
+      // emits the Exact/Scalars preamble and every enum/input an operation
+      // actually needs - and nothing here imports the raw schema types
+      // (Agent, Query, Mutation, ...) directly, so dropping the base plugin
+      // loses nothing this app uses.
+      plugins: ["typescript-operations", "typed-document-node"],
     },
   },
 };

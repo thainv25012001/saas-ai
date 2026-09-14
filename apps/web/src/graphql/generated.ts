@@ -3,198 +3,84 @@ type Exact<T extends { [key: string]: unknown }> = { [K in keyof T]: T[K] };
 /** Internal type. DO NOT USE DIRECTLY. */
 export type Incremental<T> = T | { [P in keyof T]?: P extends ' $fragmentName' | '__typename' ? T[P] : never };
 import { TypedDocumentNode as DocumentNode } from '@graphql-typed-document-node/core';
-export type Maybe<T> = T | null;
-export type InputMaybe<T> = Maybe<T>;
-/** All built-in and custom scalars, mapped to their actual values */
-export type Scalars = {
-  ID: { input: string; output: string; }
-  String: { input: string; output: string; }
-  Boolean: { input: boolean; output: boolean; }
-  Int: { input: number; output: number; }
-  Float: { input: number; output: number; }
-  /** Date with time (isoformat) */
-  DateTime: { input: unknown; output: unknown; }
-  UUID: { input: unknown; output: unknown; }
-};
-
-export type Agent = {
-  __typename?: 'Agent';
-  config?: Maybe<AgentConfig>;
-  createdAt: Scalars['DateTime']['output'];
-  id: Scalars['UUID']['output'];
-  maxTokens: Scalars['Int']['output'];
-  model: Scalars['String']['output'];
-  name: Scalars['String']['output'];
-  promptId?: Maybe<Scalars['UUID']['output']>;
-  provider: Scalars['String']['output'];
-  slug: Scalars['String']['output'];
-  status: AgentStatus;
-  temperature: Scalars['Float']['output'];
-  updatedAt: Scalars['DateTime']['output'];
-};
-
-export type AgentConfig = {
-  __typename?: 'AgentConfig';
-  enabledToolNames: Array<Scalars['String']['output']>;
-  fallbackMessage: Scalars['String']['output'];
-  greeting?: Maybe<Scalars['String']['output']>;
-  id: Scalars['UUID']['output'];
-  language: Scalars['String']['output'];
-  maxAgentSteps: Scalars['Int']['output'];
-  persona?: Maybe<Scalars['String']['output']>;
-  retrievalMinScore: Scalars['Float']['output'];
-  retrievalTopK: Scalars['Int']['output'];
-  tone: Scalars['String']['output'];
-};
-
-export enum AgentStatus {
-  Active = 'ACTIVE',
-  Disabled = 'DISABLED',
-  Draft = 'DRAFT'
-}
-
-export type CreateAgentInput = {
-  maxTokens?: Scalars['Int']['input'];
-  model?: Scalars['String']['input'];
-  name: Scalars['String']['input'];
-  provider?: Scalars['String']['input'];
-  temperature?: Scalars['Float']['input'];
-};
-
-export type CreatePromptInput = {
-  description?: InputMaybe<Scalars['String']['input']>;
-  key: Scalars['String']['input'];
-  name: Scalars['String']['input'];
-  systemPrompt: Scalars['String']['input'];
-};
-
-export type CreatePromptVersionInput = {
-  notes?: InputMaybe<Scalars['String']['input']>;
-  systemPrompt: Scalars['String']['input'];
-};
-
-export type Me = {
-  __typename?: 'Me';
-  email: Scalars['String']['output'];
-  fullName: Scalars['String']['output'];
-  organizationId: Scalars['UUID']['output'];
-  organizationName: Scalars['String']['output'];
-  role: Scalars['String']['output'];
-  userId: Scalars['UUID']['output'];
-};
-
-export type Mutation = {
-  __typename?: 'Mutation';
-  activatePromptVersion: PromptVersion;
-  createAgent: Agent;
-  createPrompt: Prompt;
-  createPromptVersion: PromptVersion;
-  deleteAgent: Scalars['Boolean']['output'];
-  updateAgent: Agent;
-  updateAgentConfig: AgentConfig;
-};
-
-
-export type MutationActivatePromptVersionArgs = {
-  versionId: Scalars['UUID']['input'];
-};
-
-
-export type MutationCreateAgentArgs = {
-  input: CreateAgentInput;
-};
-
-
-export type MutationCreatePromptArgs = {
-  input: CreatePromptInput;
-};
-
-
-export type MutationCreatePromptVersionArgs = {
-  input: CreatePromptVersionInput;
-  promptId: Scalars['UUID']['input'];
-};
-
-
-export type MutationDeleteAgentArgs = {
-  id: Scalars['UUID']['input'];
-};
-
-
-export type MutationUpdateAgentArgs = {
-  id: Scalars['UUID']['input'];
-  input: UpdateAgentInput;
-};
-
-
-export type MutationUpdateAgentConfigArgs = {
-  agentId: Scalars['UUID']['input'];
-  input: UpdateAgentConfigInput;
-};
-
-export type Prompt = {
-  __typename?: 'Prompt';
-  createdAt: Scalars['DateTime']['output'];
-  description?: Maybe<Scalars['String']['output']>;
-  id: Scalars['UUID']['output'];
-  key: Scalars['String']['output'];
-  name: Scalars['String']['output'];
-};
-
-export type PromptVersion = {
-  __typename?: 'PromptVersion';
-  createdAt: Scalars['DateTime']['output'];
-  id: Scalars['UUID']['output'];
-  isActive: Scalars['Boolean']['output'];
-  notes?: Maybe<Scalars['String']['output']>;
-  systemPrompt: Scalars['String']['output'];
-  version: Scalars['Int']['output'];
-};
-
-export type Query = {
-  __typename?: 'Query';
-  agent: Agent;
-  agents: Array<Agent>;
-  me: Me;
-  prompt: Prompt;
-  prompts: Array<Prompt>;
-};
-
-
-export type QueryAgentArgs = {
-  id: Scalars['UUID']['input'];
-};
-
-
-export type QueryPromptArgs = {
-  id: Scalars['UUID']['input'];
-};
+export type AgentStatus =
+  | 'ACTIVE'
+  | 'DISABLED'
+  | 'DRAFT';
 
 export type UpdateAgentConfigInput = {
-  enabledToolNames?: InputMaybe<Array<Scalars['String']['input']>>;
-  fallbackMessage?: InputMaybe<Scalars['String']['input']>;
-  greeting?: InputMaybe<Scalars['String']['input']>;
-  language?: InputMaybe<Scalars['String']['input']>;
-  maxAgentSteps?: InputMaybe<Scalars['Int']['input']>;
-  persona?: InputMaybe<Scalars['String']['input']>;
-  retrievalMinScore?: InputMaybe<Scalars['Float']['input']>;
-  retrievalTopK?: InputMaybe<Scalars['Int']['input']>;
-  tone?: InputMaybe<Scalars['String']['input']>;
+  enabledToolNames?: Array<string> | null | undefined;
+  fallbackMessage?: string | null | undefined;
+  greeting?: string | null | undefined;
+  language?: string | null | undefined;
+  maxAgentSteps?: number | null | undefined;
+  persona?: string | null | undefined;
+  retrievalMinScore?: number | null | undefined;
+  retrievalTopK?: number | null | undefined;
+  tone?: string | null | undefined;
 };
 
 export type UpdateAgentInput = {
-  maxTokens?: InputMaybe<Scalars['Int']['input']>;
-  model?: InputMaybe<Scalars['String']['input']>;
-  name?: InputMaybe<Scalars['String']['input']>;
-  provider?: InputMaybe<Scalars['String']['input']>;
-  status?: InputMaybe<AgentStatus>;
-  temperature?: InputMaybe<Scalars['Float']['input']>;
+  maxTokens?: number | null | undefined;
+  model?: string | null | undefined;
+  name?: string | null | undefined;
+  provider?: string | null | undefined;
+  status?: AgentStatus | null | undefined;
+  temperature?: number | null | undefined;
 };
 
-export type PingQueryVariables = Exact<{ [key: string]: never; }>;
+export type MeQueryVariables = Exact<{ [key: string]: never; }>;
 
 
-export type PingQuery = { me: { email: string } };
+export type MeQuery = { me: { userId: unknown, email: string, fullName: string, organizationId: unknown, organizationName: string, role: string } };
+
+export type AgentsQueryVariables = Exact<{ [key: string]: never; }>;
 
 
-export const PingDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"Ping"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"me"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"email"}}]}}]}}]} as unknown as DocumentNode<PingQuery, PingQueryVariables>;
+export type AgentsQuery = { agents: Array<{ id: unknown, name: string, slug: string, status: AgentStatus, model: string, provider: string, createdAt: unknown }> };
+
+export type AgentQueryVariables = Exact<{
+  id: unknown;
+}>;
+
+
+export type AgentQuery = { agent: { id: unknown, name: string, slug: string, status: AgentStatus, provider: string, model: string, temperature: number, maxTokens: number, config: { id: unknown, tone: string, language: string, persona: string | null, greeting: string | null, fallbackMessage: string, retrievalTopK: number, maxAgentSteps: number } | null } };
+
+export type CreateAgentMutationVariables = Exact<{
+  name: string;
+}>;
+
+
+export type CreateAgentMutation = { createAgent: { id: unknown, name: string, slug: string, status: AgentStatus } };
+
+export type UpdateAgentMutationVariables = Exact<{
+  id: unknown;
+  input: UpdateAgentInput;
+}>;
+
+
+export type UpdateAgentMutation = { updateAgent: { id: unknown, name: string, slug: string, status: AgentStatus, provider: string, model: string, temperature: number, maxTokens: number } };
+
+export type UpdateAgentConfigMutationVariables = Exact<{
+  agentId: unknown;
+  input: UpdateAgentConfigInput;
+}>;
+
+
+export type UpdateAgentConfigMutation = { updateAgentConfig: { id: unknown, tone: string, retrievalTopK: number, maxAgentSteps: number } };
+
+export type DeleteAgentMutationVariables = Exact<{
+  id: unknown;
+}>;
+
+
+export type DeleteAgentMutation = { deleteAgent: boolean };
+
+
+export const MeDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"Me"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"me"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"userId"}},{"kind":"Field","name":{"kind":"Name","value":"email"}},{"kind":"Field","name":{"kind":"Name","value":"fullName"}},{"kind":"Field","name":{"kind":"Name","value":"organizationId"}},{"kind":"Field","name":{"kind":"Name","value":"organizationName"}},{"kind":"Field","name":{"kind":"Name","value":"role"}}]}}]}}]} as unknown as DocumentNode<MeQuery, MeQueryVariables>;
+export const AgentsDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"Agents"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"agents"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}},{"kind":"Field","name":{"kind":"Name","value":"slug"}},{"kind":"Field","name":{"kind":"Name","value":"status"}},{"kind":"Field","name":{"kind":"Name","value":"model"}},{"kind":"Field","name":{"kind":"Name","value":"provider"}},{"kind":"Field","name":{"kind":"Name","value":"createdAt"}}]}}]}}]} as unknown as DocumentNode<AgentsQuery, AgentsQueryVariables>;
+export const AgentDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"Agent"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"id"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"UUID"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"agent"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"id"},"value":{"kind":"Variable","name":{"kind":"Name","value":"id"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}},{"kind":"Field","name":{"kind":"Name","value":"slug"}},{"kind":"Field","name":{"kind":"Name","value":"status"}},{"kind":"Field","name":{"kind":"Name","value":"provider"}},{"kind":"Field","name":{"kind":"Name","value":"model"}},{"kind":"Field","name":{"kind":"Name","value":"temperature"}},{"kind":"Field","name":{"kind":"Name","value":"maxTokens"}},{"kind":"Field","name":{"kind":"Name","value":"config"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"tone"}},{"kind":"Field","name":{"kind":"Name","value":"language"}},{"kind":"Field","name":{"kind":"Name","value":"persona"}},{"kind":"Field","name":{"kind":"Name","value":"greeting"}},{"kind":"Field","name":{"kind":"Name","value":"fallbackMessage"}},{"kind":"Field","name":{"kind":"Name","value":"retrievalTopK"}},{"kind":"Field","name":{"kind":"Name","value":"maxAgentSteps"}}]}}]}}]}}]} as unknown as DocumentNode<AgentQuery, AgentQueryVariables>;
+export const CreateAgentDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"mutation","name":{"kind":"Name","value":"CreateAgent"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"name"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"String"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"createAgent"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"input"},"value":{"kind":"ObjectValue","fields":[{"kind":"ObjectField","name":{"kind":"Name","value":"name"},"value":{"kind":"Variable","name":{"kind":"Name","value":"name"}}}]}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}},{"kind":"Field","name":{"kind":"Name","value":"slug"}},{"kind":"Field","name":{"kind":"Name","value":"status"}}]}}]}}]} as unknown as DocumentNode<CreateAgentMutation, CreateAgentMutationVariables>;
+export const UpdateAgentDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"mutation","name":{"kind":"Name","value":"UpdateAgent"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"id"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"UUID"}}}},{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"input"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"UpdateAgentInput"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"updateAgent"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"id"},"value":{"kind":"Variable","name":{"kind":"Name","value":"id"}}},{"kind":"Argument","name":{"kind":"Name","value":"input"},"value":{"kind":"Variable","name":{"kind":"Name","value":"input"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}},{"kind":"Field","name":{"kind":"Name","value":"slug"}},{"kind":"Field","name":{"kind":"Name","value":"status"}},{"kind":"Field","name":{"kind":"Name","value":"provider"}},{"kind":"Field","name":{"kind":"Name","value":"model"}},{"kind":"Field","name":{"kind":"Name","value":"temperature"}},{"kind":"Field","name":{"kind":"Name","value":"maxTokens"}}]}}]}}]} as unknown as DocumentNode<UpdateAgentMutation, UpdateAgentMutationVariables>;
+export const UpdateAgentConfigDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"mutation","name":{"kind":"Name","value":"UpdateAgentConfig"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"agentId"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"UUID"}}}},{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"input"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"UpdateAgentConfigInput"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"updateAgentConfig"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"agentId"},"value":{"kind":"Variable","name":{"kind":"Name","value":"agentId"}}},{"kind":"Argument","name":{"kind":"Name","value":"input"},"value":{"kind":"Variable","name":{"kind":"Name","value":"input"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"tone"}},{"kind":"Field","name":{"kind":"Name","value":"retrievalTopK"}},{"kind":"Field","name":{"kind":"Name","value":"maxAgentSteps"}}]}}]}}]} as unknown as DocumentNode<UpdateAgentConfigMutation, UpdateAgentConfigMutationVariables>;
+export const DeleteAgentDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"mutation","name":{"kind":"Name","value":"DeleteAgent"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"id"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"UUID"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"deleteAgent"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"id"},"value":{"kind":"Variable","name":{"kind":"Name","value":"id"}}}]}]}}]} as unknown as DocumentNode<DeleteAgentMutation, DeleteAgentMutationVariables>;
