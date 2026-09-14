@@ -34,14 +34,16 @@ async def test_membership_is_unique_per_org_and_user(owner_connection):
     assert result.scalar_one() == 1
 
 
-async def test_identity_tables_do_not_have_rls(owner_connection):
+@pytest.mark.parametrize("table", ["organizations", "users", "memberships"])
+async def test_identity_tables_do_not_have_rls(owner_connection, table):
     """organizations/users/memberships are reached through membership joins,
     not through a tenant setting, so they are deliberately excluded from RLS."""
     result = await owner_connection.execute(
         text(
             "SELECT relrowsecurity FROM pg_class "
-            "WHERE relname = 'users' AND relnamespace = 'public'::regnamespace"
-        )
+            "WHERE relname = :table AND relnamespace = 'public'::regnamespace"
+        ),
+        {"table": table},
     )
     assert result.scalar_one() is False
 
