@@ -144,10 +144,12 @@ jobs:
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
 
-      - name: Check the Vercel credentials are present
-        # The CLI's own error for an absent token is "Error: No existing
-        # credentials found", which reads like a login problem rather than an
-        # unset secret.
+      - name: Check the Vercel credentials
+        # Presence alone is not enough: three set-but-wrong values still reach
+        # `vercel pull`, whose only complaint is "Could not retrieve Project
+        # Settings ... remove the .vercel directory" - boilerplate that assumes
+        # local linking and says nothing useful in an env-var-driven CI run.
+        # Resolving the project here names the credential actually at fault.
         run: |
           missing=""
           [ -n "$VERCEL_TOKEN" ] || missing="$missing VERCEL_TOKEN"
@@ -157,6 +159,42 @@ jobs:
             echo "::error::Missing production environment secret(s):$missing"
             exit 1
           fi
+
+          # Pasting the human-readable project name rather than the id is the
+          # usual mistake, and shape catches it without spending a round-trip.
+          case "$VERCEL_PROJECT_ID" in
+            prj_*) ;;
+            *) echo "::error::VERCEL_PROJECT_ID is not a prj_... id. Copy it from the project's Settings page rather than using the project name."; exit 1 ;;
+          esac
+
+          # No -f: a 4xx is the answer here, not a failure to get one.
+          api() {
+            curl -sS -o /tmp/vercel-check.json -w '%{http_code}' \
+              -H "Authorization: Bearer $VERCEL_TOKEN" "https://api.vercel.com$1"
+          }
+
+          status=$(api /v2/user)
+          if [ "$status" != "200" ]; then
+            echo "::error::Vercel rejected VERCEL_TOKEN (HTTP $status). It is invalid, expired, or revoked."
+            exit 1
+          fi
+
+          status=$(api "/v9/projects/$VERCEL_PROJECT_ID?teamId=$VERCEL_ORG_ID")
+          if [ "$status" = "200" ]; then
+            exit 0
+          fi
+
+          # A hobby account's org id is the bare user id, which 404s when sent
+          # as teamId. Retrying unscoped separates a wrong org id from a wrong
+          # project id instead of blaming both.
+          if [ "$(api "/v9/projects/$VERCEL_PROJECT_ID")" = "200" ]; then
+            echo "::error::VERCEL_ORG_ID is wrong: the project resolves without it, and 404s with it. Use the user id from Account Settings for a personal account, or the team_... id for a team."
+            exit 1
+          fi
+
+          echo "::error::Vercel could not resolve VERCEL_PROJECT_ID under VERCEL_ORG_ID (HTTP $status). Either the project belongs to a different org, or this token has no access to it."
+          cat /tmp/vercel-check.json
+          exit 1
 
       - name: Install the Vercel CLI
         run: npm install --global vercel@latest
