@@ -3,101 +3,167 @@
 import Link from "next/link";
 import { useState } from "react";
 import { useMutation, useQuery } from "urql";
+import { Alert } from "@/components/ui/Alert";
+import { Badge } from "@/components/ui/Badge";
+import { Button } from "@/components/ui/Button";
+import { Card } from "@/components/ui/Card";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { Field } from "@/components/ui/Field";
+import { Icon } from "@/components/ui/icons";
+import { Input } from "@/components/ui/Input";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { LoadingState } from "@/components/ui/Spinner";
 import { AgentsDocument, CreateAgentDocument } from "@/graphql/generated";
+import { agentStatusLabel, agentStatusTone } from "@/lib/agent-status";
 import { useAuth } from "@/lib/auth";
+import { firstGraphQLError } from "@/lib/graphql-errors";
 
 export default function AgentsPage() {
   const { user, loading } = useAuth();
-  const [{ data, fetching }, refetchAgents] = useQuery({
+  const [{ data, fetching, error }, refetchAgents] = useQuery({
     query: AgentsDocument,
     pause: loading || !user,
   });
   const [createResult, createAgent] = useMutation(CreateAgentDocument);
   const [name, setName] = useState("");
+  // The list is what you came for, so the create form is disclosed rather
+  // than parked above it permanently.
+  const [creating, setCreating] = useState(false);
+  // urql's mutation result has no reset: a failed create otherwise leaves
+  // `createResult.error` set, so cancelling and reopening the form would
+  // show a fresh, empty field already flagged with the stale message.
+  const [errorDismissed, setErrorDismissed] = useState(false);
 
   const agents = data?.agents ?? [];
+  const createError = errorDismissed ? null : firstGraphQLError(createResult.error);
+  const queryError = firstGraphQLError(error);
+
+  function openCreateForm() {
+    setErrorDismissed(true);
+    setCreating(true);
+  }
+
+  function cancelCreateForm() {
+    setErrorDismissed(true);
+    setCreating(false);
+    setName("");
+  }
 
   async function onCreate(event: React.FormEvent) {
     event.preventDefault();
+    setErrorDismissed(false);
     const result = await createAgent({ name });
     if (!result.error) {
       setName("");
+      setCreating(false);
       refetchAgents({ requestPolicy: "network-only" });
     }
   }
 
-  const createError = createResult.error?.graphQLErrors[0]?.message ?? null;
-
   return (
-    <section className="space-y-6">
-      <h1 className="text-2xl font-semibold">Agents</h1>
+    <div className="space-y-4">
+      <PageHeader
+        title="Agents"
+        description="Each agent is one assistant, with its own model, prompt and behaviour."
+        actions={
+          creating ? null : (
+            <Button onClick={openCreateForm}>
+              <Icon name="plus" size="md" />
+              New agent
+            </Button>
+          )
+        }
+      />
 
-      <form
-        onSubmit={onCreate}
-        className="flex max-w-md items-end gap-3 rounded-xl border border-slate-200 bg-white p-6"
-      >
-        <label className="flex-1 text-sm font-medium">
-          New agent name
-          <input
-            type="text"
-            required
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2"
+      {creating ? (
+        <Card>
+          <form onSubmit={onCreate} className="space-y-4 p-5">
+            <Field
+              label="Agent name"
+              description="Used to generate the agent's slug. You can change the name later."
+              error={createError}
+              required
+            >
+              {(control) => (
+                <Input
+                  {...control}
+                  type="text"
+                  autoFocus
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                />
+              )}
+            </Field>
+            <div className="flex items-center gap-2">
+              <Button type="submit" loading={createResult.fetching} loadingLabel="Creating…">
+                Create agent
+              </Button>
+              <Button type="button" variant="secondary" onClick={cancelCreateForm}>
+                Cancel
+              </Button>
+            </div>
+          </form>
+        </Card>
+      ) : null}
+
+      {queryError ? <Alert tone="danger">{queryError}</Alert> : null}
+
+      <Card>
+        {fetching && !data ? (
+          <LoadingState label="Loading agents…" />
+        ) : queryError ? null : agents.length === 0 ? (
+          <EmptyState
+            icon="agent"
+            title="No agents yet"
+            description="Create one to configure a model, a prompt and a tone — then test it in the playground."
+            action={<Button onClick={openCreateForm}>Create your first agent</Button>}
           />
-        </label>
-        <button
-          type="submit"
-          disabled={createResult.fetching}
-          className="rounded-md bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-50"
-        >
-          {createResult.fetching ? "Creating…" : "Create"}
-        </button>
-      </form>
-
-      {createError && (
-        <p role="alert" className="rounded-md bg-red-50 p-3 text-sm text-red-700">
-          {createError}
-        </p>
-      )}
-
-      <div className="rounded-xl border border-slate-200 bg-white">
-        {fetching ? (
-          <p className="p-6 text-sm text-slate-500">Loading…</p>
-        ) : agents.length === 0 ? (
-          <p className="p-6 text-sm text-slate-500">
-            No agents yet. Create your first one above.
-          </p>
         ) : (
-          <table className="w-full text-left text-sm">
-            <thead className="border-b border-slate-200 text-slate-500">
-              <tr>
-                <th className="px-6 py-3 font-medium">Name</th>
-                <th className="px-6 py-3 font-medium">Slug</th>
-                <th className="px-6 py-3 font-medium">Status</th>
-                <th className="px-6 py-3 font-medium">Model</th>
-              </tr>
-            </thead>
-            <tbody>
-              {agents.map((agent) => (
-                <tr key={String(agent.id)} className="border-b border-slate-100 last:border-0">
-                  <td className="px-6 py-3">
-                    <Link
-                      href={`/dashboard/agents/${agent.id}`}
-                      className="font-medium text-slate-900 underline"
-                    >
-                      {agent.name}
-                    </Link>
-                  </td>
-                  <td className="px-6 py-3 text-slate-600">{agent.slug}</td>
-                  <td className="px-6 py-3 text-slate-600">{agent.status}</td>
-                  <td className="px-6 py-3 text-slate-600">{agent.model}</td>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-line bg-surface-muted text-xs uppercase tracking-wide text-ink-subtle">
+                <tr>
+                  <th scope="col" className="px-5 py-2.5 font-medium">
+                    Name
+                  </th>
+                  <th scope="col" className="px-5 py-2.5 font-medium">
+                    Slug
+                  </th>
+                  <th scope="col" className="px-5 py-2.5 font-medium">
+                    Status
+                  </th>
+                  <th scope="col" className="px-5 py-2.5 font-medium">
+                    Model
+                  </th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-line">
+                {agents.map((agent) => (
+                  <tr key={String(agent.id)}>
+                    <td className="px-5 py-3">
+                      <Link
+                        href={`/dashboard/agents/${String(agent.id)}`}
+                        className="font-medium text-ink hover:underline"
+                      >
+                        {agent.name}
+                      </Link>
+                    </td>
+                    <td className="px-5 py-3 font-mono text-xs text-ink-muted">{agent.slug}</td>
+                    <td className="px-5 py-3">
+                      <Badge tone={agentStatusTone(agent.status)}>
+                        {agentStatusLabel(agent.status)}
+                      </Badge>
+                    </td>
+                    <td className="px-5 py-3 text-ink-muted">
+                      {agent.provider} · {agent.model}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
-      </div>
-    </section>
+      </Card>
+    </div>
   );
 }
