@@ -37,9 +37,12 @@ from app.chat.service import (
     ChatService,
     ChatTextDelta,
 )
+from app.core.logging import get_logger
 from app.core.tenancy import TenantContext, tenant_session
 from app.db.models import ConversationChannel
 from app.llm.base import LLMProvider
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
 
@@ -48,7 +51,19 @@ router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
 # test in this suite may sleep for the real value.
 HEARTBEAT_INTERVAL_SECONDS = 15.0
 
+# `_pump` is the only producer, so this is free backpressure: if the consumer
+# ever stalls, `_pump`'s `await queue.put(...)` blocks instead of buffering
+# an unbounded number of already-generated events in memory.
+_QUEUE_MAXSIZE = 32
+
 _PING = b": ping\n\n"
+
+# Deliberately the exact string `app/graphql/schema.py`'s `AppErrorExtension`
+# uses for the same situation (an unrecognised exception reaching a client
+# surface), so REST and GraphQL agree on what an unexplained failure looks
+# like. Never interpolate the real exception into this -- see the
+# `isinstance(item, BaseException)` branch below for why.
+_INTERNAL_ERROR_MESSAGE = "internal server error"
 
 
 class _StreamDone:
@@ -151,9 +166,19 @@ async def _stream_body(
     elapses without a new event, so idle connections are not reaped by a
     proxy while the model is still "thinking".
     """
-    queue: asyncio.Queue[_QueueItem] = asyncio.Queue()
+    queue: asyncio.Queue[_QueueItem] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
     pump_task = asyncio.create_task(_pump(events, queue))
     exc_info: _ExcInfo = (None, None, None)
+    # Set the moment a `ChatMessageEnd` is actually dequeued -- i.e. the LLM
+    # call finished, and `ChatService.send()` already flushed the assistant
+    # message and the `usage_events` row for it (see Finding 5: a client
+    # that then disconnects before this generator reaches `_STREAM_DONE`
+    # rolls that flush back via the `except BaseException` branch below,
+    # discarding usage for a call the organization has already been billed
+    # for by the provider -- worth a loud log line even though fixing it for
+    # real needs usage accounting outside this transaction; see
+    # `docs/PHASE-2.md` §5).
+    completed_message_end: ChatMessageEnd | None = None
     try:
         yield _sse(_event_payload(first_event))
         while True:
@@ -172,22 +197,68 @@ async def _stream_body(
                 # An exception reaching this far is therefore not one of
                 # those: a bug, or an `AppError` subclass raised from a code
                 # path that generator does not wrap (e.g. persistence, after
-                # the streaming loop). The 200 status line is already
-                # committed either way, so the only option left is the same
-                # in-band `error` event a provider failure would have
-                # produced, rather than dropping the connection.
-                error_payload = _event_payload(ChatError(code="internal_error", message=str(item)))
+                # the streaming loop) -- frequently a database error itself.
+                #
+                # Three things must all happen here, matching how
+                # `app/graphql/schema.py`'s `AppErrorExtension` treats the
+                # same situation:
+                #  1. The client gets a fixed, generic message. `str(item)`
+                #     of a raw `IntegrityError` contains the failing SQL,
+                #     bound parameters (including the user's own message
+                #     text), and constraint/table names -- exactly the leak
+                #     `AppErrorExtension`'s own comment names.
+                #  2. The real exception, with its traceback, goes to the
+                #     log -- the one place someone who can act on it will
+                #     see it. Without this, a bug here produces no
+                #     traceback anywhere and the access log still reads
+                #     `status=200`, since the status line genuinely was 200.
+                #  3. `exc_info` is set so the `finally` below rolls the
+                #     transaction back instead of committing it. Unlike a
+                #     normalized `AppError` (where partial assistant text is
+                #     deliberately kept because the user already saw those
+                #     tokens on screen), an exception this generator did not
+                #     expect is often itself evidence the data is suspect --
+                #     committing a transaction whose failure is not
+                #     understood risks persisting inconsistent state.
+                logger.error("chat_stream_unexpected_error", exc_info=item)
+                exc_info = (type(item), item, item.__traceback__)
+                error_payload = _event_payload(
+                    ChatError(code="internal_error", message=_INTERNAL_ERROR_MESSAGE)
+                )
                 yield _sse(error_payload)
                 break
+            if isinstance(item, ChatMessageEnd):
+                completed_message_end = item
             yield _sse(_event_payload(item))
     except BaseException as exc:
         exc_info = (type(exc), exc, exc.__traceback__)
+        if completed_message_end is not None:
+            logger.warning(
+                "chat_stream_discarded_completed_turn_usage",
+                model=completed_message_end.model,
+                input_tokens=completed_message_end.usage.input_tokens,
+                output_tokens=completed_message_end.usage.output_tokens,
+                cost_usd=(
+                    str(completed_message_end.cost_usd)
+                    if completed_message_end.cost_usd is not None
+                    else None
+                ),
+            )
         raise
     finally:
-        pump_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await pump_task
-        await session_cm.__aexit__(*exc_info)
+        try:
+            pump_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pump_task
+        finally:
+            # A nested `finally`, not a sibling statement: `await pump_task`
+            # above only suppresses `CancelledError` (`_pump` itself only
+            # ever raises that or nothing). Any other `BaseException`
+            # surfacing from it must still not skip closing the session --
+            # that would leak the exact connection the pre-stream-error path
+            # is guarded against leaking (see the leak test on the early
+            # `events.__anext__()` failure below).
+            await session_cm.__aexit__(*exc_info)
 
 
 @router.post("/stream")

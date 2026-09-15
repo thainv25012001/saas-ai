@@ -1,5 +1,6 @@
 import asyncio
 import json
+import unittest.mock
 import uuid
 from collections.abc import AsyncIterator
 
@@ -292,6 +293,35 @@ async def test_pre_stream_error_does_not_leak_the_database_session(app, api_clie
     assert after == before
 
 
+async def test_unresolvable_provider_returns_500_json_envelope_not_a_stream(
+    api_client, clean_users
+):
+    """An agent configured for a provider this deployment cannot reach (no
+    API key set) is exactly the "provider misconfiguration" case named in
+    this module's docstring: `ChatService.send()` resolves the provider
+    before creating a conversation specifically so this lands as a plain
+    JSON error, not an in-band event. Deliberately does not override
+    `get_chat_provider` -- the whole point is to exercise its real
+    production default (`None`, letting `ChatService` call
+    `app.llm.registry.get_provider` itself) against an agent whose
+    `provider` column names "openai", with no `OPENAI_API_KEY` configured
+    anywhere in this test environment.
+    """
+    token = await _register(api_client, "unresolvable-provider@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id, provider="openai")
+
+    response = await api_client.post(
+        CHAT_URL, json={"agent_id": str(agent_id), "message": "hello"}, headers=_auth(token)
+    )
+
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("application/json")
+    body = response.json()
+    assert body["error"]["code"] == "llm_misconfigured"
+    assert "text/event-stream" not in response.headers["content-type"]
+
+
 # ---------------------------------------------------------------------------
 # 6. Cross-tenant agent_id
 # ---------------------------------------------------------------------------
@@ -361,21 +391,40 @@ async def test_unexpected_non_app_error_mid_stream_still_ends_in_an_error_event(
     was already sent. This is the same "cannot un-send the status line"
     situation as a normalized provider failure, so it must degrade to the
     same shape: a terminal `error` event, not a truncated connection.
+
+    Critically, the event must NOT carry the real exception's text. A raw
+    `IntegrityError`'s `str()` contains the failing SQL, bound parameters
+    (including the user's own message), and constraint/table names --
+    `app/graphql/schema.py`'s `AppErrorExtension` replaces exactly this for
+    the same reason on the GraphQL surface, and there is no generic
+    `Exception` handler on REST to catch a leak here otherwise.
     """
     token = await _register(api_client, "unexpected-failure@example.com")
     org_id = await _organization_id(api_client, token)
     agent_id = await _make_agent(org_id)
     provider = FakeProvider(
         script=["partial ", "output that never completes"],
-        fail_with=RuntimeError("boom"),
+        fail_with=RuntimeError("boom -- SELECT secret_column FROM tenants"),
     )
     app.dependency_overrides[chat_api.get_chat_provider] = lambda: provider
 
-    response = await api_client.post(
-        CHAT_URL, json={"agent_id": str(agent_id), "message": "hello"}, headers=_auth(token)
-    )
+    logged: list[dict[str, object]] = []
+    real_error = chat_api.logger.error
+
+    def _recording_error(event: str, **kwargs: object) -> None:
+        logged.append({"event": event, **kwargs})
+        real_error(event, **kwargs)
+
+    with unittest.mock.patch.object(chat_api.logger, "error", side_effect=_recording_error):
+        response = await api_client.post(
+            CHAT_URL, json={"agent_id": str(agent_id), "message": "hello"}, headers=_auth(token)
+        )
 
     assert response.status_code == 200
+    # The real exception text must not reach the client anywhere in the body.
+    assert "boom" not in response.text
+    assert "secret_column" not in response.text
+
     events = _parse_events(response.text)
     assert events[0]["type"] == "message_start"
     delta_index = next(i for i, e in enumerate(events) if e["type"] == "text_delta")
@@ -383,8 +432,50 @@ async def test_unexpected_non_app_error_mid_stream_still_ends_in_an_error_event(
     assert error_index > delta_index
     error_event = events[error_index]
     assert error_event["code"] == "internal_error"
-    assert "boom" in str(error_event["message"])
+    assert error_event["message"] == "internal server error"
     assert error_index == len(events) - 1
+
+    # The real exception went to the server-side log instead.
+    assert len(logged) == 1
+    assert logged[0]["event"] == "chat_stream_unexpected_error"
+    assert isinstance(logged[0]["exc_info"], RuntimeError)
+    assert "boom" in str(logged[0]["exc_info"])
+
+
+async def test_unexpected_non_app_error_rolls_back_the_whole_turn(
+    app, api_client, clean_users, owner_connection
+):
+    """An exception `ChatService.send()` did not expect is often itself
+    evidence the data is suspect (frequently a database error). Unlike a
+    normalized provider `AppError` -- where the partial assistant reply is
+    deliberately kept because the user already saw those tokens -- this path
+    must roll the whole transaction back rather than commit a conversation
+    and a user message with no assistant reply and no `usage_events` row:
+    exactly the half-written shape `ChatService.send`'s own docstring says
+    must never be left behind.
+    """
+    token = await _register(api_client, "rollback-on-bug@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id)
+    provider = FakeProvider(
+        script=["partial ", "output"],
+        fail_with=RuntimeError("boom"),
+    )
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: provider
+
+    response = await api_client.post(
+        CHAT_URL, json={"agent_id": str(agent_id), "message": "hello"}, headers=_auth(token)
+    )
+    assert response.status_code == 200
+
+    count = await owner_connection.execute(
+        text("SELECT count(*) FROM conversations WHERE agent_id = :agent_id"),
+        {"agent_id": agent_id},
+    )
+    # Rolled back entirely -- not even the conversation or the user's own
+    # message survive. Committing them (with no assistant reply alongside)
+    # would be exactly the inconsistent half-write this path must avoid.
+    assert count.scalar_one() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -523,3 +614,122 @@ async def test_stream_body_rolls_back_the_session_on_abrupt_close():
     assert session_cm.exit_args is not None
     exc_type, exc, _tb = session_cm.exit_args
     assert exc_type is GeneratorExit
+
+
+async def test_session_still_closes_if_the_pump_task_raises_an_unexpected_baseexception():
+    """`_pump` only catches `Exception` (deliberately -- it must never
+    swallow the `CancelledError` this generator's own cleanup sends it via
+    `pump_task.cancel()`). If `events` itself ever raised something that is
+    a `BaseException` but not an `Exception` (a bug well outside the
+    documented contract, but not one Python prevents), that exception
+    surfaces from `await pump_task` in `_stream_body`'s `finally`. Closing
+    the session has to happen regardless -- a single flat `finally` block
+    where `await session_cm.__aexit__(...)` is the last statement would skip
+    it entirely, leaking the exact connection the pre-stream-error leak test
+    above guards against.
+    """
+    from app.api.chat import ChatMessageStart, _stream_body
+
+    class _RecordingSessionCM:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def __aenter__(self) -> "_RecordingSessionCM":
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            self.closed = True
+            return False
+
+    class _SimulatedBug(BaseException):
+        """A `BaseException` that is not `Exception` -- and deliberately not
+        `SystemExit`/`KeyboardInterrupt` either: `asyncio.Task` special-cases
+        those two and re-raises them immediately out of the event loop
+        rather than storing them as the task's result, which would crash
+        this test outright instead of exercising `await pump_task`'s normal
+        exception-propagation path."""
+
+    async def _raises_unexpected_baseexception() -> AsyncIterator[object]:
+        # `_pump`'s `except Exception` does not catch this, so it
+        # terminates `pump_task` directly, uncaught.
+        raise _SimulatedBug("simulated bug outside _pump's documented contract")
+        yield  # pragma: no cover - unreachable; keeps this an async generator
+
+    session_cm = _RecordingSessionCM()
+    first_event = ChatMessageStart(conversation_id=uuid.uuid4(), message_id=uuid.uuid4())
+    body = _stream_body(_raises_unexpected_baseexception(), first_event, session_cm)  # type: ignore[arg-type]
+
+    first_chunk = await body.__anext__()
+    assert first_chunk.startswith(b"data: ")
+
+    # Give the pump task a chance to actually run and crash before closing.
+    await asyncio.sleep(0.05)
+
+    with pytest.raises(_SimulatedBug):
+        await body.aclose()
+
+    assert session_cm.closed is True
+
+
+async def test_disconnect_after_completed_turn_logs_discarded_usage(monkeypatch):
+    """The pump drives `ChatService.send()` to completion, including its
+    `record_usage` write for an LLM call the organization has already been
+    billed for by the provider. If the client then disconnects before
+    `_stream_body` reaches `_STREAM_DONE`, the abrupt-close path rolls that
+    write back (see the test above) -- silently, from the organization's
+    point of view, since nothing else in this request records that the call
+    ever happened. This does not fix that (real fix needs usage accounting
+    outside this transaction, see `docs/PHASE-2.md` §5) but pins that the
+    loss is at least logged with enough detail (model, tokens, cost) to
+    reconcile from logs later.
+    """
+    from decimal import Decimal
+
+    from app.api.chat import ChatMessageEnd, ChatMessageStart, _stream_body
+
+    class _NoOpSessionCM:
+        async def __aenter__(self) -> "_NoOpSessionCM":
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            return False
+
+    async def _completes_then_hangs() -> AsyncIterator[object]:
+        # Stands in for `ChatService.send()` having already flushed the
+        # assistant message and the usage_events row for a finished LLM
+        # call, with the client vanishing before the generator can reach
+        # its own natural end.
+        yield ChatMessageEnd(
+            usage=Usage(input_tokens=10, output_tokens=5),
+            cost_usd=Decimal("0.00123"),
+            latency_ms=250,
+            model="fake-1",
+            prompt_version_id=None,
+        )
+        await asyncio.Event().wait()
+        yield  # pragma: no cover - unreachable; keeps this an async generator
+
+    logged: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        chat_api.logger,
+        "warning",
+        lambda event, **kwargs: logged.append({"event": event, **kwargs}),
+    )
+
+    first_event = ChatMessageStart(conversation_id=uuid.uuid4(), message_id=uuid.uuid4())
+    body = _stream_body(_completes_then_hangs(), first_event, _NoOpSessionCM())  # type: ignore[arg-type]
+
+    first_chunk = await body.__anext__()
+    assert first_chunk.startswith(b"data: ")
+    second_chunk = await body.__anext__()
+    assert b'"type": "message_end"' in second_chunk
+
+    await body.aclose()
+
+    assert len(logged) == 1
+    entry = logged[0]
+    assert entry["event"] == "chat_stream_discarded_completed_turn_usage"
+    assert entry["model"] == "fake-1"
+    assert entry["input_tokens"] == 10
+    assert entry["output_tokens"] == 5
+    assert entry["cost_usd"] == "0.00123"

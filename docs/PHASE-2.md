@@ -169,6 +169,20 @@ with cost computed in `Decimal` — not float. Money in floats is how you get
 `cost_usd = NULL` rather than guessing, so a missing price is visible instead of silently
 wrong.
 
+**Known gap: usage lost on a mid-stream client disconnect.** The `usage_events` write
+above happens inside the same DB transaction as the rest of the turn (see `ChatService.send`
+and `app/api/chat.py`). If the client disconnects after the LLM call has already completed
+(the provider has been paid) but before that transaction commits, the whole turn — including
+the usage write — is rolled back rather than committed, per §4's chat-streaming design: an
+in-flight request whose client vanished has no channel left to report a partial success
+through, so the transaction is torn down rather than left in an ambiguous state. The
+organization is never billed for a call that already happened; the SSE layer logs a warning
+with the model, token counts, and cost at the point this is discarded, but nothing currently
+reconciles it. Fixing this for real means recording usage in a write that survives the
+request's own transaction being rolled back — e.g. writing `usage_events` immediately after
+the provider call returns, outside the conversation's transaction — which is real work that
+belongs with billing (Phase 7), not a small fix here.
+
 ---
 
 ## 6. Conversation history
