@@ -1,5 +1,14 @@
+# Configuration comes from the root `.env`, which Compose loads automatically for
+# `${...}` interpolation. Every value below has a local-container default, so a
+# clone with no `.env` still works; setting a variable in `.env` overrides it.
+#
+# `db` and `redis` sit behind the `local-infra` profile. `.env.example` enables
+# that profile via COMPOSE_PROFILES, so the default experience is unchanged. Point
+# DATABASE_URL / REDIS_URL at managed services and drop COMPOSE_PROFILES, and the
+# local containers are never started.
 services:
   db:
+    profiles: ["local-infra"]
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: postgres
@@ -17,6 +26,7 @@ services:
       retries: 20
 
   redis:
+    profiles: ["local-infra"]
     image: redis:7-alpine
     ports:
       - "6379:6379"
@@ -38,15 +48,29 @@ services:
   api:
     build: ./apps/api
     depends_on:
-      db: { condition: service_healthy }
-      redis: { condition: service_healthy }
+      # `required: false` so these are waited on when the `local-infra` profile
+      # is active and simply absent when it is not. Without it, Compose refuses
+      # the whole project with "depends on undefined service" as soon as the
+      # profile is off — which is exactly the managed-services case.
+      db: { condition: service_healthy, required: false }
+      redis: { condition: service_healthy, required: false }
     environment:
-      DATABASE_URL: postgresql+asyncpg://app_user:app_user_password@db:5432/saas_ai
-      MIGRATION_DATABASE_URL: postgresql+asyncpg://app_owner:app_owner_password@db:5432/saas_ai
-      REDIS_URL: redis://redis:6379/0
+      # Defaults address the `local-infra` containers by service name. Override
+      # any of these in `.env` — e.g. a managed Postgres or Redis URL — and the
+      # container picks it up with no change here. Note the hostnames: `db` and
+      # `redis` resolve on the compose network, NOT on the host, so a `.env`
+      # written for running the API natively (localhost:5432) is wrong here.
+      # Managed URLs are reachable identically from both, which is why they are
+      # the simpler setup.
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://app_user:app_user_password@db:5432/saas_ai}
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:-postgresql+asyncpg://app_owner:app_owner_password@db:5432/saas_ai}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:-local-development-secret-change-me}
-      ENVIRONMENT: local
-      CORS_ORIGINS: http://localhost:3000
+      # `local` enables the GraphQL IDE and permits the seed script. Override it
+      # for anything that is not a developer machine.
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
     ports:
       - "8000:8000"
     volumes:

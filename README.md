@@ -86,6 +86,39 @@ docker compose logs -f     # follow logs from all four services
 docker compose down        # stop everything
 ```
 
+### Pointing at managed Postgres and Redis
+
+Every value the `api` container reads comes from the root `.env`, with the local
+containers only as the fallback. To run against managed services instead, set the URLs in
+`.env` and comment out `COMPOSE_PROFILES`:
+
+```bash
+COMPOSE_PROFILES=local-infra          # <- comment this out
+DATABASE_URL=postgresql://app_user:...@ep-xxx.neon.tech/neondb?sslmode=require
+MIGRATION_DATABASE_URL=postgresql://app_owner:...@ep-xxx.neon.tech/neondb?sslmode=require
+REDIS_URL=rediss://default:...@your-host.upstash.io:6379
+```
+
+`db` and `redis` sit behind the `local-infra` profile, so with it off they are never
+started and `docker compose up` brings up only `api` and `web`. Paste managed URLs
+exactly as the provider gives them — the scheme and the libpq-only parameters
+(`sslmode`, `channel_binding`) are normalized at startup.
+
+Two things that are easy to get wrong here, both silent:
+
+- **`DATABASE_URL` and `MIGRATION_DATABASE_URL` must use different roles.** The app's role
+  must not own the tables, because **a table owner bypasses its own RLS policies**. Point
+  both at a managed provider's default owner role and tenant isolation stops applying
+  with no error, while every test still passes. Verify with:
+  `SELECT tablename, tableowner FROM pg_tables WHERE schemaname='public';`
+- **`infrastructure/postgres/init.sql` never runs against a managed database.** It is a
+  `docker-entrypoint-initdb.d` hook that only fires on an empty *local* data directory, so
+  the two roles and the `vector` / `citext` / `pgcrypto` extensions must be created once by
+  hand against the managed instance.
+
+Also set `ENVIRONMENT` to something other than `local` anywhere that is not a developer
+machine — `local` enables the GraphQL IDE and permits the seed script.
+
 Then open [http://localhost:3000](http://localhost:3000) and sign in with the seeded
 demo account:
 
