@@ -1,0 +1,28 @@
+import { forwardRef } from "react";
+import { cn } from "./cn";
+
+/** One border, one radius, one focus ring — for all three controls. */
+export const controlClasses =
+  "w-full rounded-control border border-line-strong bg-surface px-3 py-2 text-sm text-ink " +
+  "placeholder:text-ink-subtle focus-visible:outline-none focus-visible:ring-2 " +
+  "focus-visible:ring-ink focus-visible:ring-offset-1 focus-visible:ring-offset-canvas " +
+  "disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-danger";
+
+export const Input = forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(
+  function Input({ className, ...rest }, ref) {
+    return <input ref={ref} className={cn(controlClasses, className)} {...rest} />;
+  },
+);
+
+export const Textarea = forwardRef<
+  HTMLTextAreaElement,
+  React.TextareaHTMLAttributes<HTMLTextAreaElement>
+>(function Textarea({ className, ...rest }, ref) {
+  return <textarea ref={ref} className={cn(controlClasses, "resize-none", className)} {...rest} />;
+});
+
+export const Select = forwardRef<HTMLSelectElement, React.SelectHTMLAttributes<HTMLSelectElement>>(
+  function Select({ className, ...rest }, ref) {
+    return <select ref={ref} className={cn(controlClasses, "pr-8", className)} {...rest} />;
+  },
+);
