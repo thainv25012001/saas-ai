@@ -1333,7 +1333,7 @@ export function LoadingState({ label }: { label: string }) {
 - [ ] **Step 6: Run the test to verify it passes**
 
 Run: `npm run test -- src/components/ui/Alert.test.tsx`
-Expected: PASS, 4 tests.
+Expected: PASS, 3 tests.
 
 - [ ] **Step 7: Run the gates and commit**
 
