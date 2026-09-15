@@ -99,7 +99,7 @@ Why these boundaries: `nav.ts` holds data and one pure predicate so the sidebar'
 
 ```bash
 cd apps/web
-npm install --save-dev @testing-library/react@^16 @testing-library/jest-dom@^6 happy-dom@^15 @vitejs/plugin-react@^4 postcss@^8
+npm install --save-dev @testing-library/react@^16 @testing-library/jest-dom@^6 happy-dom@^20 @vitejs/plugin-react@^4 postcss@^8  # happy-dom@^20 (not ^15): the 15.x line has no fix for GHSA-37j7-fg3j-429f, a VM context escape / RCE advisory
 ```
 
 `postcss` is already present transitively (`@tailwindcss/postcss` depends on it); this makes the dependency explicit because Task 2's test imports it directly. `@vitejs/plugin-react` is what gives vitest the JSX transform — without it, every `.tsx` test fails to parse.

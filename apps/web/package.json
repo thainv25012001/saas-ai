@@ -33,7 +33,7 @@
     "@vitejs/plugin-react": "^4.7.0",
     "eslint": "^9",
     "eslint-config-next": "15.5.25",
-    "happy-dom": "^15.11.7",
+    "happy-dom": "^20.14.5",
     "postcss": "^8.5.28",
     "tailwindcss": "^4",
     "typescript": "^5",
