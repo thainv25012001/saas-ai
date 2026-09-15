@@ -202,14 +202,14 @@ jobs:
       # Build here rather than on Vercel: the same commit CI verified is the one
       # that ships, and NEXT_PUBLIC_API_URL comes from the project's production
       # environment that `vercel pull` fetches.
+      # These run at the repo root, not in apps/web: the Vercel project's own
+      # Root Directory is already apps/web, and it is resolved relative to the
+      # working directory, so entering apps/web first looks for apps/web/apps/web.
       - name: Pull Vercel project settings
-        working-directory: apps/web
         run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
 
       - name: Build
-        working-directory: apps/web
         run: vercel build --prod --token="$VERCEL_TOKEN"
 
       - name: Deploy
-        working-directory: apps/web
         run: vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
