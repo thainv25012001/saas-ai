@@ -90,9 +90,22 @@ class ModelCapabilities:
     max_output_tokens: int
 ```
 
-The agent's `temperature` therefore means "use it where the model accepts it". The
-playground shows the field as inapplicable when the selected model ignores it, rather than
-silently lying about what was sent.
+The agent's `temperature` therefore means "use it where the model accepts it".
+
+**Deferred to a later phase — recorded rather than quietly dropped.** An earlier draft of this
+section promised that the dashboard would show `temperature` as inapplicable when the selected
+model ignores it. Phase 2 does not do that: the agent form renders an unconditional numeric
+input, and a user editing a `claude-opus-5` agent sees a temperature box whose value is silently
+discarded before the request is sent.
+
+The backend half — the capability table, the drop-with-debug-log, and tests asserting the
+parameter is absent for models that reject it and present for models that accept it — is built
+and covered. What is missing is only the UI's honesty about it, and closing that requires
+exposing `ModelCapabilities` over GraphQL: a new query, type, resolver and tests. That is a
+task's worth of work for a cosmetic gap, so it is deferred rather than rushed.
+
+Until then the dashboard overstates what it controls. That is a real, if small, way the product
+misleads its own operator, and it should be closed before anyone relies on the field.
 
 ### 2.4 Provider defaults
 
