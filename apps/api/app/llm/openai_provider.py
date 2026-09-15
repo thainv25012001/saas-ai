@@ -43,13 +43,22 @@ _CAPABILITIES = ModelCapabilities(
     max_output_tokens=16_384,
 )
 
-# `finish_reason` values that legitimately end a response carrying no text:
-# the model chose to call a tool instead of answering. Everything else with
-# no text at all is the "model refused or returned nothing" case PHASE-2.md
-# §3 maps to `LLMEmptyResponseError`. (`function_call` is the deprecated
-# spelling of the same thing and is still returned for legacy `functions`
-# requests.)
-_TOOL_STOP_REASONS = frozenset({"tool_calls", "function_call"})
+# `finish_reason` values that legitimately end a response carrying no text.
+# Verified against the installed SDK, not assumed: the full set is
+# `Literal["stop", "length", "tool_calls", "content_filter", "function_call"]`
+# (`openai.types.chat.chat_completion_chunk.Choice`).
+#
+#   tool_calls / function_call -- the model answered by calling a tool
+#     instead of writing prose (`function_call` is the deprecated spelling,
+#     still returned for legacy `functions` requests).
+#   length -- the output budget ran out. The turn is truncated, not empty:
+#     reporting it as "the model returned nothing" reads as a refusal and
+#     sends whoever is debugging it looking in the wrong place, when the
+#     actual fix is a larger `max_tokens`.
+#
+# Everything else with no text at all is the "model refused or returned
+# nothing" case PHASE-2.md §3 maps to `LLMEmptyResponseError`.
+_NO_TEXT_EXPECTED_STOP_REASONS = frozenset({"tool_calls", "function_call", "length"})
 
 
 class OpenAIProvider:
@@ -169,9 +178,10 @@ class OpenAIProvider:
                         output_tokens=chunk.usage.completion_tokens,
                     )
 
-            if not emitted_text and finish_reason not in _TOOL_STOP_REASONS:
+            if not emitted_text and finish_reason not in _NO_TEXT_EXPECTED_STOP_REASONS:
                 # The stream completed without a single text delta, and not
-                # because the model chose a tool instead. PHASE-2.md §3 names
+                # for any of the reasons that legitimately produce none.
+                # PHASE-2.md §3 names
                 # this exact case ("model refused or returned nothing") and
                 # the domain error it must become -- previously it produced a
                 # `message_end`, an empty assistant row, a `usage_events` row

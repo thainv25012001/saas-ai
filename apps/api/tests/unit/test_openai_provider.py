@@ -309,6 +309,21 @@ async def test_a_stream_with_no_text_raises_llm_empty_response_error():
             pass
 
 
+async def test_a_length_stop_with_no_text_is_not_an_empty_response():
+    """A turn truncated by the output budget is not a refusal. Reporting
+    "the model returned nothing" for it sends whoever is debugging it looking
+    for a content filter when the actual fix is a larger `max_tokens` -- so
+    it completes normally, empty but successful, with its usage recorded.
+    `length` is the SDK's literal for this (verified against
+    `openai.types.chat.chat_completion_chunk.Choice.finish_reason`)."""
+    provider = _provider_with([_chunk(None, finish_reason="length"), _chunk(usage=(12, 900))])
+    events = [e async for e in provider.stream(_request())]
+    assert [e.type for e in events] == ["message_start", "usage", "message_end"]
+    end = events[-1]
+    assert end.stop_reason == "length"
+    assert end.usage.output_tokens == 900
+
+
 async def test_a_tool_stop_with_no_text_is_not_an_empty_response():
     """A model that answers by calling a tool legitimately emits no text.
     Phase 4 wires tool calls up; this pins that the empty-response guard does

@@ -55,11 +55,25 @@ _CLASSIC = ModelCapabilities(
     max_output_tokens=64_000,
 )
 
-# The one `stop_reason` that legitimately ends a response carrying no text:
-# the model chose to call a tool instead of answering. Anything else with no
-# text at all is the "model refused or returned nothing" case PHASE-2.md §3
-# maps to `LLMEmptyResponseError`.
-_TOOL_STOP_REASONS = frozenset({"tool_use"})
+# `stop_reason` values that legitimately end a response carrying no text.
+# Verified against the installed SDK, not assumed: `anthropic.types.StopReason`
+# is `Literal["end_turn", "max_tokens", "stop_sequence", "tool_use",
+# "pause_turn", "refusal", "model_context_window_exceeded"]`.
+#
+#   tool_use -- the model answered by calling a tool instead of writing prose.
+#   max_tokens -- the output budget ran out. This one is not hypothetical on
+#     our own default: `claude-opus-5` runs adaptive thinking on by default,
+#     so a reasoning-heavy turn can spend the entire budget on hidden
+#     reasoning tokens before emitting any visible content. The turn is
+#     truncated, not empty; reporting it as "the model returned nothing"
+#     reads as a refusal and sends whoever is debugging it looking in the
+#     wrong place, when the actual fix is a larger `max_tokens`.
+#
+# `refusal` is deliberately NOT here: a refusal with no text is exactly the
+# case PHASE-2.md §3's row is about. Nor is `model_context_window_exceeded`,
+# which is a request that was too large to run at all rather than a turn that
+# ran and produced nothing.
+_NO_TEXT_EXPECTED_STOP_REASONS = frozenset({"tool_use", "max_tokens"})
 
 _CAPABILITIES: dict[str, ModelCapabilities] = {
     "claude-opus-5": _NO_SAMPLING,
@@ -158,9 +172,10 @@ class AnthropicProvider:
                     input_tokens=final.usage.input_tokens,
                     output_tokens=final.usage.output_tokens,
                 )
-                if not emitted_text and final.stop_reason not in _TOOL_STOP_REASONS:
+                if not emitted_text and final.stop_reason not in _NO_TEXT_EXPECTED_STOP_REASONS:
                     # The stream completed without a single text delta, and
-                    # not because the model chose a tool instead. PHASE-2.md
+                    # not for any of the reasons that legitimately produce
+                    # none. PHASE-2.md
                     # §3 names this exact case ("model refused or returned
                     # nothing") and the domain error it must become --
                     # previously it produced a `message_end`, an empty

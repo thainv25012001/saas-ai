@@ -319,6 +319,26 @@ async def test_a_stream_with_no_text_raises_llm_empty_response_error():
             pass
 
 
+async def test_a_max_tokens_stop_with_no_text_is_not_an_empty_response():
+    """Not hypothetical on our own default: `claude-opus-5` runs adaptive
+    thinking on by default, so a reasoning-heavy turn can spend the whole
+    output budget on hidden reasoning tokens and end with no visible text at
+    all. That is a truncation, not a refusal -- it completes normally, empty
+    but successful, with its usage recorded. `max_tokens` is the SDK's
+    literal for this (verified against `anthropic.types.StopReason`)."""
+    provider = _provider_with(
+        _FakeStream(
+            [_thinking_delta()],
+            _final_message(output_tokens=1024, stop_reason="max_tokens"),
+        )
+    )
+    events = [e async for e in provider.stream(_request())]
+    assert [e.type for e in events] == ["message_start", "usage", "message_end"]
+    end = events[-1]
+    assert end.stop_reason == "max_tokens"
+    assert end.usage.output_tokens == 1024
+
+
 async def test_a_tool_stop_with_no_text_is_not_an_empty_response():
     """A model that answers by calling a tool legitimately emits no text.
     Phase 4 wires tool calls up; this pins that the empty-response guard does
