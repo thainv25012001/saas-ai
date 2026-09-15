@@ -1,9 +1,16 @@
 "use client";
 
-import Link from "next/link";
 import { use, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery } from "urql";
+import { Alert } from "@/components/ui/Alert";
+import { Badge } from "@/components/ui/Badge";
+import { Button, ButtonLink } from "@/components/ui/Button";
+import { Card, CardBody, CardFooter, CardHeader } from "@/components/ui/Card";
+import { Field } from "@/components/ui/Field";
+import { Input, Select } from "@/components/ui/Input";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { LoadingState } from "@/components/ui/Spinner";
 import {
   AgentDocument,
   AgentStatus,
@@ -11,7 +18,9 @@ import {
   UpdateAgentConfigDocument,
   UpdateAgentDocument,
 } from "@/graphql/generated";
+import { agentStatusLabel, agentStatusTone } from "@/lib/agent-status";
 import { useAuth } from "@/lib/auth";
+import { firstGraphQLError } from "@/lib/graphql-errors";
 
 const STATUSES: AgentStatus[] = ["DRAFT", "ACTIVE", "DISABLED"];
 // Mirrors `app/llm/registry.KNOWN_PROVIDERS`, which is what the API now
@@ -21,6 +30,16 @@ const STATUSES: AgentStatus[] = ["DRAFT", "ACTIVE", "DISABLED"];
 // exactly those agents, and a user who touched the dropdown could never put
 // it back.
 const PROVIDERS = ["fake", "openai", "anthropic"];
+
+// Mirrors `MODEL_PRICING` in `apps/api/app/llm/pricing.py`: the models the API
+// can both run and cost. The input stays free text -- the API validates the
+// model per provider -- but a datalist makes a valid id guessable instead of
+// something you have to already know.
+const MODEL_SUGGESTIONS: Record<string, string[]> = {
+  fake: ["fake-1"],
+  openai: ["gpt-4o-mini", "gpt-4o"],
+  anthropic: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+};
 
 export default function AgentDetailPage({
   params,
@@ -108,225 +127,256 @@ export default function AgentDetailPage({
     }
   }
 
-  const agentError = updateAgentResult.error?.graphQLErrors[0]?.message ?? null;
-  const configError = updateConfigResult.error?.graphQLErrors[0]?.message ?? null;
-  const deleteError = deleteResult.error?.graphQLErrors[0]?.message ?? null;
+  const agentError = firstGraphQLError(updateAgentResult.error);
+  const configError = firstGraphQLError(updateConfigResult.error);
+  const deleteError = firstGraphQLError(deleteResult.error);
 
-  if (fetching && !agent) {
-    return <p className="text-slate-500">Loading…</p>;
-  }
+  if (fetching && !agent) return <LoadingState label="Loading agent…" />;
 
   if (error && !agent) {
     return (
-      <p role="alert" className="rounded-md bg-red-50 p-3 text-sm text-red-700">
-        {error.graphQLErrors[0]?.message ?? "Failed to load agent."}
-      </p>
+      <Alert tone="danger" title="Could not load this agent">
+        {firstGraphQLError(error) ?? "Please reload the page."}
+      </Alert>
     );
   }
 
   if (!agent) return null;
 
   return (
-    <section className="max-w-2xl space-y-8">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold">{agent.name}</h1>
-          <p className="text-sm text-slate-500">{agent.slug}</p>
-        </div>
-        <Link
-          href={`/dashboard/playground?agentId=${String(agent.id)}`}
-          className="shrink-0 rounded-md bg-slate-900 px-4 py-2 text-sm text-white"
-        >
-          Test in playground
-        </Link>
-      </div>
+    <div className="max-w-3xl space-y-6">
+      <PageHeader
+        breadcrumb={[{ href: "/dashboard/agents", label: "Agents" }]}
+        title={agent.name}
+        meta={
+          <>
+            <Badge tone={agentStatusTone(agent.status)}>{agentStatusLabel(agent.status)}</Badge>
+            <span className="font-mono text-xs text-ink-subtle">{agent.slug}</span>
+          </>
+        }
+        actions={
+          <ButtonLink href={`/dashboard/playground?agentId=${String(agent.id)}`}>
+            Test in playground
+          </ButtonLink>
+        }
+      />
 
-      <form
-        onSubmit={onSubmitAgent}
-        className="space-y-4 rounded-xl border border-slate-200 bg-white p-6"
-      >
-        <h2 className="text-lg font-semibold">Agent</h2>
-
-        {agentError && (
-          <p role="alert" className="rounded-md bg-red-50 p-3 text-sm text-red-700">
-            {agentError}
-          </p>
-        )}
-        {agentSaved && (
-          <p role="status" className="rounded-md bg-green-50 p-3 text-sm text-green-700">
-            Saved
-          </p>
-        )}
-
-        <label className="block text-sm font-medium">
-          Name
-          <input
-            type="text"
-            required
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2"
+      <form onSubmit={onSubmitAgent} className="space-y-6">
+        <Card>
+          <CardHeader
+            title="Identity"
+            description="What this agent is called, and whether it is live. Saved together with Model, below."
           />
-        </label>
+          <CardBody className="space-y-4">
+            {agentError ? <Alert tone="danger">{agentError}</Alert> : null}
 
-        <label className="block text-sm font-medium">
-          Status
-          <select
-            value={status}
-            onChange={(e) => setStatus(e.target.value as AgentStatus)}
-            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2"
-          >
-            {STATUSES.map((option) => (
-              <option key={option} value={option}>
-                {option}
-              </option>
-            ))}
-          </select>
-        </label>
+            <Field label="Name" required>
+              {(control) => (
+                <Input {...control} type="text" value={name} onChange={(e) => setName(e.target.value)} />
+              )}
+            </Field>
 
-        <label className="block text-sm font-medium">
-          Provider
-          <select
-            value={provider}
-            onChange={(e) => setProvider(e.target.value)}
-            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2"
-          >
-            {PROVIDERS.map((option) => (
-              <option key={option} value={option}>
-                {option}
-              </option>
-            ))}
-          </select>
-        </label>
+            <Field
+              label="Status"
+              description="Draft is configurable but not live. Disabled stops it answering."
+            >
+              {(control) => (
+                <Select
+                  {...control}
+                  value={status}
+                  onChange={(e) => setStatus(e.target.value as AgentStatus)}
+                >
+                  {STATUSES.map((option) => (
+                    <option key={option} value={option}>
+                      {agentStatusLabel(option)}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+          </CardBody>
+        </Card>
 
-        <label className="block text-sm font-medium">
-          Model
-          <input
-            type="text"
-            required
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2"
-          />
-        </label>
+        <Card>
+          <CardHeader title="Model" description="Which model answers, and how freely." />
+          <CardBody className="space-y-4">
+            <Field
+              label="Provider"
+              description="`fake` answers offline with a canned reply and costs nothing — useful for wiring, useless for real answers. Switch to openai or anthropic once the matching API key is set."
+            >
+              {(control) => (
+                <Select {...control} value={provider} onChange={(e) => setProvider(e.target.value)}>
+                  {PROVIDERS.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
 
-        <label className="block text-sm font-medium">
-          Temperature
-          <input
-            type="number"
-            min={0}
-            max={2}
-            step={0.1}
-            required
-            value={temperature}
-            onChange={(e) => setTemperature(Number(e.target.value))}
-            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2"
-          />
-        </label>
+            <Field
+              label="Model"
+              description="Must be a model the selected provider offers. Suggestions come from the API's pricing table."
+              required
+            >
+              {(control) => (
+                <>
+                  <Input
+                    {...control}
+                    type="text"
+                    list={`${control.id}-models`}
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                  />
+                  <datalist id={`${control.id}-models`}>
+                    {(MODEL_SUGGESTIONS[provider] ?? []).map((option) => (
+                      <option key={option} value={option} />
+                    ))}
+                  </datalist>
+                </>
+              )}
+            </Field>
 
-        <label className="block text-sm font-medium">
-          Max tokens
-          <input
-            type="number"
-            min={1}
-            max={32000}
-            step={1}
-            required
-            value={maxTokens}
-            onChange={(e) => setMaxTokens(Number(e.target.value))}
-            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2"
-          />
-        </label>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field
+                label="Temperature"
+                description="0 is repeatable, 2 is loose. Some models (claude-opus-5, claude-sonnet-5) reject it and the API drops it for them."
+                required
+              >
+                {(control) => (
+                  <Input
+                    {...control}
+                    type="number"
+                    min={0}
+                    max={2}
+                    step={0.1}
+                    value={temperature}
+                    onChange={(e) => setTemperature(Number(e.target.value))}
+                  />
+                )}
+              </Field>
 
-        <button
-          type="submit"
-          disabled={updateAgentResult.fetching}
-          className="rounded-md bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-50"
-        >
-          {updateAgentResult.fetching ? "Saving…" : "Save agent"}
-        </button>
+              <Field label="Max tokens" description="Ceiling on one reply's length." required>
+                {(control) => (
+                  <Input
+                    {...control}
+                    type="number"
+                    min={1}
+                    max={32000}
+                    step={1}
+                    value={maxTokens}
+                    onChange={(e) => setMaxTokens(Number(e.target.value))}
+                  />
+                )}
+              </Field>
+            </div>
+          </CardBody>
+
+          {/* In the footer, so a save no longer shifts the form under the
+           * cursor the way an inserted banner did. */}
+          <CardFooter>
+            <Button type="submit" loading={updateAgentResult.fetching} loadingLabel="Saving…">
+              Save agent
+            </Button>
+            {agentSaved ? (
+              <span role="status" className="text-sm font-medium text-success">
+                Saved
+              </span>
+            ) : null}
+          </CardFooter>
+        </Card>
       </form>
 
-      <form
-        onSubmit={onSubmitConfig}
-        className="space-y-4 rounded-xl border border-slate-200 bg-white p-6"
-      >
-        <h2 className="text-lg font-semibold">Behaviour</h2>
-
-        {configError && (
-          <p role="alert" className="rounded-md bg-red-50 p-3 text-sm text-red-700">
-            {configError}
-          </p>
-        )}
-        {configSaved && (
-          <p role="status" className="rounded-md bg-green-50 p-3 text-sm text-green-700">
-            Saved
-          </p>
-        )}
-
-        <label className="block text-sm font-medium">
-          Tone
-          <input
-            type="text"
-            required
-            value={tone}
-            onChange={(e) => setTone(e.target.value)}
-            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2"
+      <form onSubmit={onSubmitConfig}>
+        <Card>
+          <CardHeader
+            title="Behaviour"
+            description="How the agent speaks, and how hard it works on one answer."
           />
-        </label>
+          <CardBody className="space-y-4">
+            {configError ? <Alert tone="danger">{configError}</Alert> : null}
 
-        <label className="block text-sm font-medium">
-          Retrieval top-K
-          <input
-            type="number"
-            min={1}
-            max={50}
-            step={1}
-            required
-            value={retrievalTopK}
-            onChange={(e) => setRetrievalTopK(Number(e.target.value))}
-            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2"
-          />
-        </label>
+            <Field
+              label="Tone"
+              description="Folded into the system prompt — for example “direct and factual”."
+              required
+            >
+              {(control) => (
+                <Input {...control} type="text" value={tone} onChange={(e) => setTone(e.target.value)} />
+              )}
+            </Field>
 
-        <label className="block text-sm font-medium">
-          Max agent steps
-          <input
-            type="number"
-            min={1}
-            max={20}
-            step={1}
-            required
-            value={maxAgentSteps}
-            onChange={(e) => setMaxAgentSteps(Number(e.target.value))}
-            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2"
-          />
-        </label>
+            <div className="grid gap-4 sm:grid-cols-2">
+              {/* Saving a value that does nothing yet is fine. Not saying so is not. */}
+              <Field
+                label="Retrieval top-K"
+                description="How many knowledge chunks to retrieve. Takes effect in Phase 3 (retrieval)."
+                required
+              >
+                {(control) => (
+                  <Input
+                    {...control}
+                    type="number"
+                    min={1}
+                    max={50}
+                    step={1}
+                    value={retrievalTopK}
+                    onChange={(e) => setRetrievalTopK(Number(e.target.value))}
+                  />
+                )}
+              </Field>
 
-        <button
-          type="submit"
-          disabled={updateConfigResult.fetching}
-          className="rounded-md bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-50"
-        >
-          {updateConfigResult.fetching ? "Saving…" : "Save behaviour"}
-        </button>
+              <Field
+                label="Max agent steps"
+                description="Tool-calling rounds per answer. Takes effect in Phase 4 (tools)."
+                required
+              >
+                {(control) => (
+                  <Input
+                    {...control}
+                    type="number"
+                    min={1}
+                    max={20}
+                    step={1}
+                    value={maxAgentSteps}
+                    onChange={(e) => setMaxAgentSteps(Number(e.target.value))}
+                  />
+                )}
+              </Field>
+            </div>
+          </CardBody>
+
+          <CardFooter>
+            <Button type="submit" loading={updateConfigResult.fetching} loadingLabel="Saving…">
+              Save behaviour
+            </Button>
+            {configSaved ? (
+              <span role="status" className="text-sm font-medium text-success">
+                Saved
+              </span>
+            ) : null}
+          </CardFooter>
+        </Card>
       </form>
 
-      <div className="rounded-xl border border-red-200 bg-white p-6">
-        <h2 className="text-lg font-semibold text-red-700">Danger zone</h2>
-        {deleteError && (
-          <p role="alert" className="mt-3 rounded-md bg-red-50 p-3 text-sm text-red-700">
-            {deleteError}
-          </p>
-        )}
-        <button
-          onClick={onDelete}
-          disabled={deleteResult.fetching}
-          className="mt-3 rounded-md border border-red-300 px-4 py-2 text-sm text-red-700 disabled:opacity-50"
-        >
-          {deleteResult.fetching ? "Deleting…" : "Delete agent"}
-        </button>
-      </div>
-    </section>
+      <Card className="border-danger-line">
+        <CardHeader
+          title="Delete this agent"
+          description="Its conversations and configuration go with it. This cannot be undone."
+        />
+        <CardBody className="space-y-3">
+          {deleteError ? <Alert tone="danger">{deleteError}</Alert> : null}
+          <Button
+            variant="danger"
+            onClick={onDelete}
+            loading={deleteResult.fetching}
+            loadingLabel="Deleting…"
+          >
+            Delete agent
+          </Button>
+        </CardBody>
+      </Card>
+    </div>
   );
 }
