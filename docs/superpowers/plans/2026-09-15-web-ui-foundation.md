@@ -316,8 +316,69 @@ describe("globals.css token layer", () => {
     expect(css).not.toContain("geist");
     expect(css).not.toContain("prefers-color-scheme");
   });
+
+  it("matches the Tailwind palette it claims to transcribe — this is not a rebrand", async () => {
+    // The claim "same colours, new structure" is worth only as much as its
+    // evidence, and hand-transcribed oklch triples are exactly the kind of
+    // thing that drifts silently. So take ground truth from Tailwind itself:
+    // compile a utility for BOTH the token and its palette equivalent, then
+    // compare the two variables Tailwind emits.
+    //
+    // Both sides must be referenced by a utility. Tailwind tree-shakes theme
+    // variables, so a token no rule uses is simply absent from the output and
+    // would compare as null == null.
+    const EQUIVALENTS: Record<string, string> = {
+      canvas: "slate-50",
+      "surface-muted": "slate-100",
+      line: "slate-200",
+      "line-strong": "slate-300",
+      "ink-subtle": "slate-500",
+      "ink-muted": "slate-600",
+      ink: "slate-900",
+      primary: "slate-900",
+      "primary-hover": "slate-800",
+      danger: "red-700",
+      "danger-surface": "red-50",
+      "danger-line": "red-200",
+      success: "green-700",
+      "success-surface": "green-50",
+      "success-line": "green-200",
+      warn: "amber-700",
+      "warn-surface": "amber-50",
+      "warn-line": "amber-200",
+      info: "blue-700",
+      "info-surface": "blue-50",
+      "info-line": "blue-200",
+    };
+
+    const tokens = readFileSync("src/app/globals.css", "utf8").replace(
+      '@import "tailwindcss";',
+      '@import "tailwindcss" source(none);',
+    );
+    const uses = Object.entries(EQUIVALENTS)
+      .flatMap(([token, palette], index) => [
+        `.tok-${index} { @apply bg-${token}; }`,
+        `.pal-${index} { @apply bg-${palette}; }`,
+      ])
+      .join("\n");
+    const { css } = await postcss([tailwind]).process(`${tokens}\n${uses}`, {
+      from: "src/app/globals.css",
+    });
+
+    const valueOf = (variable: string): string | null => {
+      const match = css.match(new RegExp(`--color-${variable}:\\s*([^;]+);`));
+      return match ? match[1].trim() : null;
+    };
+
+    const mismatches = Object.entries(EQUIVALENTS)
+      .filter(([token, palette]) => valueOf(token) !== valueOf(palette))
+      .map(([token, palette]) => `${token}=${valueOf(token)} but ${palette}=${valueOf(palette)}`);
+    expect(mismatches).toEqual([]);
+  });
 });
 ```
+
+`surface` and `primary-ink` are absent from `EQUIVALENTS` on purpose: both are `#ffffff`, which is not a palette entry.
 
 - [ ] **Step 2: Run it to make sure it fails**
 
@@ -344,40 +405,42 @@ Replace the entire contents of `apps/web/src/app/globals.css`:
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 
   /* Surfaces, back to front */
-  --color-canvas: oklch(98.4% 0.003 247.86); /* app background     (slate-50)  */
-  --color-surface: #ffffff; /*                  cards, sidebar                 */
-  --color-surface-muted: oklch(96.8% 0.007 247.9); /* transcript, table head   */
+  --color-canvas: oklch(98.4% 0.003 247.858); /* app background    = slate-50  */
+  --color-surface: #ffffff; /*                   cards, sidebar               */
+  --color-surface-muted: oklch(96.8% 0.007 247.896); /* transcript = slate-100 */
 
   /* Lines */
-  --color-line: oklch(92.9% 0.013 255.51); /*        card borders  (slate-200) */
-  --color-line-strong: oklch(86.9% 0.022 252.89); /* control borders (slate-300) */
+  --color-line: oklch(92.9% 0.013 255.508); /*      card borders   = slate-200 */
+  --color-line-strong: oklch(86.9% 0.022 252.894); /* controls     = slate-300 */
 
   /* Ink */
-  --color-ink: oklch(20.8% 0.042 265.75); /*        headings, body (slate-900) */
-  --color-ink-muted: oklch(44.6% 0.03 256.8); /*    secondary       (slate-600) */
-  --color-ink-subtle: oklch(55.4% 0.046 257.42); /* meta, disabled   (slate-500) */
+  --color-ink: oklch(20.8% 0.042 265.755); /*       headings, body = slate-900 */
+  --color-ink-muted: oklch(44.6% 0.043 257.281); /* secondary      = slate-600 */
+  --color-ink-subtle: oklch(55.4% 0.046 257.417); /* meta          = slate-500 */
 
   /* Primary action -- deliberately the slate-900 the UI already used */
-  --color-primary: oklch(20.8% 0.042 265.75);
-  --color-primary-hover: oklch(27.9% 0.041 260.03);
+  --color-primary: oklch(20.8% 0.042 265.755); /*                  = slate-900 */
+  --color-primary-hover: oklch(27.9% 0.041 260.031); /*            = slate-800 */
   --color-primary-ink: #ffffff;
 
-  /* Status: an ink, a surface, and a line per tone */
-  --color-danger: oklch(44.4% 0.177 26.9);
-  --color-danger-surface: oklch(96.1% 0.015 12.42);
-  --color-danger-line: oklch(88.5% 0.062 18.33);
+  /* Status: an ink, a surface, and a line per tone. danger and success are
+   * red-700/red-50 and green-700/green-50 -- exactly what the old alert and
+   * "Saved" blocks used, so those two tones are unchanged on screen. */
+  --color-danger: oklch(50.5% 0.213 27.518); /*                      = red-700 */
+  --color-danger-surface: oklch(97.1% 0.013 17.38); /*               = red-50  */
+  --color-danger-line: oklch(88.5% 0.062 18.334); /*                 = red-200 */
 
-  --color-success: oklch(44.8% 0.119 151.33);
-  --color-success-surface: oklch(96.2% 0.044 156.74);
-  --color-success-line: oklch(87.1% 0.077 154.45);
+  --color-success: oklch(52.7% 0.154 150.069); /*                   = green-700 */
+  --color-success-surface: oklch(98.2% 0.018 155.826); /*           = green-50  */
+  --color-success-line: oklch(92.5% 0.084 155.995); /*              = green-200 */
 
-  --color-warn: oklch(47.3% 0.137 46.2);
-  --color-warn-surface: oklch(97.3% 0.071 103.19);
-  --color-warn-line: oklch(87.9% 0.105 91.61);
+  --color-warn: oklch(55.5% 0.163 48.998); /*                       = amber-700 */
+  --color-warn-surface: oklch(98.7% 0.022 95.277); /*               = amber-50  */
+  --color-warn-line: oklch(92.4% 0.12 95.746); /*                   = amber-200 */
 
-  --color-info: oklch(48.8% 0.155 264.38);
-  --color-info-surface: oklch(97% 0.014 254.6);
-  --color-info-line: oklch(88.2% 0.059 254.13);
+  --color-info: oklch(48.8% 0.243 264.376); /*                       = blue-700 */
+  --color-info-surface: oklch(97% 0.014 254.604); /*                 = blue-50  */
+  --color-info-line: oklch(88.2% 0.059 254.128); /*                  = blue-200 */
 
   --radius-control: 0.5rem; /* inputs, buttons, badges */
   --radius-card: 0.75rem; /*   cards, panels          */
@@ -397,20 +460,20 @@ In `apps/web/src/app/layout.tsx`, replace the `<body>` line:
 - [ ] **Step 5: Run the test to verify it passes**
 
 Run: `npm run test -- src/app/globals.test.ts`
-Expected: PASS, 3 tests.
+Expected: PASS, 4 tests.
 
-- [ ] **Step 6: Check the colours against the old ones, not against the values**
+- [ ] **Step 6: Confirm the app renders**
 
-This is the spec's risk 3: the `oklch` numbers are transcriptions of Tailwind's slate/red/green ramps, and a transcription can be wrong in a way that compiles fine. So compare rendered output rather than trusting the literals.
+The spec's risk 3 — that a hand-transcribed `oklch` triple can be wrong in a way that still compiles — is now covered by the palette-equality test in step 1 rather than by eyeballing a screenshot. That test is the gate; this step only confirms the page still loads.
 
-1. Before starting, take a screenshot of `http://localhost:3000/login` on the previous commit (`git stash` if needed).
-2. Run `npm run dev` and open the same page.
-3. Expected: the page background and card border read as the same near-white and same light grey as the screenshot. The typeface is the only intended visible change — the system UI font (Segoe UI on Windows) instead of Arial.
-4. If a colour is visibly off, fix that token's value here rather than carrying the drift into fifteen files. Stop the dev server.
+Run `npm run dev` and open `http://localhost:3000/login`.
+Expected: the form renders, the background and borders look unremarkable, and the typeface is now the system UI font (Segoe UI on Windows) instead of Arial — the one intended visible change. Stop the dev server.
+
+**The token values in step 3 are ground truth, already verified against Tailwind 4.3.3 in this project — do not "correct" them.** Nine of them were wrong in an earlier draft of this plan, which is why the test exists.
 
 - [ ] **Step 7: Run the gates**
 
-Run: `npm run test` (expected: **27 tests in 4 files**), then `npm run typecheck`, then `npm run lint`.
+Run: `npm run test` (expected: **28 tests in 4 files**), then `npm run typecheck`, then `npm run lint`.
 Expected: all clean.
 
 - [ ] **Step 8: Commit**
@@ -594,7 +657,7 @@ Expected: PASS, 4 tests.
 
 - [ ] **Step 5: Run the gates and commit**
 
-Run: `npm run test` (expected: **31 tests in 5 files**), `npm run typecheck`, `npm run lint`.
+Run: `npm run test` (expected: **32 tests in 5 files**), `npm run typecheck`, `npm run lint`.
 
 ```bash
 git add apps/web/src/components/ui/Button.tsx apps/web/src/components/ui/Button.test.tsx
@@ -803,7 +866,7 @@ Expected: PASS, 5 tests.
 
 - [ ] **Step 6: Run the gates and commit**
 
-Run: `npm run test` (expected: **36 tests in 6 files**), `npm run typecheck`, `npm run lint`.
+Run: `npm run test` (expected: **37 tests in 6 files**), `npm run typecheck`, `npm run lint`.
 
 ```bash
 git add apps/web/src/components/ui/Field.tsx apps/web/src/components/ui/Input.tsx apps/web/src/components/ui/Field.test.tsx
@@ -1270,11 +1333,11 @@ export function LoadingState({ label }: { label: string }) {
 - [ ] **Step 6: Run the test to verify it passes**
 
 Run: `npm run test -- src/components/ui/Alert.test.tsx`
-Expected: PASS, 3 tests.
+Expected: PASS, 4 tests.
 
 - [ ] **Step 7: Run the gates and commit**
 
-Run: `npm run test` (expected: **39 tests in 7 files**), `npm run typecheck`, `npm run lint`.
+Run: `npm run test` (expected: **40 tests in 7 files**), `npm run typecheck`, `npm run lint`.
 
 ```bash
 git add apps/web/src/components/ui/
@@ -1653,7 +1716,7 @@ Expected: PASS — 3 + 2 + 8 + 4 = 17 tests.
 
 - [ ] **Step 8: Run the gates and commit**
 
-Run: `npm run test` (expected: **56 tests in 11 files**), `npm run typecheck`, `npm run lint`.
+Run: `npm run test` (expected: **57 tests in 11 files**), `npm run typecheck`, `npm run lint`.
 
 ```bash
 git add apps/web/src/lib/graphql-errors.ts apps/web/src/lib/agent-status.ts apps/web/src/lib/setup-checklist.ts apps/web/src/lib/chat-totals.ts apps/web/src/lib/graphql-errors.test.ts apps/web/src/lib/agent-status.test.ts apps/web/src/lib/setup-checklist.test.ts apps/web/src/lib/chat-totals.test.ts
@@ -1834,7 +1897,7 @@ Expected: PASS, 9 tests.
 
 - [ ] **Step 5: Run the gates and commit**
 
-Run: `npm run test` (expected: **65 tests in 12 files**), `npm run typecheck`, `npm run lint`.
+Run: `npm run test` (expected: **66 tests in 12 files**), `npm run typecheck`, `npm run lint`.
 
 ```bash
 git add apps/web/src/components/shell/nav.ts apps/web/src/components/shell/nav.test.ts
@@ -2116,7 +2179,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
 - [ ] **Step 4: Run the gates**
 
-Run: `npm run test` (expected: still **65 tests in 12 files** — this task adds no tests), then `npm run typecheck`, then `npm run lint`.
+Run: `npm run test` (expected: still **66 tests in 12 files** — this task adds no tests), then `npm run typecheck`, then `npm run lint`.
 Expected: all clean.
 
 - [ ] **Step 5: Verify in the browser**
@@ -2361,7 +2424,7 @@ Same treatment for `apps/web/src/app/(auth)/register/page.tsx` — identical imp
 
 - [ ] **Step 4: Run the gates**
 
-Run: `npm run test` (expected: **65 tests in 12 files**), `npm run typecheck`, `npm run lint`.
+Run: `npm run test` (expected: **66 tests in 12 files**), `npm run typecheck`, `npm run lint`.
 
 - [ ] **Step 5: Verify in the browser**
 
@@ -2580,7 +2643,7 @@ export default function DashboardPage() {
 
 - [ ] **Step 2: Run the gates**
 
-Run: `npm run test` (expected: **65 tests in 12 files**), `npm run typecheck`, `npm run lint`.
+Run: `npm run test` (expected: **66 tests in 12 files**), `npm run typecheck`, `npm run lint`.
 
 - [ ] **Step 3: Verify in the browser**
 
@@ -2787,7 +2850,7 @@ export default function AgentsPage() {
 
 - [ ] **Step 2: Run the gates**
 
-Run: `npm run test` (expected: **65 tests in 12 files**), `npm run typecheck`, `npm run lint`.
+Run: `npm run test` (expected: **66 tests in 12 files**), `npm run typecheck`, `npm run lint`.
 
 - [ ] **Step 3: Verify in the browser**
 
@@ -3144,7 +3207,7 @@ Replace the three lines that currently end in `?.graphQLErrors[0]?.message ?? nu
 
 - [ ] **Step 6: Run the gates**
 
-Run: `npm run test` (expected: **65 tests in 12 files**), `npm run typecheck`, `npm run lint`.
+Run: `npm run test` (expected: **66 tests in 12 files**), `npm run typecheck`, `npm run lint`.
 
 - [ ] **Step 7: Verify in the browser**
 
@@ -3379,7 +3442,7 @@ Expected: PASS, 4 tests.
 
 - [ ] **Step 5: Run the gates and commit**
 
-Run: `npm run test` (expected: **69 tests in 13 files**), `npm run typecheck`, `npm run lint`.
+Run: `npm run test` (expected: **70 tests in 13 files**), `npm run typecheck`, `npm run lint`.
 
 ```bash
 git add apps/web/src/components/chat/ChatMessage.tsx apps/web/src/components/chat/ChatMessage.test.tsx
@@ -3620,7 +3683,7 @@ Expected: the diff touches only the import block, the block of derived values ad
 
 - [ ] **Step 6: Run the gates**
 
-Run: `npm run test` (expected: **69 tests in 13 files**, including the 22 unmodified baseline tests), `npm run typecheck`, `npm run lint`.
+Run: `npm run test` (expected: **70 tests in 13 files**, including the 22 unmodified baseline tests), `npm run typecheck`, `npm run lint`.
 
 - [ ] **Step 7: Verify in the browser**
 
@@ -3824,7 +3887,7 @@ git rm apps/web/src/components/ComingSoon.tsx
 
 - [ ] **Step 4: Run the gates**
 
-Run: `npm run test` (expected: **69 tests in 13 files**), `npm run typecheck`, `npm run lint`.
+Run: `npm run test` (expected: **70 tests in 13 files**), `npm run typecheck`, `npm run lint`.
 Expected: all clean. Typecheck is what proves nothing still imports `ComingSoon`.
 
 - [ ] **Step 5: Verify in the browser**
@@ -3935,7 +3998,7 @@ npm run build
 ```
 
 Expected:
-- `npm run test` — **71 tests in 14 files**, including the **22 unmodified baseline tests** in `src/lib/sse.test.ts` and `src/lib/chat-turn.test.ts`.
+- `npm run test` — **72 tests in 14 files**, including the **22 unmodified baseline tests** in `src/lib/sse.test.ts` and `src/lib/chat-turn.test.ts`.
 - `npm run typecheck` — no output.
 - `npm run lint` — no errors.
 - `npm run build` — succeeds. This is the first task that runs it, and it is what catches a client/server component boundary mistake that `dev` tolerates.
@@ -3984,21 +4047,21 @@ Each task's expected total, so a drifting count is caught at the task that cause
 |---|---|---|---|
 | baseline | 2 | 22 | — |
 | 1 — test infrastructure | 3 | 24 | +2 |
-| 2 — design tokens | 4 | 27 | +3 |
-| 3 — Button | 5 | 31 | +4 |
-| 4 — Field, Input | 6 | 36 | +5 |
-| 5 — display primitives | 7 | 39 | +3 |
-| 6 — pure logic layer | 11 | 56 | +17 |
-| 7 — nav | 12 | 65 | +9 |
-| 8 — shell | 12 | 65 | +0 |
-| 9 — auth pages | 12 | 65 | +0 |
-| 10 — Overview | 12 | 65 | +0 |
-| 11 — agents list | 12 | 65 | +0 |
-| 12 — agent detail | 12 | 65 | +0 |
-| 13 — ChatMessage | 13 | 69 | +4 |
-| 14 — playground | 13 | 69 | +0 |
-| 15 — placeholder pages | 13 | 69 | +0 |
-| 16 — conventions guard | 14 | 71 | +2 |
+| 2 — design tokens | 4 | 28 | +4 |
+| 3 — Button | 5 | 32 | +4 |
+| 4 — Field, Input | 6 | 37 | +5 |
+| 5 — display primitives | 7 | 40 | +3 |
+| 6 — pure logic layer | 11 | 57 | +17 |
+| 7 — nav | 12 | 66 | +9 |
+| 8 — shell | 12 | 66 | +0 |
+| 9 — auth pages | 12 | 66 | +0 |
+| 10 — Overview | 12 | 66 | +0 |
+| 11 — agents list | 12 | 66 | +0 |
+| 12 — agent detail | 12 | 66 | +0 |
+| 13 — ChatMessage | 13 | 70 | +4 |
+| 14 — playground | 13 | 70 | +0 |
+| 15 — placeholder pages | 13 | 70 | +0 |
+| 16 — conventions guard | 14 | 72 | +2 |
 
 Tasks 8–12, 14 and 15 add no tests by design — see the last Global Constraint. They are verified by `typecheck`, `lint`, and their own visual checklists.
 
