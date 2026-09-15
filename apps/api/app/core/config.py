@@ -92,6 +92,24 @@ class Settings(BaseSettings):
     def normalize_postgres_dsn(cls, value: str) -> str:
         return _normalize_database_url(value)
 
+    @field_validator("redis_url", mode="after")
+    @classmethod
+    def reject_non_tcp_redis_url(cls, value: str) -> str:
+        """Upstash presents a REST endpoint (https://) next to the TCP one,
+        and the REST URL is the easier of the two to copy. redis-py speaks
+        only the Redis protocol: handed an https:// URL it raises inside
+        check_redis(), which catches everything, so the only symptom is
+        `/health/ready` reporting `redis: false` forever with no reason
+        anywhere. Fail at startup instead, naming what to paste."""
+        if not value.startswith(("redis://", "rediss://", "unix://")):
+            raise ValueError(
+                "REDIS_URL must be a Redis protocol URL (redis://, rediss:// or unix://), "
+                f"not {value.split('://')[0]}://. Upstash calls this the TCP endpoint and it "
+                "looks like rediss://default:<password>@<host>:6379 - the https:// URL on the "
+                "same page is the REST API, which this client cannot speak."
+            )
+        return value
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def split_comma_separated(cls, value: object) -> object:
