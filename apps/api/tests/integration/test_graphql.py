@@ -252,6 +252,78 @@ async def test_invalid_input_is_reported_as_invalid_input_not_a_raw_pydantic_mes
     assert "errors.pydantic.dev" not in body["errors"][0]["message"]
 
 
+async def test_create_agent_rejects_an_unknown_provider(client, auth_headers):
+    """`AgentService.create_agent` used to do
+    `DEFAULT_MODELS.get(provider, DEFAULT_MODELS["openai"])`, so a typo'd or
+    invented provider name was accepted and silently paired with an OpenAI
+    model -- an agent that could never resolve a provider at send time. The
+    name is validated against `registry.KNOWN_PROVIDERS` in the schema
+    instead, so it is rejected here, at creation."""
+    response = await graphql(
+        client,
+        'mutation { createAgent(input: {name: "Bogus Bot", provider: "gpt"}) { id } }',
+        headers=auth_headers,
+    )
+    body = response.json()
+    assert body["errors"][0]["extensions"]["code"] == "invalid_input"
+    assert "fake" in body["errors"][0]["message"]
+
+
+async def test_update_agent_rejects_an_unknown_provider(client, auth_headers):
+    """`update_agent` `setattr`s `provider` straight onto the row with no
+    validation at all -- in contrast to the careful `AgentStatus` handling
+    immediately above it. Both mutations share one schema, so both reject
+    the same values the same way."""
+    created = await graphql(
+        client,
+        'mutation { createAgent(input: {name: "Switchable Bot"}) { id } }',
+        headers=auth_headers,
+    )
+    agent_id = created.json()["data"]["createAgent"]["id"]
+
+    response = await graphql(
+        client,
+        """
+        mutation U($id: UUID!) {
+          updateAgent(id: $id, input: {provider: "gpt"}) { provider }
+        }
+        """,
+        {"id": agent_id},
+        auth_headers,
+    )
+    body = response.json()
+    assert body["errors"][0]["extensions"]["code"] == "invalid_input"
+
+
+async def test_update_agent_accepts_every_known_provider(client, auth_headers):
+    """The counterpart to the test above: the validator must not be so strict
+    that it rejects the providers that do exist -- `fake` included, which is
+    what a fresh clone's agents are actually created with."""
+    from app.llm.registry import KNOWN_PROVIDERS
+
+    created = await graphql(
+        client,
+        'mutation { createAgent(input: {name: "Every Provider Bot"}) { id } }',
+        headers=auth_headers,
+    )
+    agent_id = created.json()["data"]["createAgent"]["id"]
+
+    for provider in KNOWN_PROVIDERS:
+        response = await graphql(
+            client,
+            """
+            mutation U($id: UUID!, $provider: String!) {
+              updateAgent(id: $id, input: {provider: $provider}) { provider }
+            }
+            """,
+            {"id": agent_id, "provider": provider},
+            auth_headers,
+        )
+        body = response.json()
+        assert "errors" not in body, body
+        assert body["data"]["updateAgent"]["provider"] == provider
+
+
 async def test_unexpected_errors_do_not_leak_internal_details(client, auth_headers, monkeypatch):
     """A bug, or a raw database error, must never reach the client with its
     own message - it must be replaced with a generic one and `internal_error`,

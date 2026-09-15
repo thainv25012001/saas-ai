@@ -17,6 +17,13 @@
  * parses once a full `\n\n`-terminated frame is available.
  */
 
+// Relative, not the `@/` alias the rest of the app uses: this module is
+// exercised directly by `sse.test.ts` under vitest, which resolves without
+// Next.js's tsconfig path mapping. `./auth` is a type-only import, so the
+// React module it lives in is erased at compile time and never loaded here.
+import { apiFetch } from "./api";
+import type { TokenResponse } from "./auth";
+
 export type ChatUsage = {
   input_tokens: number;
   output_tokens: number;
@@ -195,6 +202,11 @@ export type StreamChatParams = {
   accessToken: string;
   apiUrl: string;
   onEvent: (event: SSEEvent) => void;
+  /** Called with a rotated access token after a silent refresh, so the
+   * caller can push it into React state exactly as urql's `authExchange`
+   * does -- otherwise the fresh token dies with this call and the next send
+   * repeats the whole refresh. */
+  onAccessToken?: (token: string) => void;
   signal?: AbortSignal;
 };
 
@@ -209,16 +221,16 @@ export type StreamChatParams = {
  * shape (`type: "error"`) so callers only ever have to handle one shape.
  */
 export async function streamChat(params: StreamChatParams): Promise<void> {
-  const { agentId, message, conversationId, accessToken, apiUrl, onEvent, signal } = params;
+  const { agentId, message, conversationId, accessToken, apiUrl, onEvent, onAccessToken, signal } =
+    params;
 
-  let response: Response;
-  try {
-    response = await fetch(`${apiUrl}/api/v1/chat/stream`, {
+  const send = (token: string): Promise<Response> =>
+    fetch(`${apiUrl}/api/v1/chat/stream`, {
       method: "POST",
       credentials: "include",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({
         agent_id: agentId,
@@ -227,6 +239,35 @@ export async function streamChat(params: StreamChatParams): Promise<void> {
       }),
       signal,
     });
+
+  let response: Response;
+  try {
+    response = await send(accessToken);
+
+    // GraphQL refreshes silently on a 401 via urql's `authExchange`, so a
+    // dashboard tab left open past the access token's lifetime keeps
+    // working -- except here, where a 401 used to render a red error bubble
+    // with no retry at all. Same recovery, through the same single
+    // `/api/v1/auth/refresh` call the exchange uses (the refresh token is an
+    // httpOnly cookie, so `apiFetch` needs nothing from this module), and
+    // ONE retry only: retrying a refresh that keeps coming back 401 is how
+    // you build a refresh loop.
+    if (response.status === 401) {
+      let refreshed: string | null = null;
+      try {
+        const tokens = await apiFetch<TokenResponse>("/api/v1/auth/refresh", { method: "POST" });
+        refreshed = tokens.access_token;
+      } catch {
+        // The refresh token itself is gone or invalid -- there is no session
+        // left to salvage. Fall through and surface the original 401 exactly
+        // as before, which is what moves the user back to /login.
+        refreshed = null;
+      }
+      if (refreshed !== null) {
+        onAccessToken?.(refreshed);
+        response = await send(refreshed);
+      }
+    }
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") return;
     onEvent({

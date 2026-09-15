@@ -1,4 +1,5 @@
 import pytest
+from sqlalchemy import select
 
 from app.agents.schemas import CreateAgentInput
 from app.agents.service import AgentService
@@ -13,7 +14,7 @@ from app.conversations.service import ConversationService
 from app.core.config import get_settings
 from app.core.errors import NotFoundError
 from app.core.tenancy import tenant_session
-from app.db.models import MessageRole
+from app.db.models import MessageRole, UsageEvent, UsageKind
 from app.llm.errors import LLMConfigurationError, LLMUnavailableError
 from app.llm.fake_provider import FakeProvider
 from app.llm.pricing import estimate_cost
@@ -350,3 +351,62 @@ async def test_provider_resolution_happens_before_any_conversation_is_created(
         assert conversations == []
     finally:
         reset_providers()
+
+
+async def _usage_events(tenant, conversation_id):
+    async with tenant_session(tenant) as session:
+        result = await session.execute(
+            select(UsageEvent).where(UsageEvent.conversation_id == conversation_id)
+        )
+        return list(result.scalars().all())
+
+
+async def test_a_successful_turn_writes_exactly_one_usage_event(tenant_a):
+    """PHASE-2.md §5's central requirement -- "every assistant message ...
+    writes a `usage_events` row" -- had no chat-level coverage at all:
+    deleting the whole `record_usage(...)` call from `ChatService.send` left
+    the entire suite green, because `usage_events` was only ever exercised by
+    `test_conversation_service.py` calling `record_usage` directly. This is
+    the test that fails when that call goes away.
+    """
+    usage = Usage(input_tokens=42, output_tokens=17)
+    provider = FakeProvider(script=["ok"], usage=usage)
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a, model="claude-sonnet-5")
+        agent_id = agent.id
+        service = ChatService(session, tenant_a, provider_override=provider)
+        events = [event async for event in service.send(agent.id, "Hello")]
+
+    conversation_id = next(e.conversation_id for e in events if isinstance(e, ChatMessageStart))
+
+    rows = await _usage_events(tenant_a, conversation_id)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.kind is UsageKind.LLM
+    assert row.agent_id == agent_id
+    assert row.provider == "fake"
+    assert row.model == "claude-sonnet-5"
+    assert row.input_tokens == 42
+    assert row.output_tokens == 17
+    # The same figure the assistant message and the `message_end` event
+    # carry -- a usage row that disagrees with the message it bills for
+    # would be worse than none at all.
+    assert row.cost_usd == estimate_cost("claude-sonnet-5", usage)
+    assert row.cost_usd is not None and row.cost_usd > 0
+
+
+async def test_a_midstream_failure_writes_no_usage_event(tenant_a):
+    """The handled-error path deliberately persists the partial assistant
+    message but writes NO usage row: there is no reliable token count for a
+    stream that never reached its `message_end`/usage event, and inventing
+    one would bill the organization for a number nothing produced."""
+    provider = FakeProvider(script=["partial ", "more"], fail_with=LLMUnavailableError("gone"))
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+        service = ChatService(session, tenant_a, provider_override=provider)
+        events = [event async for event in service.send(agent.id, "Hello")]
+
+    assert any(isinstance(e, ChatError) for e in events)
+    conversation_id = next(e.conversation_id for e in events if isinstance(e, ChatMessageStart))
+
+    assert await _usage_events(tenant_a, conversation_id) == []

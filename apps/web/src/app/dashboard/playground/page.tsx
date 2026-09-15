@@ -8,6 +8,7 @@ import { ChatMessage, type ChatMessageData } from "@/components/chat/ChatMessage
 import { AgentsDocument } from "@/graphql/generated";
 import { API_URL } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { NEW_CONVERSATION, resolveTurnOutcome, type TurnState } from "@/lib/chat-turn";
 import { streamChat } from "@/lib/sse";
 
 function newId(): string {
@@ -17,7 +18,7 @@ function newId(): string {
 }
 
 function PlaygroundContent() {
-  const { user, accessToken, loading } = useAuth();
+  const { user, accessToken, setAccessToken, loading } = useAuth();
   const searchParams = useSearchParams();
 
   const [{ data, fetching }] = useQuery({
@@ -27,7 +28,10 @@ function PlaygroundContent() {
   const agents = useMemo(() => data?.agents ?? [], [data]);
 
   const [agentId, setAgentId] = useState<string | null>(null);
-  const [conversationId, setConversationId] = useState<string | null>(null);
+  // The conversation id AND whether the server has ever committed a turn in
+  // it. Both are needed, and only together: see `@/lib/chat-turn` for why an
+  // id from `message_start` alone is not yet a conversation that exists.
+  const [conversation, setConversation] = useState<TurnState>(NEW_CONVERSATION);
   const [messages, setMessages] = useState<ChatMessageData[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -53,12 +57,12 @@ function PlaygroundContent() {
     // A conversation belongs to one agent's history/prompt; switching agents
     // starts a fresh thread rather than silently mixing two agents' turns
     // into one conversation_id.
-    setConversationId(null);
+    setConversation(NEW_CONVERSATION);
     setMessages([]);
   }
 
   function onNewConversation() {
-    setConversationId(null);
+    setConversation(NEW_CONVERSATION);
     setMessages([]);
   }
 
@@ -93,18 +97,27 @@ function PlaygroundContent() {
     abortRef.current = controller;
     setIsStreaming(true);
 
+    // What this turn learns about the conversation's identity, resolved once
+    // in the `finally` below rather than written to state mid-stream. Seeded
+    // with the id the request carried, so a turn that never gets a
+    // `message_start` at all (a pre-stream error) still resolves against
+    // something real.
+    let seenConversationId = conversation.conversationId;
+    let sawMessageEnd = false;
+
     try {
       await streamChat({
         agentId,
         message: text,
-        conversationId,
+        conversationId: conversation.conversationId,
         accessToken,
         apiUrl: API_URL,
         signal: controller.signal,
+        onAccessToken: setAccessToken,
         onEvent: (event) => {
           switch (event.type) {
             case "message_start":
-              setConversationId(event.conversation_id);
+              seenConversationId = event.conversation_id;
               break;
             case "text_delta":
               setMessages((prev) =>
@@ -114,6 +127,7 @@ function PlaygroundContent() {
               );
               break;
             case "message_end":
+              sawMessageEnd = true;
               setMessages((prev) =>
                 prev.map((m) =>
                   m.id === assistantId
@@ -152,6 +166,16 @@ function PlaygroundContent() {
       // out the placeholder) and any stream that ends without a
       // `message_end` for some other reason.
       finalizeStreamingMessage(assistantId);
+      // And the same two cases for the conversation's identity. A first turn
+      // that never reached `message_end` was rolled back server-side, taking
+      // the INSERT that created the conversation with it -- so holding on to
+      // the id from its `message_start` makes every subsequent send fail
+      // with a pre-stream 404 that nothing here clears. The functional form
+      // is deliberate: this runs long after the render that read
+      // `conversation` above.
+      setConversation((prev) =>
+        resolveTurnOutcome(prev, { conversationId: seenConversationId, sawMessageEnd }),
+      );
       setIsStreaming(false);
       abortRef.current = null;
     }

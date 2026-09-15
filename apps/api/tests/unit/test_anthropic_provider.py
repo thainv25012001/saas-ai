@@ -14,6 +14,7 @@ from anthropic.types import TextBlock as AnthropicTextBlock
 from app.llm.anthropic_provider import AnthropicProvider
 from app.llm.errors import (
     LLMConfigurationError,
+    LLMEmptyResponseError,
     LLMRateLimitError,
     LLMUnavailableError,
 )
@@ -282,6 +283,49 @@ async def test_server_status_error_is_mapped_to_llm_unavailable_error():
     with pytest.raises(LLMUnavailableError):
         async for _ in provider.stream(_request()):
             pass
+
+
+async def test_max_tokens_is_clamped_to_the_capability_record():
+    """Provider parity: the OpenAI adapter clamps against its own capability
+    record too, so neither provider can reach a live 400 for a `max_tokens`
+    the model was never going to accept."""
+    provider = _provider_with(_FakeStream([_text_delta("hi")], _final_message()))
+    # claude-haiku-4-5 is a `_CLASSIC` record with a 64K ceiling, so a
+    # request at the 128K limit `CompletionRequest` itself allows is over it.
+    async for _ in provider.stream(_request(model="claude-haiku-4-5", max_tokens=128_000)):
+        pass
+    kwargs = provider._client.messages.stream.call_args.kwargs  # noqa: SLF001
+    assert kwargs["max_tokens"] == provider.capabilities("claude-haiku-4-5").max_output_tokens
+
+
+async def test_max_tokens_below_the_ceiling_is_forwarded_unchanged():
+    """The counterpart to the test above: without this, the clamp could be
+    replaced with a hardcoded `max_output_tokens` and the suite would stay
+    green."""
+    provider = _provider_with(_FakeStream([_text_delta("hi")], _final_message()))
+    async for _ in provider.stream(_request(max_tokens=256)):
+        pass
+    kwargs = provider._client.messages.stream.call_args.kwargs  # noqa: SLF001
+    assert kwargs["max_tokens"] == 256
+
+
+async def test_a_stream_with_no_text_raises_llm_empty_response_error():
+    """PHASE-2.md §3: "model refused or returned nothing" is
+    `LLMEmptyResponseError`. Without this the turn reports success with an
+    empty assistant message and a `usage_events` row for it."""
+    provider = _provider_with(_FakeStream([_thinking_delta()], _final_message(output_tokens=0)))
+    with pytest.raises(LLMEmptyResponseError):
+        async for _ in provider.stream(_request()):
+            pass
+
+
+async def test_a_tool_stop_with_no_text_is_not_an_empty_response():
+    """A model that answers by calling a tool legitimately emits no text.
+    Phase 4 wires tool calls up; this pins that the empty-response guard does
+    not stand in its way."""
+    provider = _provider_with(_FakeStream([], _final_message(stop_reason="tool_use")))
+    events = [e async for e in provider.stream(_request())]
+    assert [e.type for e in events] == ["message_start", "usage", "message_end"]
 
 
 def test_capabilities_report_no_sampling_for_current_models():

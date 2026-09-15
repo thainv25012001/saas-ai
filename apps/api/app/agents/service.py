@@ -68,6 +68,10 @@ class AgentService:
         # (never a hardcoded literal from a different provider's family) so
         # a `fake`-provider agent never ends up carrying an OpenAI model id.
         provider = data.provider or get_settings().default_llm_provider
+        # `data.provider` is validated against `registry.KNOWN_PROVIDERS` by
+        # `CreateAgentInput`, so the only way to reach the fallback here is a
+        # misconfigured `DEFAULT_LLM_PROVIDER` env var -- an operator
+        # mistake, not a caller-supplied string.
         model = data.model or DEFAULT_MODELS.get(provider, DEFAULT_MODELS["openai"])
         agent = Agent(
             id=uuid7(),

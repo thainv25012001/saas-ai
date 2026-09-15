@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { type SSEEvent, parseSSEStream } from "./sse";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { type SSEEvent, parseSSEStream, streamChat } from "./sse";
 
 const encoder = new TextEncoder();
 
@@ -173,5 +173,102 @@ describe("parseSSEStream", () => {
   it("discards a genuinely truncated final frame (incomplete JSON)", async () => {
     const events = await collect(chunksOf('data: {"type":"text_delta","text":"cut off'));
     expect(events).toEqual([]);
+  });
+});
+
+describe("streamChat token refresh", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const SSE_BODY =
+    'data: {"type": "message_start", "conversation_id": "c1", "message_id": "m1"}\n\n' +
+    'data: {"type": "text_delta", "text": "hi"}\n\n';
+
+  const unauthorized = () =>
+    new Response(JSON.stringify({ error: { code: "unauthenticated", message: "expired" } }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+
+  /** Records every request and answers each one from `responses`, in order. */
+  function stubFetch(responses: (() => Response)[]) {
+    const calls: { url: string; init: RequestInit | undefined }[] = [];
+    let index = 0;
+    vi.stubGlobal("fetch", async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      const next = responses[index];
+      index += 1;
+      if (!next) throw new Error(`unexpected extra fetch call to ${String(url)}`);
+      return next();
+    });
+    return calls;
+  }
+
+  function run(events: SSEEvent[], tokens: string[]) {
+    return streamChat({
+      agentId: "a1",
+      message: "hello",
+      conversationId: null,
+      accessToken: "stale-token",
+      apiUrl: "http://api.test",
+      onEvent: (event) => events.push(event),
+      onAccessToken: (token) => tokens.push(token),
+    });
+  }
+
+  it("refreshes once and retries the stream after a 401", async () => {
+    // GraphQL already recovers from an expired access token silently via
+    // urql's authExchange. Without this, a playground tab left open past the
+    // token's lifetime renders a red error bubble on its next send while the
+    // rest of the dashboard keeps working.
+    const calls = stubFetch([
+      unauthorized,
+      () => new Response(JSON.stringify({ access_token: "fresh-token", expires_in: 900 })),
+      () => new Response(SSE_BODY, { status: 200 }),
+    ]);
+    const events: SSEEvent[] = [];
+    const tokens: string[] = [];
+
+    await run(events, tokens);
+
+    expect(calls.map((c) => c.url)).toEqual([
+      "http://api.test/api/v1/chat/stream",
+      "http://localhost:8000/api/v1/auth/refresh",
+      "http://api.test/api/v1/chat/stream",
+    ]);
+    // The retry carries the rotated token, not the stale one.
+    const retryHeaders = calls[2].init?.headers as Record<string, string>;
+    expect(retryHeaders.Authorization).toBe("Bearer fresh-token");
+    // ...and it is handed back so React state holds the fresh one too.
+    expect(tokens).toEqual(["fresh-token"]);
+    expect(events.map((e) => e.type)).toEqual(["message_start", "text_delta"]);
+  });
+
+  it("retries at most once, so a still-401 retry cannot loop", async () => {
+    const calls = stubFetch([
+      unauthorized,
+      () => new Response(JSON.stringify({ access_token: "fresh-token", expires_in: 900 })),
+      unauthorized,
+    ]);
+    const events: SSEEvent[] = [];
+
+    await run(events, []);
+
+    expect(calls).toHaveLength(3);
+    expect(events).toEqual([{ type: "error", code: "unauthenticated", message: "expired" }]);
+  });
+
+  it("surfaces the original 401 when the refresh itself fails", async () => {
+    const calls = stubFetch([unauthorized, unauthorized]);
+    const events: SSEEvent[] = [];
+    const tokens: string[] = [];
+
+    await run(events, tokens);
+
+    // No second stream attempt: there is no session left to salvage.
+    expect(calls).toHaveLength(2);
+    expect(tokens).toEqual([]);
+    expect(events).toEqual([{ type: "error", code: "unauthenticated", message: "expired" }]);
   });
 });

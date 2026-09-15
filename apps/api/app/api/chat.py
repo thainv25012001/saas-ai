@@ -25,7 +25,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_tenant
@@ -38,6 +38,7 @@ from app.chat.service import (
     ChatTextDelta,
 )
 from app.core.logging import get_logger
+from app.core.rate_limit import enforce_rate_limit
 from app.core.tenancy import TenantContext, tenant_session
 from app.db.models import ConversationChannel
 from app.llm.base import LLMProvider
@@ -82,9 +83,34 @@ _QueueItem = ChatEvent | BaseException | _StreamDone
 _ExcInfo = tuple[type[BaseException], BaseException, TracebackType | None] | tuple[None, None, None]
 
 
+# This is the only endpoint in the application that spends money, so both
+# the size of a single request and how many of them one user may make are
+# bounded here.
+#
+# 8_000 characters is roughly 2_000 tokens -- far more than anyone types into
+# a chat box, comfortably inside every model's input window alongside the
+# system prompt and 20 turns of history, and small enough that the `messages`
+# row it becomes stays bounded. A larger body is a client bug or an abuse
+# attempt, not a real question, and rejecting it before the provider call is
+# the difference between a 422 and a paid request.
+MAX_MESSAGE_LENGTH = 8_000
+
+# 30 messages per minute per user. A person having a fast back-and-forth
+# conversation sends at most a handful a minute, so this is generous for
+# every real interaction while capping a runaway client (a retry loop, a
+# script) at a spend the organization can survive. Keyed per user rather
+# than per IP: unlike `register`/`login` this route is authenticated, so the
+# identity is known and one office behind a single NAT address must not
+# throttle itself.
+CHAT_RATE_LIMIT = 30
+CHAT_RATE_LIMIT_WINDOW_SECONDS = 60
+
+
 class ChatStreamRequest(BaseModel):
     agent_id: uuid.UUID
-    message: str
+    # `min_length=1`: an empty string is not a question, and without this it
+    # creates a full billable turn plus a persisted empty `messages` row.
+    message: str = Field(min_length=1, max_length=MAX_MESSAGE_LENGTH)
     conversation_id: uuid.UUID | None = None
 
 
@@ -142,13 +168,32 @@ async def _pump(events: AsyncIterator[ChatEvent], queue: "asyncio.Queue[_QueueIt
     through a queue instead means `asyncio.wait_for` only ever cancels
     `queue.get()`, which is always safe to cancel and retry.
     """
+    terminated = False
     try:
         async for event in events:
             await queue.put(event)
+        await queue.put(_STREAM_DONE)
+        terminated = True
     except Exception as exc:  # noqa: BLE001 - forwarded to the consumer below, not swallowed
         await queue.put(exc)
-        return
-    await queue.put(_STREAM_DONE)
+        terminated = True
+    finally:
+        if not terminated:
+            # `events` raised something that is a `BaseException` but not an
+            # `Exception` (a bug outside this function's documented
+            # contract, but nothing in Python prevents it), or this task was
+            # cancelled. Without a terminal item the consumer's
+            # `asyncio.wait_for(queue.get(), ...)` loop never breaks: it just
+            # emits `: ping` every 15s forever, with no terminal event and no
+            # way for the client to learn the turn is over.
+            #
+            # `put_nowait`, not `await put`: the exception is still in flight
+            # (and may be a `CancelledError`, which awaiting here would
+            # immediately re-raise), so this must not suspend. The normal and
+            # `Exception` paths above therefore keep their blocking `put`,
+            # which cannot silently drop the sentinel on a full queue.
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait(_STREAM_DONE)
 
 
 async def _stream_body(
@@ -267,6 +312,19 @@ async def chat_stream(
     tenant: Annotated[TenantContext, Depends(get_current_tenant)],
     provider: Annotated[LLMProvider | None, Depends(get_chat_provider)],
 ) -> StreamingResponse:
+    # Before anything is opened or written: the limiter itself fails open on
+    # a Redis outage (see `enforce_rate_limit`), so this cannot turn a cache
+    # blip into an unusable playground. `user_id` is always set for a token
+    # issued by `AuthService`; the organization is the fallback so a future
+    # tenant context without a user (e.g. the Phase 7 widget) is still
+    # bounded by something rather than sharing one global key.
+    rate_limit_subject = tenant.user_id or tenant.organization_id
+    await enforce_rate_limit(
+        f"chat:{rate_limit_subject}",
+        limit=CHAT_RATE_LIMIT,
+        window_seconds=CHAT_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
     # Opened manually (not via `async with`) because the session has to
     # outlive this function: it is read from and written to for as long as
     # the SSE body below keeps streaming, well after this coroutine returns

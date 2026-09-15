@@ -6,6 +6,7 @@ import pytest
 
 from app.llm.errors import (
     LLMConfigurationError,
+    LLMEmptyResponseError,
     LLMRateLimitError,
     LLMUnavailableError,
 )
@@ -170,15 +171,25 @@ async def test_usage_reaches_message_end():
 
 
 async def test_chunks_with_no_choices_do_not_crash_the_stream():
-    """The final usage-only chunk has an empty `choices` list."""
-    provider = _provider_with([_chunk(usage=(1, 1))])
+    """The final usage-only chunk has an empty `choices` list -- indexing
+    into it unconditionally raises IndexError on every single request."""
+    provider = _provider_with([_chunk("x", finish_reason="stop"), _chunk(usage=(1, 1))])
     events = [e async for e in provider.stream(_request())]
     assert any(e.type == "message_end" for e in events)
 
 
 async def test_a_none_content_delta_is_skipped():
-    """Role-only opening deltas carry content=None."""
-    provider = _provider_with([_chunk(None, finish_reason=None), _chunk("x", finish_reason="stop")])
+    """Role-only opening deltas carry content=None.
+
+    `finish_reason="stop"` on the first chunk is load-bearing: `_chunk()`
+    builds an EMPTY `choices` list when both `text` and `finish_reason` are
+    `None`, so `_chunk(None, finish_reason=None)` would silently re-test the
+    empty-choices case above instead of a real choice whose `content` is
+    `None`.
+    """
+    provider = _provider_with(
+        [_chunk(None, finish_reason="stop"), _chunk("x", finish_reason="stop")]
+    )
     text = "".join([e.text async for e in provider.stream(_request()) if e.type == "text_delta"])
     assert text == "x"
 
@@ -261,6 +272,50 @@ def test_capabilities_are_the_same_for_every_model_name():
     sampling from any current chat model, unlike Anthropic's per-model table."""
     provider = OpenAIProvider(api_key="k")
     assert provider.capabilities("gpt-4o-mini") == provider.capabilities("gpt-4-turbo")
+
+
+async def test_max_tokens_is_clamped_to_the_capability_record():
+    """Provider parity: the Anthropic adapter clamps against its own
+    capability record, so this one must too. `CreateAgentInput.max_tokens`
+    allows up to 32_000 and the dashboard exposes it, so an agent with
+    max_tokens=24000 is reachable -- forwarded raw it is a live 400 ->
+    `LLMConfigurationError` -> HTTP 500, while the identical agent on
+    `claude-opus-5` is silently clamped and succeeds."""
+    provider = _provider_with([_chunk("hi", finish_reason="stop")])
+    async for _ in provider.stream(_request(max_tokens=24_000)):
+        pass
+    kwargs = provider._client.chat.completions.create.call_args.kwargs  # noqa: SLF001
+    assert kwargs["max_tokens"] == provider.capabilities("gpt-4o-mini").max_output_tokens
+
+
+async def test_max_tokens_below_the_ceiling_is_forwarded_unchanged():
+    """The counterpart to the test above: without this, the clamp could be
+    replaced with a hardcoded `max_output_tokens` and the suite would stay
+    green."""
+    provider = _provider_with([_chunk("hi", finish_reason="stop")])
+    async for _ in provider.stream(_request(max_tokens=256)):
+        pass
+    kwargs = provider._client.chat.completions.create.call_args.kwargs  # noqa: SLF001
+    assert kwargs["max_tokens"] == 256
+
+
+async def test_a_stream_with_no_text_raises_llm_empty_response_error():
+    """PHASE-2.md §3: "model refused or returned nothing" is
+    `LLMEmptyResponseError`. Without this the turn reports success with an
+    empty assistant message and a `usage_events` row for it."""
+    provider = _provider_with([_chunk(None, finish_reason="stop"), _chunk(usage=(12, 0))])
+    with pytest.raises(LLMEmptyResponseError):
+        async for _ in provider.stream(_request()):
+            pass
+
+
+async def test_a_tool_stop_with_no_text_is_not_an_empty_response():
+    """A model that answers by calling a tool legitimately emits no text.
+    Phase 4 wires tool calls up; this pins that the empty-response guard does
+    not stand in its way."""
+    provider = _provider_with([_chunk(None, finish_reason="tool_calls"), _chunk(usage=(12, 4))])
+    events = [e async for e in provider.stream(_request())]
+    assert [e.type for e in events] == ["message_start", "usage", "message_end"]
 
 
 async def test_generate_structured_is_not_implemented_yet():

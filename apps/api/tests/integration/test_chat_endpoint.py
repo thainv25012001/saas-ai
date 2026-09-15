@@ -733,3 +733,184 @@ async def test_disconnect_after_completed_turn_logs_discarded_usage(monkeypatch)
     assert entry["input_tokens"] == 10
     assert entry["output_tokens"] == 5
     assert entry["cost_usd"] == "0.00123"
+
+
+# ---------------------------------------------------------------------------
+# 9. The request body is bounded, and the endpoint is throttled
+# ---------------------------------------------------------------------------
+
+
+async def test_empty_message_is_rejected_before_anything_is_spent(
+    app, api_client, clean_users, owner_connection
+):
+    """An empty string is not a question. Without `min_length=1` it creates a
+    full billable turn and a persisted empty `messages` row -- on the one
+    endpoint in this application that spends money."""
+    token = await _register(api_client, "empty-message@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id)
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(script=["hi"])
+
+    response = await api_client.post(
+        CHAT_URL, json={"agent_id": str(agent_id), "message": ""}, headers=_auth(token)
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_input"
+    count = await owner_connection.execute(
+        text("SELECT count(*) FROM conversations WHERE agent_id = :agent_id"),
+        {"agent_id": agent_id},
+    )
+    assert count.scalar_one() == 0
+
+
+async def test_an_oversized_message_is_rejected(app, api_client, clean_users):
+    token = await _register(api_client, "huge-message@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id)
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(script=["hi"])
+
+    response = await api_client.post(
+        CHAT_URL,
+        json={"agent_id": str(agent_id), "message": "x" * (chat_api.MAX_MESSAGE_LENGTH + 1)},
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_input"
+
+
+async def test_a_message_at_the_size_limit_is_accepted(app, api_client, clean_users):
+    """The counterpart to the test above: without it, `max_length` could be
+    set to anything at all (1, say) and the suite would stay green."""
+    token = await _register(api_client, "limit-message@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id)
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(script=["hi"])
+
+    response = await api_client.post(
+        CHAT_URL,
+        json={"agent_id": str(agent_id), "message": "x" * chat_api.MAX_MESSAGE_LENGTH},
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200
+
+
+async def test_chat_stream_is_rate_limited_per_user(app, api_client, clean_users, monkeypatch):
+    """`register`/`login` are throttled; the only endpoint that costs money
+    was not. Patched down to one request per window rather than actually
+    driving 30 full turns -- the limit value is a constant precisely so this
+    test does not have to spend a minute proving it."""
+    monkeypatch.setattr(chat_api, "CHAT_RATE_LIMIT", 1)
+    token = await _register(api_client, "chat-throttle@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id)
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(script=["hi"])
+
+    first = await api_client.post(
+        CHAT_URL, json={"agent_id": str(agent_id), "message": "hello"}, headers=_auth(token)
+    )
+    assert first.status_code == 200
+
+    second = await api_client.post(
+        CHAT_URL, json={"agent_id": str(agent_id), "message": "hello again"}, headers=_auth(token)
+    )
+    assert second.status_code == 429
+    assert second.headers["content-type"].startswith("application/json")
+    assert second.json()["error"]["code"] == "rate_limited"
+    # Throttled before the stream is ever opened -- not a 200 carrying an
+    # in-band error event.
+    assert "text/event-stream" not in second.headers["content-type"]
+
+
+async def test_a_second_user_is_not_throttled_by_the_firsts_traffic(
+    app, api_client, clean_users, monkeypatch
+):
+    """Keyed per user, not globally or per IP: in this test every request
+    comes from the same client address, so a key that was not user-scoped
+    would throttle the second user out on their very first message."""
+    monkeypatch.setattr(chat_api, "CHAT_RATE_LIMIT", 1)
+    first_token = await _register(api_client, "throttle-user-one@example.com", "Ada Motors One")
+    first_org = await _organization_id(api_client, first_token)
+    first_agent = await _make_agent(first_org)
+    second_token = await _register(api_client, "throttle-user-two@example.com", "Ada Motors Two")
+    second_org = await _organization_id(api_client, second_token)
+    second_agent = await _make_agent(second_org)
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(script=["hi"])
+
+    for _ in range(2):
+        await api_client.post(
+            CHAT_URL,
+            json={"agent_id": str(first_agent), "message": "hello"},
+            headers=_auth(first_token),
+        )
+
+    response = await api_client.post(
+        CHAT_URL,
+        json={"agent_id": str(second_agent), "message": "hello"},
+        headers=_auth(second_token),
+    )
+    assert response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Extra: a non-`Exception` BaseException in the pump still terminates the stream
+# ---------------------------------------------------------------------------
+
+
+async def test_a_baseexception_in_the_pump_still_terminates_the_stream(monkeypatch):
+    """`_pump` catches only `Exception`. Without a terminal sentinel on every
+    exit path, a non-`Exception` `BaseException` from `events` leaves the
+    consumer's `asyncio.wait_for(queue.get(), ...)` loop spinning forever --
+    emitting `: ping` every heartbeat interval with no terminal event, so the
+    client never learns the turn is over and the connection never closes.
+    The session-close half of this was already fixed and tested; this is the
+    half that hangs.
+    """
+    from app.api.chat import ChatMessageStart, _stream_body
+
+    class _NoOpSessionCM:
+        async def __aenter__(self) -> "_NoOpSessionCM":
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            return False
+
+    class _SimulatedBug(BaseException):
+        """Not `SystemExit`/`KeyboardInterrupt`: `asyncio.Task` special-cases
+        those two and re-raises them out of the event loop rather than
+        storing them as the task's result."""
+
+    async def _raises_unexpected_baseexception() -> AsyncIterator[object]:
+        raise _SimulatedBug("simulated bug outside _pump's documented contract")
+        yield  # pragma: no cover - unreachable; keeps this an async generator
+
+    monkeypatch.setattr(chat_api, "HEARTBEAT_INTERVAL_SECONDS", 0.02)
+    first_event = ChatMessageStart(conversation_id=uuid.uuid4(), message_id=uuid.uuid4())
+    body = _stream_body(_raises_unexpected_baseexception(), first_event, _NoOpSessionCM())  # type: ignore[arg-type]
+
+    first_chunk = await body.__anext__()
+    assert first_chunk.startswith(b"data: ")
+    # Let the pump task actually run and crash, so the queue's state is
+    # settled before the consumer looks at it again -- otherwise a single
+    # scheduling-order ping could appear even with the fix in place.
+    await asyncio.sleep(0.05)
+
+    chunks: list[bytes] = []
+
+    async def _drain() -> None:
+        async for chunk in body:
+            chunks.append(chunk)
+
+    # `_SimulatedBug` surfaces either way (it comes out of `await pump_task`
+    # in `_stream_body`'s own cleanup, even when that cleanup is driven by
+    # this `wait_for` cancelling the drain). The assertion that actually
+    # discriminates is the one below: with a terminal sentinel the consumer
+    # breaks out immediately and emits nothing more, while without one it
+    # sits in `wait_for(queue.get(), ...)` emitting a heartbeat comment every
+    # interval, forever.
+    with pytest.raises(_SimulatedBug):
+        await asyncio.wait_for(_drain(), timeout=2.0)
+
+    assert chat_api._PING not in chunks  # noqa: SLF001

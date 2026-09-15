@@ -14,7 +14,13 @@ import {
 import { useAuth } from "@/lib/auth";
 
 const STATUSES: AgentStatus[] = ["DRAFT", "ACTIVE", "DISABLED"];
-const PROVIDERS = ["openai", "anthropic"];
+// Mirrors `app/llm/registry.KNOWN_PROVIDERS`, which is what the API now
+// validates against. `fake` belongs here: `DEFAULT_LLM_PROVIDER` is `fake`
+// out of the box, so every agent created by a fresh clone has
+// `provider="fake"` -- without it in this list the select rendered blank for
+// exactly those agents, and a user who touched the dropdown could never put
+// it back.
+const PROVIDERS = ["fake", "openai", "anthropic"];
 
 export default function AgentDetailPage({
   params,

@@ -12,6 +12,7 @@ from app.core.logging import get_logger
 from app.llm.base import ModelCapabilities, SchemaT
 from app.llm.errors import (
     LLMConfigurationError,
+    LLMEmptyResponseError,
     LLMRateLimitError,
     LLMUnavailableError,
 )
@@ -41,6 +42,14 @@ _CAPABILITIES = ModelCapabilities(
     supports_effort=False,
     max_output_tokens=16_384,
 )
+
+# `finish_reason` values that legitimately end a response carrying no text:
+# the model chose to call a tool instead of answering. Everything else with
+# no text at all is the "model refused or returned nothing" case PHASE-2.md
+# §3 maps to `LLMEmptyResponseError`. (`function_call` is the deprecated
+# spelling of the same thing and is still returned for legacy `functions`
+# requests.)
+_TOOL_STOP_REASONS = frozenset({"tool_calls", "function_call"})
 
 
 class OpenAIProvider:
@@ -77,8 +86,33 @@ class OpenAIProvider:
             # rather than duplicated as a second system message.
         return messages
 
+    def _max_tokens(self, request: CompletionRequest) -> int:
+        """Clamp the requested output ceiling to what this model actually
+        accepts, exactly as the Anthropic adapter does.
+
+        `CreateAgentInput.max_tokens` allows up to 32_000 and the dashboard
+        exposes it, so an agent can easily be configured above this API's
+        real ceiling. Forwarding that raw earns a live 400 ->
+        `LLMConfigurationError` -> HTTP 500, while the identical agent on
+        Anthropic is silently clamped and succeeds. Two different outcomes
+        for the same condition is precisely what the capability record
+        exists to prevent, so it is consulted here rather than only by
+        `capabilities()`.
+        """
+        caps = self.capabilities(request.model)
+        max_tokens = min(request.max_tokens, caps.max_output_tokens)
+        if max_tokens < request.max_tokens:
+            logger.debug(
+                "clamped_max_tokens",
+                requested=request.max_tokens,
+                allowed=caps.max_output_tokens,
+                model=request.model,
+            )
+        return max_tokens
+
     async def _stream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
         messages = self._messages(request)
+        max_tokens = self._max_tokens(request)
         try:
             # `AsyncCompletions.create` is `@overload`ed on the LITERAL value
             # of `stream=`. Building one `dict[str, Any]` of kwargs and
@@ -96,7 +130,7 @@ class OpenAIProvider:
                 stream = await self._client.chat.completions.create(
                     model=request.model,
                     messages=messages,
-                    max_tokens=request.max_tokens,
+                    max_tokens=max_tokens,
                     stream=True,
                     stream_options={"include_usage": True},
                     temperature=request.temperature,
@@ -105,7 +139,7 @@ class OpenAIProvider:
                 stream = await self._client.chat.completions.create(
                     model=request.model,
                     messages=messages,
-                    max_tokens=request.max_tokens,
+                    max_tokens=max_tokens,
                     stream=True,
                     stream_options={"include_usage": True},
                 )
@@ -135,19 +169,23 @@ class OpenAIProvider:
                         output_tokens=chunk.usage.completion_tokens,
                     )
 
-            if usage.output_tokens > 0 and not emitted_text:
-                # We were billed for output tokens but never emitted a single
-                # text delta. This should be impossible; if it happens either
-                # the model returned a content type this loop does not
-                # recognize (e.g. a tool call with no text) or a field name
-                # above no longer matches what the SDK actually sends. Either
-                # way this is a paid request returning empty text with no
-                # exception, so it must be visible in logs.
+            if not emitted_text and finish_reason not in _TOOL_STOP_REASONS:
+                # The stream completed without a single text delta, and not
+                # because the model chose a tool instead. PHASE-2.md §3 names
+                # this exact case ("model refused or returned nothing") and
+                # the domain error it must become -- previously it produced a
+                # `message_end`, an empty assistant row, a `usage_events` row
+                # and a reported success, which is a paid request silently
+                # returning nothing. Logged as well as raised, because the
+                # likeliest cause is our own loop: a field name or
+                # discriminator above no longer matching what the SDK sends.
                 logger.warning(
-                    "no_text_delta_despite_output_tokens",
+                    "llm_empty_response",
                     model=request.model,
                     output_tokens=usage.output_tokens,
+                    finish_reason=finish_reason,
                 )
+                raise LLMEmptyResponseError("the model returned no text")
             yield UsageEvent(usage=usage)
             yield MessageEndEvent(stop_reason=finish_reason, usage=usage, model=request.model)
         except openai.RateLimitError as exc:

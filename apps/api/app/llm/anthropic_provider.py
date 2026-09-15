@@ -8,6 +8,7 @@ from app.core.logging import get_logger
 from app.llm.base import ModelCapabilities, SchemaT
 from app.llm.errors import (
     LLMConfigurationError,
+    LLMEmptyResponseError,
     LLMRateLimitError,
     LLMUnavailableError,
 )
@@ -53,6 +54,12 @@ _CLASSIC = ModelCapabilities(
     supports_effort=False,
     max_output_tokens=64_000,
 )
+
+# The one `stop_reason` that legitimately ends a response carrying no text:
+# the model chose to call a tool instead of answering. Anything else with no
+# text at all is the "model refused or returned nothing" case PHASE-2.md §3
+# maps to `LLMEmptyResponseError`.
+_TOOL_STOP_REASONS = frozenset({"tool_use"})
 
 _CAPABILITIES: dict[str, ModelCapabilities] = {
     "claude-opus-5": _NO_SAMPLING,
@@ -151,19 +158,24 @@ class AnthropicProvider:
                     input_tokens=final.usage.input_tokens,
                     output_tokens=final.usage.output_tokens,
                 )
-                if usage.output_tokens > 0 and not emitted_text:
-                    # We were billed for output tokens but never emitted a
-                    # single text delta. This should be impossible; if it
-                    # happens, either the model returned a content type this
-                    # loop does not recognize, or a discriminator string above
-                    # no longer matches what the SDK actually sends. Either
-                    # way this is a paid request returning empty text with no
-                    # exception, so it must be visible in logs.
+                if not emitted_text and final.stop_reason not in _TOOL_STOP_REASONS:
+                    # The stream completed without a single text delta, and
+                    # not because the model chose a tool instead. PHASE-2.md
+                    # §3 names this exact case ("model refused or returned
+                    # nothing") and the domain error it must become --
+                    # previously it produced a `message_end`, an empty
+                    # assistant row, a `usage_events` row and a reported
+                    # success, which is a paid request silently returning
+                    # nothing. Logged as well as raised, because the likeliest
+                    # cause is our own loop: a discriminator string above no
+                    # longer matching what the SDK actually sends.
                     logger.warning(
-                        "no_text_delta_despite_output_tokens",
+                        "llm_empty_response",
                         model=request.model,
                         output_tokens=usage.output_tokens,
+                        stop_reason=final.stop_reason,
                     )
+                    raise LLMEmptyResponseError("the model returned no text")
                 yield UsageEvent(usage=usage)
                 yield MessageEndEvent(
                     stop_reason=final.stop_reason, usage=usage, model=request.model

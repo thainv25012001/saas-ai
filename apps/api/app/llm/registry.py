@@ -5,7 +5,12 @@ from app.llm.errors import LLMConfigurationError
 from app.llm.fake_provider import FakeProvider
 
 _PROVIDERS: dict[str, LLMProvider] = {}
-_KNOWN = ("fake", "openai", "anthropic")
+
+# Public, because it is the single source of truth for "is this a provider
+# name we recognise" -- `app.agents.schemas` validates against it so an
+# unknown string is rejected at the edge (as `invalid_input`) instead of
+# reaching `create_agent` and being silently paired with an OpenAI model.
+KNOWN_PROVIDERS = ("fake", "openai", "anthropic")
 
 # Per PHASE-2.md §2.4. Used to resolve an agent's model when the caller
 # names a provider but not a model: each provider's own idiomatic default,
@@ -24,8 +29,10 @@ def get_provider(name: str) -> LLMProvider:
     Cached because each real provider holds an SDK client with its own connection
     pool; building one per request would leak sockets under load.
     """
-    if name not in _KNOWN:
-        raise ValidationError(f"unknown provider '{name}'; expected one of {', '.join(_KNOWN)}")
+    if name not in KNOWN_PROVIDERS:
+        raise ValidationError(
+            f"unknown provider '{name}'; expected one of {', '.join(KNOWN_PROVIDERS)}"
+        )
 
     cached = _PROVIDERS.get(name)
     if cached is not None:
