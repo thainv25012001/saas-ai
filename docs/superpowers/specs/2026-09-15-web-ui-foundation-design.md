@@ -430,10 +430,11 @@ Products, Leads, or Prompts functionality; any API, GraphQL, or codegen change.
 
 ## 11. Risks
 
-1. **Tailwind v4 `@theme` custom colour names.** The whole token strategy assumes
-   `bg-surface` / `text-ink-muted` / `border-line` are generated. Verified as task one;
-   the fallback is `var(--color-*)` inside the primitives with identical token names,
-   which leaves every page unchanged.
+1. **Tailwind v4 `@theme` custom colour names — resolved.** Verified against
+   Tailwind 4.3.3 in this project: `bg-canvas`, `text-ink-muted`,
+   `border-line`, and `rounded-card` all compile to `var(--color-*)` /
+   `var(--radius-*)` references. `apps/web/src/app/globals.test.ts` asserts the
+   full token contract on every run, so the fallback is not needed.
 2. **A ten-page rewrite can regress behaviour.** Mitigated by touching no logic file:
    `sse.ts`, `chat-turn.ts`, `auth.tsx`, `urql.tsx`, and the generated GraphQL types
    are off-limits, and their tests must pass unmodified.
