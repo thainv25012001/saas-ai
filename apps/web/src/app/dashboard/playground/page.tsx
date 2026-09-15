@@ -4,6 +4,7 @@ import { useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "urql";
 import { ChatMessage, type ChatMessageData } from "@/components/chat/ChatMessage";
+import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonLink } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -16,6 +17,7 @@ import { API_URL } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { NEW_CONVERSATION, resolveTurnOutcome, type TurnState } from "@/lib/chat-turn";
 import { sessionTotals } from "@/lib/chat-totals";
+import { firstGraphQLError } from "@/lib/graphql-errors";
 import { streamChat } from "@/lib/sse";
 
 function newId(): string {
@@ -34,7 +36,7 @@ function PlaygroundContent() {
   const { user, accessToken, setAccessToken, loading } = useAuth();
   const searchParams = useSearchParams();
 
-  const [{ data, fetching }] = useQuery({
+  const [{ data, fetching, error }] = useQuery({
     query: AgentsDocument,
     pause: loading || !user,
   });
@@ -213,12 +215,16 @@ function PlaygroundContent() {
   if (agents.length === 0) {
     return (
       <div className="mx-auto w-full max-w-6xl px-6 py-8">
-        <EmptyState
-          icon="playground"
-          title="No agents to test yet"
-          description="The playground runs a real conversation against one of your agents, and streams back its answer with tokens, latency and cost."
-          action={<ButtonLink href="/dashboard/agents">Create an agent</ButtonLink>}
-        />
+        {error ? (
+          <Alert tone="danger">{firstGraphQLError(error)}</Alert>
+        ) : (
+          <EmptyState
+            icon="playground"
+            title="No agents to test yet"
+            description="The playground runs a real conversation against one of your agents, and streams back its answer with tokens, latency and cost."
+            action={<ButtonLink href="/dashboard/agents">Create an agent</ButtonLink>}
+          />
+        )}
       </div>
     );
   }

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { useMutation, useQuery } from "urql";
+import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -19,7 +20,7 @@ import { firstGraphQLError } from "@/lib/graphql-errors";
 
 export default function AgentsPage() {
   const { user, loading } = useAuth();
-  const [{ data, fetching }, refetchAgents] = useQuery({
+  const [{ data, fetching, error }, refetchAgents] = useQuery({
     query: AgentsDocument,
     pause: loading || !user,
   });
@@ -31,6 +32,7 @@ export default function AgentsPage() {
 
   const agents = data?.agents ?? [];
   const createError = firstGraphQLError(createResult.error);
+  const queryError = firstGraphQLError(error);
 
   async function onCreate(event: React.FormEvent) {
     event.preventDefault();
@@ -95,10 +97,12 @@ export default function AgentsPage() {
         </Card>
       ) : null}
 
+      {queryError ? <Alert tone="danger">{queryError}</Alert> : null}
+
       <Card>
         {fetching && !data ? (
           <LoadingState label="Loading agents…" />
-        ) : agents.length === 0 ? (
+        ) : queryError ? null : agents.length === 0 ? (
           <EmptyState
             icon="agent"
             title="No agents yet"
