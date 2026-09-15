@@ -1,14 +1,21 @@
 "use client";
 
-import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "urql";
 import { ChatMessage, type ChatMessageData } from "@/components/chat/ChatMessage";
+import { Badge } from "@/components/ui/Badge";
+import { Button, ButtonLink } from "@/components/ui/Button";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { Icon } from "@/components/ui/icons";
+import { Select, Textarea } from "@/components/ui/Input";
+import { LoadingState } from "@/components/ui/Spinner";
 import { AgentsDocument } from "@/graphql/generated";
+import { agentStatusLabel, agentStatusTone } from "@/lib/agent-status";
 import { API_URL } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { NEW_CONVERSATION, resolveTurnOutcome, type TurnState } from "@/lib/chat-turn";
+import { sessionTotals } from "@/lib/chat-totals";
 import { streamChat } from "@/lib/sse";
 
 function newId(): string {
@@ -16,6 +23,12 @@ function newId(): string {
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
+
+const EXAMPLE_PROMPTS = [
+  "What do you sell, and who is it for?",
+  "How much does the starter plan cost?",
+  "Can you compare your two cheapest options?",
+];
 
 function PlaygroundContent() {
   const { user, accessToken, setAccessToken, loading } = useAuth();
@@ -185,63 +198,103 @@ function PlaygroundContent() {
     abortRef.current?.abort();
   }
 
+  const selectedAgent = agents.find((candidate) => String(candidate.id) === agentId);
+
+  // The playground's job is to tell you what a real conversation costs. The
+  // numbers were already arriving per turn and were never added up.
+  const totals = sessionTotals(
+    messages.flatMap((message) => (message.meta ? [message.meta] : [])),
+  );
+
   if (loading || fetching) {
-    return <p className="text-slate-500">Loading…</p>;
+    return <LoadingState label="Loading the playground…" />;
   }
 
   if (agents.length === 0) {
     return (
-      <section className="space-y-4">
-        <h1 className="text-2xl font-semibold">Playground</h1>
-        <div className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-600">
-          <p>You don&apos;t have any agents yet. Create one to try it out here.</p>
-          <Link
-            href="/dashboard/agents"
-            className="mt-3 inline-block rounded-md bg-slate-900 px-4 py-2 text-sm text-white"
-          >
-            Go to Agents
-          </Link>
-        </div>
-      </section>
+      <div className="mx-auto w-full max-w-6xl px-6 py-8">
+        <EmptyState
+          icon="playground"
+          title="No agents to test yet"
+          description="The playground runs a real conversation against one of your agents, and streams back its answer with tokens, latency and cost."
+          action={<ButtonLink href="/dashboard/agents">Create an agent</ButtonLink>}
+        />
+      </div>
     );
   }
 
   return (
-    <section className="flex h-[calc(100vh-4rem)] max-h-[900px] flex-col space-y-4">
-      <div className="flex items-center justify-between gap-4">
-        <h1 className="text-2xl font-semibold">Playground</h1>
-        <div className="flex items-center gap-3">
-          <label className="text-sm font-medium text-slate-600">
-            Agent
-            <select
-              value={agentId ?? ""}
-              onChange={(e) => onSelectAgent(e.target.value)}
-              disabled={fetching || isStreaming}
-              className="ml-2 rounded-md border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-50"
-            >
-              {agents.map((agent) => (
-                <option key={String(agent.id)} value={String(agent.id)}>
-                  {agent.name} ({agent.status})
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            type="button"
+    // Three rows in a full-height grid: the transcript is the only scroll
+    // container, so the composer stays put without any viewport arithmetic.
+    <section className="grid h-full grid-rows-[auto_1fr_auto]">
+      <div className="flex flex-wrap items-center gap-3 border-b border-line bg-surface px-6 py-3">
+        <label className="flex items-center gap-2 text-sm text-ink-muted">
+          <span className="font-medium">Agent</span>
+          <Select
+            value={agentId ?? ""}
+            onChange={(e) => onSelectAgent(e.target.value)}
+            disabled={fetching || isStreaming}
+            className="w-auto min-w-48"
+          >
+            {agents.map((agent) => (
+              <option key={String(agent.id)} value={String(agent.id)}>
+                {agent.name}
+              </option>
+            ))}
+          </Select>
+        </label>
+
+        {selectedAgent ? (
+          <>
+            <Badge tone={agentStatusTone(selectedAgent.status)}>
+              {agentStatusLabel(selectedAgent.status)}
+            </Badge>
+            <Badge>{selectedAgent.model}</Badge>
+          </>
+        ) : null}
+
+        <div className="ml-auto flex items-center gap-3">
+          {totals.pricedTurns + totals.unpricedTurns > 0 ? (
+            <p className="text-xs text-ink-muted">
+              <span className="font-medium text-ink">
+                ${totals.costUsd.toFixed(4)}
+              </span>{" "}
+              · {totals.inputTokens} in / {totals.outputTokens} out
+              {totals.unpricedTurns > 0 ? ` · ${totals.unpricedTurns} unpriced` : ""}
+            </p>
+          ) : null}
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={onNewConversation}
             disabled={isStreaming || messages.length === 0}
-            className="rounded-md border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-50"
           >
             New conversation
-          </button>
+          </Button>
         </div>
       </div>
 
-      <div className="flex-1 space-y-4 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 p-4">
+      <div className="min-h-0 space-y-5 overflow-y-auto bg-surface-muted px-6 py-6">
         {messages.length === 0 ? (
-          <p className="p-6 text-center text-sm text-slate-500">
-            Send a message to see the agent respond.
-          </p>
+          <EmptyState
+            icon="playground"
+            title="Ask your agent something"
+            description="Its answer streams back token by token, with the model, cost and latency of the turn."
+            action={
+              <div className="flex flex-wrap justify-center gap-2">
+                {EXAMPLE_PROMPTS.map((prompt) => (
+                  <button
+                    key={prompt}
+                    type="button"
+                    onClick={() => setInput(prompt)}
+                    className="rounded-control border border-line bg-surface px-3 py-1.5 text-xs text-ink-muted hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            }
+          />
         ) : (
           messages.map((message) => <ChatMessage key={message.id} message={message} />)
         )}
@@ -252,42 +305,40 @@ function PlaygroundContent() {
           e.preventDefault();
           void sendMessage();
         }}
-        className="flex items-end gap-3"
+        className="border-t border-line bg-surface px-6 py-4"
       >
-        <label className="flex-1 text-sm font-medium">
-          <span className="sr-only">Message</span>
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void sendMessage();
-              }
-            }}
-            disabled={isStreaming || !agentId}
-            rows={2}
-            placeholder="Ask the agent something…"
-            className="w-full resize-none rounded-md border border-slate-300 px-3 py-2 text-sm disabled:opacity-50"
-          />
-        </label>
-        {isStreaming ? (
-          <button
-            type="button"
-            onClick={onStop}
-            className="rounded-md border border-red-300 px-4 py-2 text-sm text-red-700"
-          >
-            Stop
-          </button>
-        ) : (
-          <button
-            type="submit"
-            disabled={!input.trim() || !agentId}
-            className="rounded-md bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-50"
-          >
-            Send
-          </button>
-        )}
+        <div className="flex items-end gap-3">
+          <label className="flex-1">
+            <span className="sr-only">Message</span>
+            <Textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void sendMessage();
+                }
+              }}
+              disabled={isStreaming || !agentId}
+              rows={2}
+              placeholder="Ask the agent something…"
+            />
+          </label>
+          {isStreaming ? (
+            <Button type="button" variant="danger" onClick={onStop}>
+              <Icon name="stop" className="size-4" />
+              Stop
+            </Button>
+          ) : (
+            <Button type="submit" disabled={!input.trim() || !agentId}>
+              <Icon name="send" className="size-4" />
+              Send
+            </Button>
+          )}
+        </div>
+        <p className="mt-1.5 text-xs text-ink-subtle">
+          Enter to send · Shift+Enter for a new line
+        </p>
       </form>
     </section>
   );
@@ -295,7 +346,7 @@ function PlaygroundContent() {
 
 export default function PlaygroundPage() {
   return (
-    <Suspense fallback={<p className="text-slate-500">Loading…</p>}>
+    <Suspense fallback={<LoadingState label="Loading the playground…" />}>
       <PlaygroundContent />
     </Suspense>
   );
