@@ -29,13 +29,29 @@ export default function AgentsPage() {
   // The list is what you came for, so the create form is disclosed rather
   // than parked above it permanently.
   const [creating, setCreating] = useState(false);
+  // urql's mutation result has no reset: a failed create otherwise leaves
+  // `createResult.error` set, so cancelling and reopening the form would
+  // show a fresh, empty field already flagged with the stale message.
+  const [errorDismissed, setErrorDismissed] = useState(false);
 
   const agents = data?.agents ?? [];
-  const createError = firstGraphQLError(createResult.error);
+  const createError = errorDismissed ? null : firstGraphQLError(createResult.error);
   const queryError = firstGraphQLError(error);
+
+  function openCreateForm() {
+    setErrorDismissed(true);
+    setCreating(true);
+  }
+
+  function cancelCreateForm() {
+    setErrorDismissed(true);
+    setCreating(false);
+    setName("");
+  }
 
   async function onCreate(event: React.FormEvent) {
     event.preventDefault();
+    setErrorDismissed(false);
     const result = await createAgent({ name });
     if (!result.error) {
       setName("");
@@ -51,7 +67,7 @@ export default function AgentsPage() {
         description="Each agent is one assistant, with its own model, prompt and behaviour."
         actions={
           creating ? null : (
-            <Button onClick={() => setCreating(true)}>
+            <Button onClick={openCreateForm}>
               <Icon name="plus" size="md" />
               New agent
             </Button>
@@ -82,14 +98,7 @@ export default function AgentsPage() {
               <Button type="submit" loading={createResult.fetching} loadingLabel="Creating…">
                 Create agent
               </Button>
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={() => {
-                  setCreating(false);
-                  setName("");
-                }}
-              >
+              <Button type="button" variant="secondary" onClick={cancelCreateForm}>
                 Cancel
               </Button>
             </div>
@@ -107,50 +116,52 @@ export default function AgentsPage() {
             icon="agent"
             title="No agents yet"
             description="Create one to configure a model, a prompt and a tone — then test it in the playground."
-            action={<Button onClick={() => setCreating(true)}>Create your first agent</Button>}
+            action={<Button onClick={openCreateForm}>Create your first agent</Button>}
           />
         ) : (
-          <table className="w-full text-left text-sm">
-            <thead className="border-b border-line bg-surface-muted text-xs uppercase tracking-wide text-ink-subtle">
-              <tr>
-                <th scope="col" className="px-5 py-2.5 font-medium">
-                  Name
-                </th>
-                <th scope="col" className="px-5 py-2.5 font-medium">
-                  Slug
-                </th>
-                <th scope="col" className="px-5 py-2.5 font-medium">
-                  Status
-                </th>
-                <th scope="col" className="px-5 py-2.5 font-medium">
-                  Model
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-line">
-              {agents.map((agent) => (
-                <tr key={String(agent.id)}>
-                  <td className="px-5 py-3">
-                    <Link
-                      href={`/dashboard/agents/${String(agent.id)}`}
-                      className="font-medium text-ink hover:underline"
-                    >
-                      {agent.name}
-                    </Link>
-                  </td>
-                  <td className="px-5 py-3 font-mono text-xs text-ink-muted">{agent.slug}</td>
-                  <td className="px-5 py-3">
-                    <Badge tone={agentStatusTone(agent.status)}>
-                      {agentStatusLabel(agent.status)}
-                    </Badge>
-                  </td>
-                  <td className="px-5 py-3 text-ink-muted">
-                    {agent.provider} · {agent.model}
-                  </td>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-line bg-surface-muted text-xs uppercase tracking-wide text-ink-subtle">
+                <tr>
+                  <th scope="col" className="px-5 py-2.5 font-medium">
+                    Name
+                  </th>
+                  <th scope="col" className="px-5 py-2.5 font-medium">
+                    Slug
+                  </th>
+                  <th scope="col" className="px-5 py-2.5 font-medium">
+                    Status
+                  </th>
+                  <th scope="col" className="px-5 py-2.5 font-medium">
+                    Model
+                  </th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-line">
+                {agents.map((agent) => (
+                  <tr key={String(agent.id)}>
+                    <td className="px-5 py-3">
+                      <Link
+                        href={`/dashboard/agents/${String(agent.id)}`}
+                        className="font-medium text-ink hover:underline"
+                      >
+                        {agent.name}
+                      </Link>
+                    </td>
+                    <td className="px-5 py-3 font-mono text-xs text-ink-muted">{agent.slug}</td>
+                    <td className="px-5 py-3">
+                      <Badge tone={agentStatusTone(agent.status)}>
+                        {agentStatusLabel(agent.status)}
+                      </Badge>
+                    </td>
+                    <td className="px-5 py-3 text-ink-muted">
+                      {agent.provider} · {agent.model}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </Card>
     </div>

@@ -21,17 +21,23 @@ function sourceFiles(dir: string): string[] {
 
 describe("token conventions", () => {
   it("names no raw Tailwind palette colour anywhere in src/", () => {
-    const offenders = [...sourceFiles("src/app"), ...sourceFiles("src/components")].flatMap(
-      (file) => {
-        const matches = readFileSync(file, "utf8").match(RAW_PALETTE);
-        return matches ? [`${file}: ${[...new Set(matches)].join(", ")}`] : [];
-      },
-    );
+    const offenders = [
+      ...sourceFiles("src/app"),
+      ...sourceFiles("src/components"),
+      ...sourceFiles("src/lib"),
+    ].flatMap((file) => {
+      const matches = readFileSync(file, "utf8").match(RAW_PALETTE);
+      return matches ? [`${file}: ${[...new Set(matches)].join(", ")}`] : [];
+    });
     expect(offenders).toEqual([]);
   });
 
   it("has no bare Loading… string outside the LoadingState primitive", () => {
-    const offenders = [...sourceFiles("src/app"), ...sourceFiles("src/components")]
+    const offenders = [
+      ...sourceFiles("src/app"),
+      ...sourceFiles("src/components"),
+      ...sourceFiles("src/lib"),
+    ]
       .filter((file) => !file.endsWith(join("ui", "Spinner.tsx")))
       .filter((file) => readFileSync(file, "utf8").includes(">Loading"));
     expect(offenders).toEqual([]);

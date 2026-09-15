@@ -1,5 +1,6 @@
 "use client";
 
+import { focusRing } from "@/components/ui/cn";
 import { Icon } from "@/components/ui/icons";
 
 /** Mobile only. On `lg` and up the sidebar is always visible, so a second
@@ -17,7 +18,7 @@ export function TopBar({
         type="button"
         onClick={onOpenNav}
         aria-label="Open navigation"
-        className="-ml-1 rounded-control p-1.5 text-ink-muted hover:bg-surface-muted hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink"
+        className={`-ml-1 rounded-control p-1.5 text-ink-muted hover:bg-surface-muted hover:text-ink ${focusRing} focus-visible:ring-offset-2`}
       >
         <Icon name="menu" />
       </button>

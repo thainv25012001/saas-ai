@@ -7,6 +7,7 @@ import { ChatMessage, type ChatMessageData } from "@/components/chat/ChatMessage
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonLink } from "@/components/ui/Button";
+import { focusRing } from "@/components/ui/cn";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Icon } from "@/components/ui/icons";
 import { Select, Textarea } from "@/components/ui/Input";
@@ -301,7 +302,7 @@ function PlaygroundContent() {
                     key={prompt}
                     type="button"
                     onClick={() => setInput(prompt)}
-                    className="rounded-control border border-line bg-surface px-3 py-1.5 text-xs text-ink-muted hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink"
+                    className={`rounded-control border border-line bg-surface px-3 py-1.5 text-xs text-ink-muted hover:text-ink ${focusRing} focus-visible:ring-offset-2`}
                   >
                     {prompt}
                   </button>

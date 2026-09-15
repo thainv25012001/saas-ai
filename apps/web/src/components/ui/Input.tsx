@@ -1,11 +1,10 @@
 import { forwardRef } from "react";
-import { cn } from "./cn";
+import { cn, focusRing } from "./cn";
 
 /** One border, one radius, one focus ring — for all three controls. */
 export const controlClasses =
   "rounded-control border border-line-strong bg-surface px-3 py-2 text-sm text-ink " +
-  "placeholder:text-ink-subtle focus-visible:outline-none focus-visible:ring-2 " +
-  "focus-visible:ring-ink focus-visible:ring-offset-1 focus-visible:ring-offset-canvas " +
+  `placeholder:text-ink-subtle ${focusRing} focus-visible:ring-offset-1 ` +
   "disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-danger";
 
 export const Input = forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(

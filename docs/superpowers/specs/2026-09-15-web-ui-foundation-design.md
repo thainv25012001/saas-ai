@@ -174,7 +174,7 @@ the whole API; anything not listed is deliberately absent (§10).
 | `Card` + `CardHeader` + `CardBody` + `CardFooter` | `CardHeader: { title, description?, actions? }` | Replaces 8 ad-hoc card divs; the `description` slot is where field-group explanations go. |
 | `PageHeader` | `title`, `description?`, `actions?`, `breadcrumb?` | Every page's `<h1>` and its spacing, decided once. |
 | `Alert` | `tone: "danger" \| "success" \| "info"`, `title?` | Replaces 7 copies; picks `role="alert"` for danger and `role="status"` for success/info, which the current code gets right only by accident. |
-| `Badge` | `tone: "neutral" \| "success" \| "warn" \| "info"`, `size?` | Agent status, nav "Soon" markers, playground meta chips. |
+| `Badge` | `tone: "neutral" \| "success" \| "warn" \| "info"` | Agent status, nav "Soon" markers, playground meta chips. |
 | `EmptyState` | `icon?`, `title`, `description`, `action?` | The three empty states plus the four placeholder pages. |
 | `Spinner` / `LoadingState` | `LoadingState: { label }` | Replaces the 5 bare "Loading…" strings. |
 | `icons.tsx` | named 16/20px inline SVGs, `currentColor` | Fifteen glyphs: overview, agent, knowledge, product, lead, prompt, playground, chevron, plus, menu, close, check, warning, send, stop. No icon package. |
@@ -322,9 +322,9 @@ how the turn is presented.
   tooltip; `"not priced"` keeps its honest wording. The error and
   stopped-before-any-token states keep their current, already-correct handling and
   simply adopt `Alert`.
-- **Composer** — auto-growing `Textarea` (2 rows to 8), a visible
-  `Enter to send · Shift+Enter for a new line` hint, and `Stop` swapping in during a
-  stream exactly as now.
+- **Composer** — a two-row `Textarea` the user can drag vertically to see more of a
+  long prompt, a visible `Enter to send · Shift+Enter for a new line` hint, and `Stop`
+  swapping in during a stream exactly as now.
 
 ### Auth — `/login`, `/register`
 

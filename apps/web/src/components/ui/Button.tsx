@@ -1,14 +1,13 @@
 import Link from "next/link";
 import { forwardRef } from "react";
-import { cn } from "./cn";
+import { cn, focusRing } from "./cn";
 
 export type ButtonVariant = "primary" | "secondary" | "danger";
 export type ButtonSize = "sm" | "md";
 
 const BASE =
   "inline-flex items-center justify-center gap-2 rounded-control font-medium transition-colors " +
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink focus-visible:ring-offset-2 " +
-  "focus-visible:ring-offset-canvas disabled:cursor-not-allowed disabled:opacity-50";
+  `${focusRing} focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50`;
 
 const VARIANTS: Record<ButtonVariant, string> = {
   primary: "bg-primary text-primary-ink hover:bg-primary-hover",
