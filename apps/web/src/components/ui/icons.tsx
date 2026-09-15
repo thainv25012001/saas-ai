@@ -105,8 +105,24 @@ const GLYPHS: Record<IconName, React.ReactNode> = {
   stop: <rect x="7" y="7" width="10" height="10" rx="2" />,
 };
 
+export type IconSize = "sm" | "md" | "lg";
+
+const SIZES: Record<IconSize, string> = {
+  sm: "size-3.5",
+  md: "size-4",
+  lg: "size-5",
+};
+
 /** Decorative by default: every icon in this UI sits beside its own label. */
-export function Icon({ name, className }: { name: IconName; className?: string }) {
+export function Icon({
+  name,
+  size = "lg",
+  className,
+}: {
+  name: IconName;
+  size?: IconSize;
+  className?: string;
+}) {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -117,7 +133,7 @@ export function Icon({ name, className }: { name: IconName; className?: string }
       strokeWidth={1.75}
       strokeLinecap="round"
       strokeLinejoin="round"
-      className={cn("size-5 shrink-0", className)}
+      className={cn("shrink-0", SIZES[size], className)}
     >
       {GLYPHS[name]}
     </svg>

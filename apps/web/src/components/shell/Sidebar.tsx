@@ -28,7 +28,7 @@ export function Sidebar({
     <div className="flex h-full flex-col border-r border-line bg-surface">
       <div className="flex h-14 shrink-0 items-center gap-2 border-b border-line px-4">
         <span className="flex size-7 items-center justify-center rounded-control bg-primary text-primary-ink">
-          <Icon name="agent" className="size-4" />
+          <Icon name="agent" size="md" />
         </span>
         <span className="truncate text-sm font-semibold text-ink">AI Sales Agent</span>
       </div>
@@ -57,7 +57,7 @@ export function Sidebar({
                           : "text-ink-muted hover:bg-surface-muted hover:text-ink",
                       )}
                     >
-                      <Icon name={item.icon} className="size-4" />
+                      <Icon name={item.icon} size="md" />
                       <span className="flex-1 truncate">{item.label}</span>
                       {/* Badged rather than hidden: the shape of the product is
                        * worth showing early, but a click should be informed. */}

@@ -67,7 +67,7 @@ export default function DashboardPage() {
                     : "mt-0.5 flex size-5 shrink-0 items-center justify-center text-ink-subtle"
                 }
               >
-                <Icon name={step.done === true ? "check" : "circle"} className="size-4" />
+                <Icon name={step.done === true ? "check" : "circle"} size="md" />
               </span>
               <div className="min-w-0 flex-1">
                 <p

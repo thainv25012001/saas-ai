@@ -50,7 +50,7 @@ export default function AgentsPage() {
         actions={
           creating ? null : (
             <Button onClick={() => setCreating(true)}>
-              <Icon name="plus" className="size-4" />
+              <Icon name="plus" size="md" />
               New agent
             </Button>
           )

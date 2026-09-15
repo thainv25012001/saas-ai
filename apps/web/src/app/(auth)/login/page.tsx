@@ -34,7 +34,7 @@ export default function LoginPage() {
 
   return (
     <Card>
-      <CardBody className="space-y-5 p-6">
+      <CardBody padding="loose" className="space-y-5">
         <div>
           <h2 className="text-base font-semibold text-ink">Sign in</h2>
           <p className="mt-0.5 text-sm text-ink-muted">Welcome back.</p>

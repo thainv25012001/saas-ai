@@ -26,7 +26,7 @@ export function PageHeader({
               <Link href={crumb.href} className="hover:text-ink hover:underline">
                 {crumb.label}
               </Link>
-              <Icon name="chevronRight" className="size-3.5" />
+              <Icon name="chevronRight" size="sm" />
             </span>
           ))}
           <span className="text-ink">{title}</span>

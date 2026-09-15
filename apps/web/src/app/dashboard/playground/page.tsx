@@ -234,7 +234,8 @@ function PlaygroundContent() {
             value={agentId ?? ""}
             onChange={(e) => onSelectAgent(e.target.value)}
             disabled={fetching || isStreaming}
-            className="w-auto min-w-48"
+            width="auto"
+            className="min-w-48"
           >
             {agents.map((agent) => (
               <option key={String(agent.id)} value={String(agent.id)}>
@@ -326,12 +327,12 @@ function PlaygroundContent() {
           </label>
           {isStreaming ? (
             <Button type="button" variant="danger" onClick={onStop}>
-              <Icon name="stop" className="size-4" />
+              <Icon name="stop" size="md" />
               Stop
             </Button>
           ) : (
             <Button type="submit" disabled={!input.trim() || !agentId}>
-              <Icon name="send" className="size-4" />
+              <Icon name="send" size="md" />
               Send
             </Button>
           )}

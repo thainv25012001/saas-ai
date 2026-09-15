@@ -28,7 +28,7 @@ export function Alert({
       role={role}
       className={cn("flex gap-2.5 rounded-control border p-3 text-sm", classes, className)}
     >
-      {tone === "danger" ? <Icon name="warning" className="mt-px size-4" /> : null}
+      {tone === "danger" ? <Icon name="warning" size="md" className="mt-px" /> : null}
       <div className="min-w-0">
         {title ? <p className="font-semibold">{title}</p> : null}
         <div className={cn(title && "mt-0.5")}>{children}</div>

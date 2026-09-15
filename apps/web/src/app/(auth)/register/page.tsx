@@ -41,7 +41,7 @@ export default function RegisterPage() {
 
   return (
     <Card>
-      <CardBody className="space-y-5 p-6">
+      <CardBody padding="loose" className="space-y-5">
         <div>
           <h2 className="text-base font-semibold text-ink">Create your workspace</h2>
           <p className="mt-0.5 text-sm text-ink-muted">

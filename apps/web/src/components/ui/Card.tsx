@@ -1,7 +1,24 @@
 import { cn } from "./cn";
 
-export function Card({ className, children }: { className?: string; children: React.ReactNode }) {
-  return <div className={cn("rounded-card border border-line bg-surface", className)}>{children}</div>;
+const CARD_TONES = {
+  default: "border-line",
+  danger: "border-danger-line",
+} as const;
+
+export function Card({
+  tone = "default",
+  className,
+  children,
+}: {
+  tone?: "default" | "danger";
+  className?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className={cn("rounded-card border bg-surface", CARD_TONES[tone], className)}>
+      {children}
+    </div>
+  );
 }
 
 export function CardHeader({
@@ -24,8 +41,21 @@ export function CardHeader({
   );
 }
 
-export function CardBody({ className, children }: { className?: string; children: React.ReactNode }) {
-  return <div className={cn("px-5 py-4", className)}>{children}</div>;
+const CARD_BODY_PADDING = {
+  default: "px-5 py-4",
+  loose: "p-6",
+} as const;
+
+export function CardBody({
+  padding = "default",
+  className,
+  children,
+}: {
+  padding?: "default" | "loose";
+  className?: string;
+  children: React.ReactNode;
+}) {
+  return <div className={cn(CARD_BODY_PADDING[padding], className)}>{children}</div>;
 }
 
 export function CardFooter({ className, children }: { className?: string; children: React.ReactNode }) {

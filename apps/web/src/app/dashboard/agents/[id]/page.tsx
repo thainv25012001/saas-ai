@@ -360,7 +360,7 @@ export default function AgentDetailPage({
         </Card>
       </form>
 
-      <Card className="border-danger-line">
+      <Card tone="danger">
         <CardHeader
           title="Delete this agent"
           description="Its conversations and configuration go with it. This cannot be undone."
