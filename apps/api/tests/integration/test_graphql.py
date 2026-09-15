@@ -95,6 +95,31 @@ async def test_create_agent_mutation(client, auth_headers):
     assert agent["status"] == "DRAFT"
 
 
+async def test_create_agent_mutation_resolves_provider_and_model_from_settings(
+    client, auth_headers
+):
+    """Regression test: the GraphQL input type used to declare its own
+    `provider: str = "openai"` default and pass it straight through, which
+    short-circuited `AgentService.create_agent`'s `data.provider or
+    default_llm_provider` resolution to a hardcoded "openai" for every agent
+    created through the dashboard — the only path a real user exercises.
+    `model` has the same failure mode: it must resolve to the *chosen*
+    provider's own default model, not a hardcoded OpenAI model string paired
+    with (e.g.) the `fake` provider."""
+    from app.core.config import get_settings
+    from app.llm.registry import DEFAULT_MODELS
+
+    response = await graphql(
+        client,
+        'mutation { createAgent(input: {name: "Default Provider Bot"}) { provider model } }',
+        headers=auth_headers,
+    )
+    agent = response.json()["data"]["createAgent"]
+    default_provider = get_settings().default_llm_provider
+    assert agent["provider"] == default_provider
+    assert agent["model"] == DEFAULT_MODELS[default_provider]
+
+
 async def test_agents_query_lists_created_agents(client, auth_headers):
     await graphql(
         client,
@@ -225,6 +250,78 @@ async def test_invalid_input_is_reported_as_invalid_input_not_a_raw_pydantic_mes
     body = response.json()
     assert body["errors"][0]["extensions"]["code"] == "invalid_input"
     assert "errors.pydantic.dev" not in body["errors"][0]["message"]
+
+
+async def test_create_agent_rejects_an_unknown_provider(client, auth_headers):
+    """`AgentService.create_agent` used to do
+    `DEFAULT_MODELS.get(provider, DEFAULT_MODELS["openai"])`, so a typo'd or
+    invented provider name was accepted and silently paired with an OpenAI
+    model -- an agent that could never resolve a provider at send time. The
+    name is validated against `registry.KNOWN_PROVIDERS` in the schema
+    instead, so it is rejected here, at creation."""
+    response = await graphql(
+        client,
+        'mutation { createAgent(input: {name: "Bogus Bot", provider: "gpt"}) { id } }',
+        headers=auth_headers,
+    )
+    body = response.json()
+    assert body["errors"][0]["extensions"]["code"] == "invalid_input"
+    assert "fake" in body["errors"][0]["message"]
+
+
+async def test_update_agent_rejects_an_unknown_provider(client, auth_headers):
+    """`update_agent` `setattr`s `provider` straight onto the row with no
+    validation at all -- in contrast to the careful `AgentStatus` handling
+    immediately above it. Both mutations share one schema, so both reject
+    the same values the same way."""
+    created = await graphql(
+        client,
+        'mutation { createAgent(input: {name: "Switchable Bot"}) { id } }',
+        headers=auth_headers,
+    )
+    agent_id = created.json()["data"]["createAgent"]["id"]
+
+    response = await graphql(
+        client,
+        """
+        mutation U($id: UUID!) {
+          updateAgent(id: $id, input: {provider: "gpt"}) { provider }
+        }
+        """,
+        {"id": agent_id},
+        auth_headers,
+    )
+    body = response.json()
+    assert body["errors"][0]["extensions"]["code"] == "invalid_input"
+
+
+async def test_update_agent_accepts_every_known_provider(client, auth_headers):
+    """The counterpart to the test above: the validator must not be so strict
+    that it rejects the providers that do exist -- `fake` included, which is
+    what a fresh clone's agents are actually created with."""
+    from app.llm.registry import KNOWN_PROVIDERS
+
+    created = await graphql(
+        client,
+        'mutation { createAgent(input: {name: "Every Provider Bot"}) { id } }',
+        headers=auth_headers,
+    )
+    agent_id = created.json()["data"]["createAgent"]["id"]
+
+    for provider in KNOWN_PROVIDERS:
+        response = await graphql(
+            client,
+            """
+            mutation U($id: UUID!, $provider: String!) {
+              updateAgent(id: $id, input: {provider: $provider}) { provider }
+            }
+            """,
+            {"id": agent_id, "provider": provider},
+            auth_headers,
+        )
+        body = response.json()
+        assert "errors" not in body, body
+        assert body["data"]["updateAgent"]["provider"] == provider
 
 
 async def test_unexpected_errors_do_not_leak_internal_details(client, auth_headers, monkeypatch):

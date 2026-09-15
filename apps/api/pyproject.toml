@@ -17,6 +17,8 @@ dependencies = [
     "python-slugify>=8.0",
     "email-validator>=2.2",
     "strawberry-graphql[fastapi]>=0.248",
+    "anthropic>=0.40",
+    "openai>=1.50",
 ]
 
 [dependency-groups]

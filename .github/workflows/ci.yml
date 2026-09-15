@@ -104,7 +104,7 @@ jobs:
           git diff --exit-code -- ../../packages/shared/schema.graphql
 
   web:
-    name: Web — lint, types, build
+    name: Web — lint, types, tests, build
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -136,6 +136,12 @@ jobs:
       - name: Typecheck
         working-directory: apps/web
         run: npm run typecheck
+
+      - name: Vitest
+        working-directory: apps/web
+        # "test" is "vitest run" (not bare "vitest"), so this exits after
+        # one pass instead of sitting in watch mode forever on a runner.
+        run: npm run test
 
       - name: Build
         working-directory: apps/web

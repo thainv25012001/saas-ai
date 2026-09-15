@@ -81,6 +81,12 @@ class Settings(BaseSettings):
         default_factory=lambda: ["http://localhost:3000"]
     )
 
+    openai_api_key: str | None = None
+    anthropic_api_key: str | None = None
+    # `fake` keeps the playground working with no key configured. Set to
+    # `openai` or `anthropic` once a key is present.
+    default_llm_provider: str = "fake"
+
     @field_validator("database_url", "migration_database_url", mode="after")
     @classmethod
     def normalize_postgres_dsn(cls, value: str) -> str:

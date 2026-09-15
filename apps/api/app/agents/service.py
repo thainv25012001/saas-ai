@@ -12,10 +12,12 @@ from app.agents.schemas import (
     UpdateAgentConfigInput,
     UpdateAgentInput,
 )
+from app.core.config import get_settings
 from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.core.ids import uuid7
 from app.core.tenancy import TenantContext
 from app.db.models import Agent, AgentConfig, AgentStatus
+from app.llm.registry import DEFAULT_MODELS
 
 _DEFAULT_FALLBACK = (
     "I don't have that information. Would you like me to connect you with someone who does?"
@@ -58,14 +60,27 @@ class AgentService:
         return config
 
     async def create_agent(self, data: CreateAgentInput) -> Agent:
+        # `data.provider`/`data.model` are None when the caller expressed no
+        # preference. Resolving them here — rather than in the chat service
+        # at request time — means an agent's provider and model are fixed at
+        # creation and never silently drift if the defaults change later.
+        # `model` is resolved from the *chosen* provider's own default
+        # (never a hardcoded literal from a different provider's family) so
+        # a `fake`-provider agent never ends up carrying an OpenAI model id.
+        provider = data.provider or get_settings().default_llm_provider
+        # `data.provider` is validated against `registry.KNOWN_PROVIDERS` by
+        # `CreateAgentInput`, so the only way to reach the fallback here is a
+        # misconfigured `DEFAULT_LLM_PROVIDER` env var -- an operator
+        # mistake, not a caller-supplied string.
+        model = data.model or DEFAULT_MODELS.get(provider, DEFAULT_MODELS["openai"])
         agent = Agent(
             id=uuid7(),
             organization_id=self.tenant.organization_id,
             name=data.name,
             slug=slugify(data.name)[:120] or "agent",
             status=AgentStatus.DRAFT,
-            provider=data.provider,
-            model=data.model,
+            provider=provider,
+            model=model,
             temperature=data.temperature,
             max_tokens=data.max_tokens,
             public_key=f"pk_{secrets.token_urlsafe(24)}",

@@ -32,7 +32,14 @@ class Agent(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
         nullable=False,
         default=AgentStatus.DRAFT,
     )
-    provider: Mapped[str] = mapped_column(String(50), nullable=False, default="openai")
+    # No ORM-level `default=`: `AgentService.create_agent` is the only code
+    # that constructs an `Agent`, and it always sets `provider` explicitly
+    # (resolved from the caller's validated choice or `DEFAULT_LLM_PROVIDER`,
+    # which is `fake` out of the box). A Python-side default of "openai" here
+    # was therefore never applied, and reading it as "agents default to
+    # OpenAI" is actively wrong. The `server_default` in migration 0003 is
+    # untouched -- that one does still back a raw SQL INSERT.
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
     model: Mapped[str] = mapped_column(String(100), nullable=False, default="gpt-4o-mini")
     temperature: Mapped[float] = mapped_column(Float, nullable=False, default=0.3)
     max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=1024)
