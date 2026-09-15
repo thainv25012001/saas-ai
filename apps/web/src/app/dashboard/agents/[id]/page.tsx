@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { use, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery } from "urql";
@@ -121,9 +122,17 @@ export default function AgentDetailPage({
 
   return (
     <section className="max-w-2xl space-y-8">
-      <div>
-        <h1 className="text-2xl font-semibold">{agent.name}</h1>
-        <p className="text-sm text-slate-500">{agent.slug}</p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold">{agent.name}</h1>
+          <p className="text-sm text-slate-500">{agent.slug}</p>
+        </div>
+        <Link
+          href={`/dashboard/playground?agentId=${String(agent.id)}`}
+          className="shrink-0 rounded-md bg-slate-900 px-4 py-2 text-sm text-white"
+        >
+          Test in playground
+        </Link>
       </div>
 
       <form
