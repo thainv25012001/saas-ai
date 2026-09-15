@@ -208,23 +208,26 @@ function PlaygroundContent() {
     messages.flatMap((message) => (message.meta ? [message.meta] : [])),
   );
 
-  if (loading || fetching) {
+  if (loading || (fetching && !data)) {
     return <LoadingState label="Loading the playground…" />;
   }
 
   if (agents.length === 0) {
     return (
       <div className="mx-auto w-full max-w-6xl px-6 py-8">
-        {error ? (
-          <Alert tone="danger">{firstGraphQLError(error)}</Alert>
-        ) : (
-          <EmptyState
-            icon="playground"
-            title="No agents to test yet"
-            description="The playground runs a real conversation against one of your agents, and streams back its answer with tokens, latency and cost."
-            action={<ButtonLink href="/dashboard/agents">Create an agent</ButtonLink>}
-          />
-        )}
+        <h1 className="text-xl font-semibold text-ink">Playground</h1>
+        <div className="mt-6">
+          {error ? (
+            <Alert tone="danger">{firstGraphQLError(error)}</Alert>
+          ) : (
+            <EmptyState
+              icon="playground"
+              title="No agents to test yet"
+              description="The playground runs a real conversation against one of your agents, and streams back its answer with tokens, latency and cost."
+              action={<ButtonLink href="/dashboard/agents">Create an agent</ButtonLink>}
+            />
+          )}
+        </div>
       </div>
     );
   }
@@ -234,6 +237,7 @@ function PlaygroundContent() {
     // container, so the composer stays put without any viewport arithmetic.
     <section className="grid h-full grid-rows-[auto_1fr_auto]">
       <div className="flex flex-wrap items-center gap-3 border-b border-line bg-surface px-6 py-3">
+        <h1 className="text-sm font-semibold text-ink">Playground</h1>
         <label className="flex items-center gap-2 text-sm text-ink-muted">
           <span className="font-medium">Agent</span>
           <Select
@@ -263,10 +267,13 @@ function PlaygroundContent() {
         <div className="ml-auto flex items-center gap-3">
           {totals.pricedTurns + totals.unpricedTurns > 0 ? (
             <p className="text-xs text-ink-muted">
-              <span className="font-medium text-ink">
-                ${totals.costUsd.toFixed(4)}
-              </span>{" "}
-              · {totals.inputTokens} in / {totals.outputTokens} out
+              {totals.pricedTurns > 0 ? (
+                <>
+                  <span className="font-medium text-ink">${totals.costUsd.toFixed(4)}</span>{" "}
+                  ·{" "}
+                </>
+              ) : null}
+              {totals.inputTokens} in / {totals.outputTokens} out
               {totals.unpricedTurns > 0 ? ` · ${totals.unpricedTurns} unpriced` : ""}
             </p>
           ) : null}
@@ -328,6 +335,8 @@ function PlaygroundContent() {
               }}
               disabled={isStreaming || !agentId}
               rows={2}
+              resize="y"
+              className="max-h-48"
               placeholder="Ask the agent something…"
             />
           </label>

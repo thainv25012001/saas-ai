@@ -14,11 +14,22 @@ export const Input = forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTML
   },
 );
 
+const RESIZE = {
+  none: "resize-none",
+  y: "resize-y",
+} as const;
+
 export const Textarea = forwardRef<
   HTMLTextAreaElement,
-  React.TextareaHTMLAttributes<HTMLTextAreaElement>
->(function Textarea({ className, ...rest }, ref) {
-  return <textarea ref={ref} className={cn(controlClasses, "w-full resize-none", className)} {...rest} />;
+  React.TextareaHTMLAttributes<HTMLTextAreaElement> & { resize?: "none" | "y" }
+>(function Textarea({ resize = "none", className, ...rest }, ref) {
+  return (
+    <textarea
+      ref={ref}
+      className={cn(controlClasses, "w-full", RESIZE[resize], className)}
+      {...rest}
+    />
+  );
 });
 
 export const Select = forwardRef<
