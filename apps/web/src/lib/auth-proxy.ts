@@ -34,3 +34,29 @@ export function authProxyRewrites(apiUrl: string): RewriteRule[] {
     },
   ];
 }
+
+/**
+ * The origin the *server* dials to reach the API, which is not always the one
+ * the browser uses.
+ *
+ * The rewrite above is performed by the Next server, not the browser, so its
+ * destination has to be reachable from wherever that server runs.
+ * `NEXT_PUBLIC_API_URL` is by definition the browser's view, and under Docker
+ * Compose the two views differ: the browser reaches the API on the published
+ * host port (`http://localhost:8000`) while the Next server sits in its own
+ * container, where `localhost:8000` is that container itself and the API is
+ * `http://api:8000`. Handing the browser's URL to the rewrite there turns
+ * every login into `ECONNREFUSED`, which Next surfaces to the browser as a
+ * bare 500 on POST /api/v1/auth/login.
+ *
+ * On Vercel + Render a single public URL serves both vantage points, so
+ * `API_INTERNAL_URL` is left unset and this falls back to the browser's URL —
+ * the override exists for split-network deployments, Compose being the one we
+ * run every day.
+ */
+export function proxyTargetUrl(
+  internalUrl: string | undefined,
+  publicUrl: string,
+): string {
+  return internalUrl?.trim() || publicUrl;
+}

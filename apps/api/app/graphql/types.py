@@ -21,6 +21,16 @@ class AgentStatus(enum.Enum):
 
 
 @strawberry.type
+class ModelOption:
+    """One entry in the dashboard's model picker. `context_length` is `None`
+    when the provider does not publish one."""
+
+    id: str
+    label: str
+    context_length: int | None
+
+
+@strawberry.type
 class Me:
     user_id: uuid.UUID
     email: str

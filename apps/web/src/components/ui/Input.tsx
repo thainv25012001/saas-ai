@@ -1,5 +1,6 @@
 import { forwardRef } from "react";
 import { cn, focusRing } from "./cn";
+import { Icon } from "./icons";
 
 /** One border, one radius, one focus ring — for all three controls. */
 export const controlClasses =
@@ -35,11 +36,31 @@ export const Select = forwardRef<
   HTMLSelectElement,
   React.SelectHTMLAttributes<HTMLSelectElement> & { width?: "full" | "auto" }
 >(function Select({ width = "full", className, ...rest }, ref) {
+  const full = width === "full";
   return (
-    <select
-      ref={ref}
-      className={cn(controlClasses, "pr-8", width === "full" ? "w-full" : "w-auto", className)}
-      {...rest}
-    />
+    // `appearance-none` plus our own chevron, rather than the arrow the OS
+    // paints: that one is drawn flush at the right edge in a colour no token
+    // controls and a size `text-sm` does not reach, so a Select sat beside an
+    // Input read as a different control. `pr-9` is what clears the chevron
+    // below -- `right-3` plus its `size-4`.
+    <span className={cn("relative inline-flex items-center", full ? "w-full" : "w-auto")}>
+      <select
+        ref={ref}
+        className={cn(
+          controlClasses,
+          "appearance-none truncate pr-9",
+          full ? "w-full" : "w-auto",
+          className,
+        )}
+        {...rest}
+      />
+      <Icon
+        name="chevronDown"
+        size="md"
+        // `pointer-events-none` so the chevron cannot swallow the click that
+        // is meant to open the select underneath it.
+        className="pointer-events-none absolute right-3 text-ink-subtle"
+      />
+    </span>
   );
 });

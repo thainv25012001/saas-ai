@@ -176,6 +176,7 @@ infrastructure/
   scripts/        verify_db.sh — asserts the roles/extensions/RLS setup is actually correct
 docs/
   ARCHITECTURE.md the full design document — read this for "why", not just "what"
+  DESIGN.md       the web UI's design system: tokens, primitives, and the rules they enforce
 docker-compose.yml
 .env.example
 Makefile

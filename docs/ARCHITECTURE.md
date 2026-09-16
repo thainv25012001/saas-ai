@@ -412,6 +412,7 @@ ai-sales-agent/
 │   │   │   │   ├── types.py            # Message, ContentBlock, ToolSpec, StreamEvent
 │   │   │   │   ├── openai_provider.py
 │   │   │   │   ├── anthropic_provider.py
+│   │   │   │   ├── openrouter_provider.py # OpenAI wire format, OpenRouter base URL
 │   │   │   │   ├── registry.py         # name → provider resolution
 │   │   │   │   └── pricing.py          # model → cost per 1M tokens
 │   │   │   ├── embeddings/             # EmbeddingProvider, batching, caching
@@ -457,6 +458,7 @@ ai-sales-agent/
 │   └── scripts/
 ├── docs/
 │   ├── ARCHITECTURE.md                 # this document
+│   ├── DESIGN.md                       # web design system: tokens, primitives
 │   └── adr/                            # short decision records
 ├── docker-compose.yml
 ├── .env.example

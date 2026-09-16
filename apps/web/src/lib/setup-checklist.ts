@@ -31,7 +31,7 @@ export function deriveChecklist(agents: readonly ChecklistAgent[]): ChecklistSte
       id: "real-provider",
       title: "Connect a real model provider",
       description:
-        "New agents start on the offline `fake` provider, which returns a canned reply and costs nothing. Switch to OpenAI or Anthropic to get real answers.",
+        "New agents start on the offline `fake` provider, which returns a canned reply and costs nothing. Switch to OpenAI, Anthropic or OpenRouter to get real answers.",
       done: agents.some((agent) => agent.provider !== OFFLINE_PROVIDER),
       action: { href: "/dashboard/agents", label: "Choose a provider" },
     },

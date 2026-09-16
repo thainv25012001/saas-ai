@@ -10,7 +10,7 @@ _PROVIDERS: dict[str, LLMProvider] = {}
 # name we recognise" -- `app.agents.schemas` validates against it so an
 # unknown string is rejected at the edge (as `invalid_input`) instead of
 # reaching `create_agent` and being silently paired with an OpenAI model.
-KNOWN_PROVIDERS = ("fake", "openai", "anthropic")
+KNOWN_PROVIDERS = ("fake", "openai", "anthropic", "openrouter")
 
 # Per PHASE-2.md §2.4. Used to resolve an agent's model when the caller
 # names a provider but not a model: each provider's own idiomatic default,
@@ -20,6 +20,19 @@ DEFAULT_MODELS: dict[str, str] = {
     "fake": "fake-1",
     "openai": "gpt-4o-mini",
     "anthropic": "claude-opus-5",
+    # OpenRouter's reason for existing here is its free tier, so the default
+    # must be a `:free` id -- an agent created without an explicit model must
+    # not start spending.
+    #
+    # Chosen by running this exact adapter against the live API on 2026-09-16,
+    # not from the model list alone, because many free ids are REASONING
+    # models: OpenRouter returns their thinking on a `reasoning` field the
+    # OpenAI-compatible `content` never carries, so they answer a one-sentence
+    # question with an empty string, `finish_reason="length"` and the entire
+    # output budget spent (`z-ai/glm-5.2:free` took 80s to return nothing).
+    # This one replies in ~1.3s with plain prose. Free ids are also retired
+    # without notice, so treat it as a value to re-check, not assume.
+    "openrouter": "google/gemma-4-31b-it:free",
 }
 
 
@@ -60,6 +73,16 @@ def _build(name: str) -> LLMProvider:
         from app.llm.openai_provider import OpenAIProvider
 
         return OpenAIProvider(api_key=settings.openai_api_key)
+
+    if name == "openrouter":
+        if not settings.openrouter_api_key:
+            raise LLMConfigurationError(
+                "OPENROUTER_API_KEY is not set; set it or use the 'fake' provider"
+            )
+        # Lazy for the same reason as the branches above.
+        from app.llm.openrouter_provider import OpenRouterProvider
+
+        return OpenRouterProvider(api_key=settings.openrouter_api_key)
 
     if not settings.anthropic_api_key:
         raise LLMConfigurationError(

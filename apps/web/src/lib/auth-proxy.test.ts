@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { AUTH_PATH_PREFIX, authProxyRewrites } from "./auth-proxy";
+import {
+  AUTH_PATH_PREFIX,
+  authProxyRewrites,
+  proxyTargetUrl,
+} from "./auth-proxy";
 
 const API = "https://saas-ai-api.onrender.com";
 
@@ -28,5 +32,30 @@ describe("authProxyRewrites", () => {
     expect(authProxyRewrites(`${API}/`)[0].destination).toBe(
       `${API}${AUTH_PATH_PREFIX}/:path*`,
     );
+  });
+});
+
+describe("proxyTargetUrl", () => {
+  it("dials the internal URL when one is set", () => {
+    // Under Compose the browser reaches the API on the published host port
+    // while the Next server, which is what actually performs the rewrite, has
+    // to use the service name. Feed it the browser's URL and every login is a
+    // 500: `localhost:8000` inside the web container is the web container.
+    expect(proxyTargetUrl("http://api:8000", "http://localhost:8000")).toBe(
+      "http://api:8000",
+    );
+  });
+
+  it("falls back to the browser-facing URL when there is no internal one", () => {
+    // Vercel + Render: one public URL serves both vantage points, so
+    // API_INTERNAL_URL stays unset there and nothing has to be configured.
+    expect(proxyTargetUrl(undefined, API)).toBe(API);
+  });
+
+  it("ignores an internal URL that is set but blank", () => {
+    // Compose writes `API_INTERNAL_URL: ${API_INTERNAL_URL:-}` style empty
+    // strings, and an empty destination would rewrite every auth route to a
+    // relative path pointing back at this app — an infinite proxy loop.
+    expect(proxyTargetUrl("   ", API)).toBe(API);
   });
 });

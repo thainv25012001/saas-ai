@@ -83,6 +83,7 @@ class Settings(BaseSettings):
 
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
+    openrouter_api_key: str | None = None
     # `fake` keeps the playground working with no key configured. Set to
     # `openai` or `anthropic` once a key is present.
     default_llm_provider: str = "fake"

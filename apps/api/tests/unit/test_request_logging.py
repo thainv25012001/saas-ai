@@ -4,6 +4,10 @@
 the id correlated nothing: there was no line to correlate with. These tests
 pin both halves — that a line is emitted at all, and that it carries the
 request id — and that it carries nothing it should not.
+
+They also pin the one deliberate exception: a probe that passed is not logged.
+`/openapi.json` stands in for "an ordinary request" precisely because the
+probe paths no longer are one.
 """
 
 import pytest
@@ -40,15 +44,30 @@ def captured_logs(monkeypatch):
         configure_logging()
 
 
-async def test_every_request_emits_one_access_log_line(client, captured_logs):
-    response = await client.get("/health")
+@pytest.fixture
+def healthy_dependencies(monkeypatch):
+    """`/health/ready` calls the real database and Redis. A unit run has
+    neither, so without this the endpoint under test answers `degraded` and
+    the suppression it is meant to demonstrate correctly does not apply."""
+    from app.core import redis as redis_module
+    from app.db import session as session_module
+
+    async def ok() -> bool:
+        return True
+
+    monkeypatch.setattr(redis_module, "check_redis", ok)
+    monkeypatch.setattr(session_module, "check_database", ok)
+
+
+async def test_an_ordinary_request_emits_one_access_log_line(client, captured_logs):
+    response = await client.get("/openapi.json")
     assert response.status_code == 200
 
     lines = [entry for entry in captured_logs if entry["event"] == "request"]
     assert len(lines) == 1
     line = lines[0]
     assert line["method"] == "GET"
-    assert line["path"] == "/health"
+    assert line["path"] == "/openapi.json"
     assert line["status"] == 200
     assert isinstance(line["duration_ms"], float)
 
@@ -56,7 +75,7 @@ async def test_every_request_emits_one_access_log_line(client, captured_logs):
 async def test_the_access_log_line_carries_the_request_id(client, captured_logs):
     """This is what makes the id worth plumbing: the header the client gets
     back names a line that actually exists in the log."""
-    response = await client.get("/health", headers={"X-Request-ID": "req-under-test"})
+    response = await client.get("/openapi.json", headers={"X-Request-ID": "req-under-test"})
 
     line = next(entry for entry in captured_logs if entry["event"] == "request")
     assert line["request_id"] == "req-under-test"
@@ -68,12 +87,12 @@ async def test_the_access_log_omits_the_query_string_and_headers(client, capture
     a body can carry a plaintext password. The line is deliberately limited to
     method, path, status and duration."""
     await client.get(
-        "/health?token=super-secret-value",
+        "/openapi.json?token=super-secret-value",
         headers={"Authorization": "Bearer secret-token"},
     )
 
     line = next(entry for entry in captured_logs if entry["event"] == "request")
-    assert line["path"] == "/health"
+    assert line["path"] == "/openapi.json"
     rendered = repr(line)
     assert "super-secret-value" not in rendered
     assert "secret-token" not in rendered
@@ -88,3 +107,63 @@ async def test_a_failing_request_is_still_logged(client, captured_logs):
     line = next(entry for entry in captured_logs if entry["event"] == "request")
     assert line["path"] == "/health/boom"
     assert line["status"] == 404
+
+
+class TestProbesThatPassAreNotLogged:
+    """docker-compose polls /health/ready every 3s and Render polls /health;
+    at that rate a passing probe contributes ~28k identical lines a day and
+    buries everything worth reading. The response is unchanged — only the
+    access line is dropped, and only when the probe actually passed."""
+
+    async def test_liveness_that_passes_is_not_logged(self, client, captured_logs):
+        response = await client.get("/health")
+        assert response.status_code == 200
+
+        assert [entry for entry in captured_logs if entry["event"] == "request"] == []
+
+    async def test_readiness_that_passes_is_not_logged(
+        self, client, captured_logs, healthy_dependencies
+    ):
+        response = await client.get("/health/ready")
+        assert response.json()["status"] == "ready"
+
+        assert [entry for entry in captured_logs if entry["event"] == "request"] == []
+
+    async def test_readiness_that_is_degraded_is_logged(self, client, captured_logs, monkeypatch):
+        """A degraded readiness answers 200 — the body, not the status, is the
+        verdict — so status alone cannot decide this. It is the one failure
+        the suppression could swallow, which is why it is pinned here."""
+        from app.core import redis as redis_module
+        from app.db import session as session_module
+
+        async def ok() -> bool:
+            return True
+
+        async def down() -> bool:
+            return False
+
+        monkeypatch.setattr(session_module, "check_database", ok)
+        monkeypatch.setattr(redis_module, "check_redis", down)
+
+        response = await client.get("/health/ready")
+        assert response.json()["status"] == "degraded"
+
+        line = next(entry for entry in captured_logs if entry["event"] == "request")
+        assert line["path"] == "/health/ready"
+
+    async def test_a_probe_that_fails_outright_is_logged(self, client, captured_logs, monkeypatch):
+        """If the readiness handler itself raises, the middleware logs 500 and
+        re-raises. Suppression keys off success, so this line survives."""
+        from app.db import session as session_module
+
+        async def boom() -> bool:
+            raise RuntimeError("engine is gone")
+
+        monkeypatch.setattr(session_module, "check_database", boom)
+
+        with pytest.raises(RuntimeError):
+            await client.get("/health/ready")
+
+        line = next(entry for entry in captured_logs if entry["event"] == "request")
+        assert line["path"] == "/health/ready"
+        assert line["status"] == 500

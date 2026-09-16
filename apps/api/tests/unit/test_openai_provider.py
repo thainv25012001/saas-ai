@@ -337,3 +337,15 @@ async def test_generate_structured_is_not_implemented_yet():
     provider = OpenAIProvider(api_key="k")
     with pytest.raises(NotImplementedError):
         await provider.generate_structured(_request(), Message)
+
+
+async def test_openai_is_sent_no_vendor_extras():
+    """The counterpart to `test_reasoning_is_disabled_...` in
+    `test_openrouter_provider.py`: the `reasoning` body is OpenRouter's own
+    extension, and OpenAI rejects unknown body fields. Without this, moving the
+    flag from the subclass onto the shared class would go unnoticed."""
+    provider = _provider_with([_chunk("hi", finish_reason="stop")])
+    async for _ in provider.stream(_request()):
+        pass
+    kwargs = provider._client.chat.completions.create.call_args.kwargs  # noqa: SLF001
+    assert kwargs.get("extra_body") is None

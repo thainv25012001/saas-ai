@@ -38,6 +38,15 @@ def estimate_cost(model: str, usage: Usage) -> Decimal | None:
     NULL in the database, where it is visible, instead of as a free request, where it
     silently understates the bill.
     """
+    # OpenRouter marks its free tier with a `:free` suffix on the model id, and
+    # that roster churns -- models arrive and are retired without notice. A rule
+    # keyed on the vendor's own marker stays correct through that churn, where a
+    # table entry per free model would quietly go stale and report a real cost
+    # as NULL. Only the suffix is free: `z-ai/glm-5.2` and `z-ai/glm-5.2:free`
+    # are different endpoints with different prices.
+    if model.endswith(":free"):
+        return Decimal(0)
+
     price = MODEL_PRICING.get(model)
     if price is None:
         logger.warning("model_not_priced", model=model)

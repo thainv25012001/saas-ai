@@ -15,7 +15,7 @@ Chat service
       │  resolve agent → config → ACTIVE prompt version → render system prompt
       │  assemble windowed history
       ▼
-LLMProvider  ── openai │ anthropic │ fake
+LLMProvider  ── openai │ anthropic │ openrouter │ fake
       ▼
 stream text deltas → persist message + usage + cost
 ```

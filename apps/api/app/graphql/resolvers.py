@@ -14,6 +14,7 @@ from app.db.models import Membership, Organization
 from app.db.models import User as UserModel
 from app.graphql import types as gql
 from app.graphql.context import Context
+from app.llm.catalog import models_for
 from app.prompts import schemas as prompt_schemas
 from app.prompts.service import PromptService
 
@@ -130,6 +131,21 @@ class Query:
     @strawberry.field
     async def agent(self, info: Info, id: uuid.UUID) -> gql.Agent:
         return gql.Agent.from_model(await _agents(info).get_agent(id))
+
+    @strawberry.field
+    async def provider_models(self, info: Info, provider: str) -> list[gql.ModelOption]:
+        """The models the agent form may offer for `provider`.
+
+        Authenticated like every other query even though it reads no tenant
+        data: it is reachable only from the dashboard, and an unauthenticated
+        endpoint that makes this server issue an outbound request on demand is
+        a free amplifier.
+        """
+        _require_tenant(info)
+        return [
+            gql.ModelOption(id=option.id, label=option.label, context_length=option.context_length)
+            for option in await models_for(provider)
+        ]
 
     @strawberry.field
     async def prompts(self, info: Info) -> list[gql.Prompt]:

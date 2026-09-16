@@ -20,6 +20,12 @@ from app.core.security_headers import add_security_headers
 # has to understand one set.
 _HTTP_STATUS_CODES = {404: "not_found", 405: "invalid_input"}
 
+# Liveness and readiness probes. docker-compose polls /health/ready every 3s
+# and the platform polls /health on its own schedule, so at steady state these
+# two paths are almost the entire access log while saying nothing: the signal
+# is a probe that fails, not one of the tens of thousands that pass.
+_PROBE_PATHS = frozenset({"/health", "/health/ready"})
+
 logger = get_logger(__name__)
 
 
@@ -47,8 +53,22 @@ def create_app() -> FastAPI:
         token = request_id_var.set(request_id)
         started = time.perf_counter()
 
+        def probe_passed(status: int) -> bool:
+            """A probe request that reported everything healthy.
+
+            Two ways to fail, and both must still be logged. The status code
+            catches a probe that errored outright. It does not catch a
+            degraded readiness, which answers 200 with `"status":"degraded"`
+            in the body — so `ready()` records its own verdict on the request
+            scope, which the route and this middleware share.
+            """
+            if request.url.path not in _PROBE_PATHS or status >= 400:
+                return False
+            return not getattr(request.state, "probe_failed", False)
+
         def log(status: int) -> None:
-            """One structured access line per request.
+            """One structured access line per request, except a probe that
+            passed.
 
             Method, path, status and duration only. Never the query string,
             headers or body: those carry passwords, bearer tokens and the
@@ -60,6 +80,8 @@ def create_app() -> FastAPI:
             carry no id and so correlate with nothing - which is the whole
             point of having the id.
             """
+            if probe_passed(status):
+                return
             logger.info(
                 "request",
                 method=request.method,

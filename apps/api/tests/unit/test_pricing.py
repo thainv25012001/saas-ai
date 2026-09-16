@@ -39,7 +39,27 @@ def test_claude_opus_5_is_priced():
 
 
 def test_every_default_model_is_priced():
-    """Nothing enforces that DEFAULT_MODELS and MODEL_PRICING agree. Adding a
-    provider (or changing its default model) without a matching price entry
-    would silently produce agents whose cost is permanently NULL."""
-    assert set(DEFAULT_MODELS.values()) <= set(MODEL_PRICING)
+    """Nothing enforces that DEFAULT_MODELS and the pricing rules agree. Adding
+    a provider (or changing its default model) without a price would silently
+    produce agents whose cost is permanently NULL. Asserted through
+    `estimate_cost` rather than against `MODEL_PRICING` directly, because a
+    model can now be priced by rule (`:free`) as well as by table entry."""
+    unpriced = [model for model in DEFAULT_MODELS.values() if estimate_cost(model, Usage()) is None]
+    assert unpriced == []
+
+
+def test_openrouter_free_models_cost_nothing():
+    """OpenRouter's free tier charges nothing, and its roster churns often
+    enough that a hardcoded table entry per model would go stale. The `:free`
+    suffix is the vendor's own marker, so it is the rule."""
+    cost = estimate_cost(
+        "z-ai/glm-5.2:free", Usage(input_tokens=1_000_000, output_tokens=1_000_000)
+    )
+    assert cost == Decimal("0")
+
+
+def test_a_paid_openrouter_model_is_still_unpriced():
+    """The counterpart to the rule above: only `:free` is free. A paid
+    OpenRouter model we have no price for must stay NULL, not fall through
+    the same branch and report a free conversation."""
+    assert estimate_cost("z-ai/glm-5.2", Usage(input_tokens=1_000, output_tokens=1_000)) is None
