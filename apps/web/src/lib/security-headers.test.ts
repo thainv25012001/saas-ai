@@ -1,0 +1,53 @@
+import { describe, expect, it } from "vitest";
+import { securityHeaderRules } from "./security-headers";
+
+/** The one rule the config returns, flattened to a lookup. */
+function headers() {
+  const rules = securityHeaderRules();
+  expect(rules).toHaveLength(1);
+  return Object.fromEntries(rules[0].headers.map(({ key, value }) => [key, value]));
+}
+
+describe("securityHeaderRules", () => {
+  it("covers every route, not just the ones behind the middleware matcher", () => {
+    // middleware.ts is matched to /dashboard/:path*. Headers set there would
+    // leave the marketing pages and the login form bare, which is exactly
+    // where a clickjacking frame would be pointed.
+    expect(securityHeaderRules()[0].source).toBe("/:path*");
+  });
+
+  it("refuses to be framed", () => {
+    expect(headers()["Content-Security-Policy"]).toBe("frame-ancestors 'none'");
+    expect(headers()["X-Frame-Options"]).toBe("DENY");
+  });
+
+  it("forbids MIME sniffing", () => {
+    expect(headers()["X-Content-Type-Options"]).toBe("nosniff");
+  });
+
+  it("states the referrer policy instead of relying on the browser default", () => {
+    // The value matches what browsers already default to. Sending it makes
+    // the behaviour a decision this repo owns rather than one a future
+    // browser release could change underneath it.
+    expect(headers()["Referrer-Policy"]).toBe("strict-origin-when-cross-origin");
+  });
+
+  it("sends HSTS for two years across subdomains", () => {
+    expect(headers()["Strict-Transport-Security"]).toBe("max-age=63072000; includeSubDomains");
+  });
+
+  it("does not submit the host to the HSTS preload list", () => {
+    // preload is a commitment baked into browser binaries and slow to undo.
+    // Adding it has to be a deliberate, separate decision.
+    expect(headers()["Strict-Transport-Security"]).not.toContain("preload");
+  });
+
+  it("denies the browser features this app never uses", () => {
+    expect(headers()["Permissions-Policy"]).toBe("camera=(), microphone=(), geolocation=()");
+  });
+
+  it("names no header twice", () => {
+    const keys = securityHeaderRules()[0].headers.map(({ key }) => key);
+    expect(keys).toHaveLength(new Set(keys).size);
+  });
+});
