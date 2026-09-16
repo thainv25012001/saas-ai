@@ -12,6 +12,7 @@ from app.api import auth, chat, health
 from app.core.config import get_settings
 from app.core.errors import AppError, format_validation_errors
 from app.core.logging import configure_logging, get_logger, request_id_var
+from app.core.security_headers import add_security_headers
 
 # Starlette raises HTTPException for framework-level failures that never
 # reach a route: unknown paths and wrong methods. Map each status onto the
@@ -27,6 +28,8 @@ def create_app() -> FastAPI:
     configure_logging(settings.log_level)
 
     app = FastAPI(title="AI Sales Agent API", version="0.1.0")
+
+    add_security_headers(app, settings.environment)
 
     app.add_middleware(
         CORSMiddleware,
