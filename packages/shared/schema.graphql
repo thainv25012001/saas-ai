@@ -34,8 +34,8 @@ enum AgentStatus {
 
 input CreateAgentInput {
   name: String!
-  provider: String = null
-  model: String = null
+  provider: String!
+  model: String!
   temperature: Float! = 0.3
   maxTokens: Int! = 1024
 }
@@ -105,12 +105,18 @@ type PromptVersion {
   createdAt: DateTime!
 }
 
+type ProviderInfo {
+  id: String!
+  configured: Boolean!
+}
+
 type Query {
   me: Me!
   organization: Organization!
   agents: [Agent!]!
   agent(id: UUID!): Agent!
   providerModels(provider: String!): [ModelOption!]!
+  configuredProviders: [ProviderInfo!]!
   prompts: [Prompt!]!
   prompt(id: UUID!): Prompt!
 }

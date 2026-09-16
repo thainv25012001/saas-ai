@@ -9,8 +9,10 @@ query Agent($id: UUID!) {
   }
 }
 
-mutation CreateAgent($name: String!) {
-  createAgent(input: { name: $name }) { id name slug status }
+mutation CreateAgent($name: String!, $provider: String!, $model: String!) {
+  createAgent(input: { name: $name, provider: $provider, model: $model }) {
+    id name slug status provider model
+  }
 }
 
 mutation UpdateAgent($id: UUID!, $input: UpdateAgentInput!) {
@@ -31,4 +33,8 @@ mutation DeleteAgent($id: UUID!) {
 
 query ProviderModels($provider: String!) {
   providerModels(provider: $provider) { id label contextLength }
+}
+
+query ConfiguredProviders {
+  configuredProviders { id configured }
 }

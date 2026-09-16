@@ -31,6 +31,24 @@ class ModelOption:
 
 
 @strawberry.type
+class ProviderInfo:
+    """One entry in the dashboard's provider dropdown.
+
+    `configured` is whether the server holds the API key this provider needs,
+    which is the same condition `app.llm.registry._build` raises
+    `LLMConfigurationError` on. The dashboard greys out the rest: an agent
+    pointed at a provider with no key cannot answer, and discovering that in
+    the playground rather than at the dropdown wastes the user's time.
+
+    Only the flag, never the key or any part of it -- this is answered for any
+    authenticated member of any tenant.
+    """
+
+    id: str
+    configured: bool
+
+
+@strawberry.type
 class Me:
     user_id: uuid.UUID
     email: str
@@ -173,16 +191,27 @@ class Prompt:
 
 @strawberry.input
 class CreateAgentInput:
-    """`provider`/`model` default to `None`, matching `UpdateAgentInput`
-    below and `app.agents.schemas.CreateAgentInput`: this is the only path a
-    real user creates an agent through, so a hardcoded literal default here
-    would always win over `AgentService.create_agent`'s own
-    `data.provider or default_llm_provider` resolution — the config setting
-    would never actually apply outside the dev seed script."""
+    """`provider` and `model` are non-null and have no default, matching
+    `app.agents.schemas.CreateAgentInput`.
+
+    Both used to be nullable and were resolved server-side from
+    `DEFAULT_LLM_PROVIDER` when omitted. This is the only path a real user
+    creates an agent through, and the dashboard sent neither — so every agent
+    anyone made landed on `fake`, the offline provider that answers with a
+    canned reply, and they had to find that out and fix it afterwards.
+
+    Non-null here rather than only in the pydantic schema because this is what
+    the dashboard's codegen reads: nullable fields let the web app compile a
+    `createAgent` call that omits them, which is exactly how this happened.
+
+    `UpdateAgentInput` below stays nullable on purpose — there `None` means
+    "leave unchanged", so renaming an agent must not require restating its
+    model.
+    """
 
     name: str
-    provider: str | None = None
-    model: str | None = None
+    provider: str
+    model: str
     temperature: float = 0.3
     max_tokens: int = 1024
 

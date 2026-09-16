@@ -10,7 +10,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Icon } from "@/components/ui/icons";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { LoadingState } from "@/components/ui/Spinner";
-import { AgentsDocument } from "@/graphql/generated";
+import { AgentsDocument, ConfiguredProvidersDocument } from "@/graphql/generated";
 import { agentStatusLabel, agentStatusTone } from "@/lib/agent-status";
 import { useAuth } from "@/lib/auth";
 import { firstGraphQLError } from "@/lib/graphql-errors";
@@ -28,9 +28,17 @@ export default function DashboardPage() {
     query: AgentsDocument,
     pause: loading || !user,
   });
+  const [providersResult] = useQuery({
+    query: ConfiguredProvidersDocument,
+    pause: loading || !user,
+  });
 
   const agents = data?.agents ?? [];
-  const steps = deriveChecklist(agents);
+  // "Connect a real model provider" is a question about the server's API keys,
+  // not about the agents: creating an agent now requires choosing a configured
+  // provider, so reading it off the agents would tick the step the moment the
+  // first one existed.
+  const steps = deriveChecklist(agents, providersResult.data?.configuredProviders ?? []);
   const progress = checklistProgress(steps);
   const activeCount = agents.filter((agent) => agent.status === "ACTIVE").length;
   const draftCount = agents.filter((agent) => agent.status === "DRAFT").length;

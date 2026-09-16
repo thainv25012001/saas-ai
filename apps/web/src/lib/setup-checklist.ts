@@ -1,8 +1,11 @@
 import type { AgentStatus } from "@/graphql/generated";
+import type { ProviderInfo } from "./providers";
 
-/** Only the two fields the checklist reads, so the Agents query can change
- * shape without touching this module. */
-export type ChecklistAgent = { status: AgentStatus; provider: string };
+/** Only the field the checklist reads, so the Agents query can change shape
+ * without touching this module. `provider` used to be read here too, to tell
+ * whether any agent had been moved off `fake`; see `real-provider` below for
+ * why that question moved to the server. */
+export type ChecklistAgent = { status: AgentStatus };
 
 export type ChecklistStepId = "create-agent" | "real-provider" | "activate-agent" | "test-agent";
 
@@ -15,10 +18,14 @@ export type ChecklistStep = {
   action: { href: string; label: string };
 };
 
-/** The API's `DEFAULT_LLM_PROVIDER`, which answers offline with a canned reply. */
+/** Answers offline with a canned reply, and needs no API key -- so it is
+ * always reported as `configured` and can never satisfy the step below. */
 const OFFLINE_PROVIDER = "fake";
 
-export function deriveChecklist(agents: readonly ChecklistAgent[]): ChecklistStep[] {
+export function deriveChecklist(
+  agents: readonly ChecklistAgent[],
+  providers: readonly ProviderInfo[],
+): ChecklistStep[] {
   return [
     {
       id: "create-agent",
@@ -31,8 +38,16 @@ export function deriveChecklist(agents: readonly ChecklistAgent[]): ChecklistSte
       id: "real-provider",
       title: "Connect a real model provider",
       description:
-        "New agents start on the offline `fake` provider, which returns a canned reply and costs nothing. Switch to OpenAI, Anthropic or OpenRouter to get real answers.",
-      done: agents.some((agent) => agent.provider !== OFFLINE_PROVIDER),
+        "Set OPENAI_API_KEY, ANTHROPIC_API_KEY or OPENROUTER_API_KEY on the API. Until one is set there is no provider to create an agent on.",
+      // Asked of the server, not of the agents. This used to be "some agent is
+      // not on `fake`", which made sense when every agent was created on `fake`
+      // by default. Creating an agent now requires choosing a configured
+      // provider, so that phrasing would tick the moment the first agent
+      // existed -- claiming a step the user had not done. An empty list (the
+      // query has not resolved) is correctly false rather than true.
+      done: providers.some(
+        (provider) => provider.id !== OFFLINE_PROVIDER && provider.configured,
+      ),
       action: { href: "/dashboard/agents", label: "Choose a provider" },
     },
     {

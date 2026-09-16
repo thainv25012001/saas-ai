@@ -15,6 +15,7 @@ import { LoadingState } from "@/components/ui/Spinner";
 import {
   AgentDocument,
   AgentStatus,
+  ConfiguredProvidersDocument,
   DeleteAgentDocument,
   ProviderModelsDocument,
   UpdateAgentConfigDocument,
@@ -22,7 +23,7 @@ import {
 } from "@/graphql/generated";
 import { agentStatusLabel, agentStatusTone } from "@/lib/agent-status";
 import { useAuth } from "@/lib/auth";
-import { PROVIDERS, modelFieldHelp, providerLabel } from "@/lib/providers";
+import { editableProviders, modelFieldHelp, providerLabel } from "@/lib/providers";
 import { firstGraphQLError } from "@/lib/graphql-errors";
 
 const STATUSES: AgentStatus[] = ["DRAFT", "ACTIVE", "DISABLED"];
@@ -58,6 +59,11 @@ export default function AgentDetailPage({
   // actually on.
   const [provider, setProvider] = useState<string>("");
   const [model, setModel] = useState("");
+
+  const [providersResult] = useQuery({
+    query: ConfiguredProvidersDocument,
+    pause: loading || !user,
+  });
 
   // Re-runs whenever the provider dropdown changes, so the model list always
   // belongs to the provider actually selected rather than the one the agent was
@@ -129,6 +135,7 @@ export default function AgentDetailPage({
     }
   }
 
+  const providers = providersResult.data?.configuredProviders ?? [];
   const agentError = firstGraphQLError(updateAgentResult.error);
   const configError = firstGraphQLError(updateConfigResult.error);
   const deleteError = firstGraphQLError(deleteResult.error);
@@ -204,13 +211,21 @@ export default function AgentDetailPage({
           <CardBody className="space-y-4">
             <Field
               label="Provider"
-              description="Fake answers offline with a canned reply and costs nothing — useful for wiring, useless for real answers. Switch to OpenAI, Anthropic or OpenRouter once the matching API key is set. OpenRouter models ending in `:free` cost nothing but are rate limited."
+              description="Only providers with an API key configured on the server can be selected; the rest are listed but disabled. OpenRouter models ending in `:free` cost nothing but are rate limited."
             >
               {(control) => (
                 <Select {...control} value={provider} onChange={(e) => setProvider(e.target.value)}>
-                  {PROVIDERS.map((option) => (
-                    <option key={option} value={option}>
-                      {providerLabel(option)}
+                  {/* Unconfigured providers stay in the list, disabled, rather
+                    * than being hidden: a missing option leaves the user
+                    * guessing, a disabled one says why. `fake` appears only
+                    * for an agent already on it — every agent created before
+                    * providers became a required choice is, and a select with
+                    * no option matching its value renders blank. */}
+                  {editableProviders(providers, agent.provider).map((option) => (
+                    <option key={option.id} value={option.id} disabled={!option.configured}>
+                      {option.configured
+                        ? providerLabel(option.id)
+                        : `${providerLabel(option.id)} — no API key`}
                     </option>
                   ))}
                 </Select>

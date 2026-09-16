@@ -28,6 +28,23 @@ async def graphql(client, query, variables=None, headers=None):
     )
 
 
+async def create_agent(client, headers, name, selection="id", **fields):
+    """Create an agent over GraphQL with the boilerplate filled in.
+
+    `provider` and `model` are required by the API — deliberately, so a user
+    has to choose rather than inherit `DEFAULT_LLM_PROVIDER` — and almost no
+    test here cares which. Default to the offline pair, which needs no API
+    key; a test that cares passes its own.
+    """
+    payload = {"name": name, "provider": "fake", "model": "fake-1", **fields}
+    return await graphql(
+        client,
+        f"mutation C($input: CreateAgentInput!) {{ createAgent(input: $input) {{ {selection} }} }}",
+        {"input": payload},
+        headers,
+    )
+
+
 async def test_graphql_requires_authentication(client):
     response = await graphql(client, "{ agents { id } }")
     body = response.json()
@@ -80,63 +97,38 @@ async def test_organization_takes_no_id_argument(client, auth_headers):
 
 
 async def test_create_agent_mutation(client, auth_headers):
-    response = await graphql(
-        client,
-        """
-        mutation Create($name: String!) {
-          createAgent(input: {name: $name}) { id name slug status }
-        }
-        """,
-        {"name": "Showroom Bot"},
-        auth_headers,
+    response = await create_agent(
+        client, auth_headers, "Showroom Bot", selection="id name slug status"
     )
     agent = response.json()["data"]["createAgent"]
     assert agent["slug"] == "showroom-bot"
     assert agent["status"] == "DRAFT"
 
 
-async def test_create_agent_mutation_resolves_provider_and_model_from_settings(
-    client, auth_headers
-):
-    """Regression test: the GraphQL input type used to declare its own
-    `provider: str = "openai"` default and pass it straight through, which
-    short-circuited `AgentService.create_agent`'s `data.provider or
-    default_llm_provider` resolution to a hardcoded "openai" for every agent
-    created through the dashboard — the only path a real user exercises.
-    `model` has the same failure mode: it must resolve to the *chosen*
-    provider's own default model, not a hardcoded OpenAI model string paired
-    with (e.g.) the `fake` provider."""
-    from app.core.config import get_settings
-    from app.llm.registry import DEFAULT_MODELS
-
-    response = await graphql(
+async def test_create_agent_mutation_stores_the_chosen_provider_and_model(client, auth_headers):
+    response = await create_agent(
         client,
-        'mutation { createAgent(input: {name: "Default Provider Bot"}) { provider model } }',
-        headers=auth_headers,
+        auth_headers,
+        "Chosen Bot",
+        selection="provider model",
+        provider="anthropic",
+        model="claude-opus-5",
     )
-    agent = response.json()["data"]["createAgent"]
-    default_provider = get_settings().default_llm_provider
-    assert agent["provider"] == default_provider
-    assert agent["model"] == DEFAULT_MODELS[default_provider]
+    assert response.json()["data"]["createAgent"] == {
+        "provider": "anthropic",
+        "model": "claude-opus-5",
+    }
 
 
 async def test_agents_query_lists_created_agents(client, auth_headers):
-    await graphql(
-        client,
-        'mutation { createAgent(input: {name: "Listed Bot"}) { id } }',
-        headers=auth_headers,
-    )
+    await create_agent(client, auth_headers, "Listed Bot")
     response = await graphql(client, "{ agents { name } }", headers=auth_headers)
     names = [a["name"] for a in response.json()["data"]["agents"]]
     assert "Listed Bot" in names
 
 
 async def test_agent_query_includes_its_config(client, auth_headers):
-    created = await graphql(
-        client,
-        'mutation { createAgent(input: {name: "Config Bot"}) { id } }',
-        headers=auth_headers,
-    )
+    created = await create_agent(client, auth_headers, "Config Bot")
     agent_id = created.json()["data"]["createAgent"]["id"]
     response = await graphql(
         client,
@@ -151,11 +143,7 @@ async def test_agent_query_includes_its_config(client, auth_headers):
 
 
 async def test_update_agent_config_mutation(client, auth_headers):
-    created = await graphql(
-        client,
-        'mutation { createAgent(input: {name: "Tuned Bot"}) { id } }',
-        headers=auth_headers,
-    )
+    created = await create_agent(client, auth_headers, "Tuned Bot")
     agent_id = created.json()["data"]["createAgent"]["id"]
     response = await graphql(
         client,
@@ -222,10 +210,7 @@ async def test_prompt_version_activation_through_graphql(client, auth_headers):
 
 
 async def test_unauthenticated_mutation_requires_authentication(client):
-    response = await graphql(
-        client,
-        'mutation { createAgent(input: {name: "Nope"}) { id } }',
-    )
+    response = await create_agent(client, None, "Nope")
     assert response.json()["errors"][0]["extensions"]["code"] == "unauthenticated"
 
 
@@ -237,16 +222,7 @@ async def test_invalid_input_is_reported_as_invalid_input_not_a_raw_pydantic_mes
     `ValidationError` inside the resolver. It must come back as the app's own
     `invalid_input` code, not fall through as an unrecognised error carrying
     pydantic's raw multi-line message and its errors.pydantic.dev URL."""
-    response = await graphql(
-        client,
-        """
-        mutation Create($name: String!, $temperature: Float!) {
-          createAgent(input: {name: $name, temperature: $temperature}) { id }
-        }
-        """,
-        {"name": "Hot Bot", "temperature": 5},
-        auth_headers,
-    )
+    response = await create_agent(client, auth_headers, "Hot Bot", temperature=5)
     body = response.json()
     assert body["errors"][0]["extensions"]["code"] == "invalid_input"
     assert "errors.pydantic.dev" not in body["errors"][0]["message"]
@@ -259,11 +235,7 @@ async def test_create_agent_rejects_an_unknown_provider(client, auth_headers):
     model -- an agent that could never resolve a provider at send time. The
     name is validated against `registry.KNOWN_PROVIDERS` in the schema
     instead, so it is rejected here, at creation."""
-    response = await graphql(
-        client,
-        'mutation { createAgent(input: {name: "Bogus Bot", provider: "gpt"}) { id } }',
-        headers=auth_headers,
-    )
+    response = await create_agent(client, auth_headers, "Bogus Bot", provider="gpt")
     body = response.json()
     assert body["errors"][0]["extensions"]["code"] == "invalid_input"
     assert "fake" in body["errors"][0]["message"]
@@ -274,11 +246,7 @@ async def test_update_agent_rejects_an_unknown_provider(client, auth_headers):
     validation at all -- in contrast to the careful `AgentStatus` handling
     immediately above it. Both mutations share one schema, so both reject
     the same values the same way."""
-    created = await graphql(
-        client,
-        'mutation { createAgent(input: {name: "Switchable Bot"}) { id } }',
-        headers=auth_headers,
-    )
+    created = await create_agent(client, auth_headers, "Switchable Bot")
     agent_id = created.json()["data"]["createAgent"]["id"]
 
     response = await graphql(
@@ -301,11 +269,7 @@ async def test_update_agent_accepts_every_known_provider(client, auth_headers):
     what a fresh clone's agents are actually created with."""
     from app.llm.registry import KNOWN_PROVIDERS
 
-    created = await graphql(
-        client,
-        'mutation { createAgent(input: {name: "Every Provider Bot"}) { id } }',
-        headers=auth_headers,
-    )
+    created = await create_agent(client, auth_headers, "Every Provider Bot")
     agent_id = created.json()["data"]["createAgent"]["id"]
 
     for provider in KNOWN_PROVIDERS:
@@ -356,11 +320,7 @@ async def test_introspection_still_works_in_the_test_environment(client):
 async def test_update_agent_mutation_round_trips_status_and_fields(client, auth_headers):
     """The only path that exercises the AgentStatus GraphQL enum's NAME
     (`ACTIVE`) converting to the ORM's VALUE (`active`) on the way in."""
-    created = await graphql(
-        client,
-        'mutation { createAgent(input: {name: "Status Bot"}) { id } }',
-        headers=auth_headers,
-    )
+    created = await create_agent(client, auth_headers, "Status Bot")
     agent_id = created.json()["data"]["createAgent"]["id"]
 
     response = await graphql(
@@ -382,11 +342,7 @@ async def test_update_agent_mutation_round_trips_status_and_fields(client, auth_
 
 
 async def test_delete_agent_mutation_removes_it(client, auth_headers):
-    created = await graphql(
-        client,
-        'mutation { createAgent(input: {name: "Deletable Bot"}) { id } }',
-        headers=auth_headers,
-    )
+    created = await create_agent(client, auth_headers, "Deletable Bot")
     agent_id = created.json()["data"]["createAgent"]["id"]
 
     deleted = await graphql(
@@ -448,16 +404,8 @@ async def test_prompt_query_returns_a_single_prompt(client, auth_headers):
 async def test_agent_config_field_batches_into_a_single_query(client, auth_headers):
     """`agents { config { ... } }` must issue one batched query for all
     agents' configs via `Context.config_loader`, not one query per agent."""
-    await graphql(
-        client,
-        'mutation { createAgent(input: {name: "Batch One"}) { id } }',
-        headers=auth_headers,
-    )
-    await graphql(
-        client,
-        'mutation { createAgent(input: {name: "Batch Two"}) { id } }',
-        headers=auth_headers,
-    )
+    await create_agent(client, auth_headers, "Batch One")
+    await create_agent(client, auth_headers, "Batch Two")
 
     config_statements: list[str] = []
 
@@ -542,3 +490,92 @@ async def test_provider_models_rejects_an_unknown_provider(client, auth_headers)
     error = response.json()["errors"][0]
     assert error["extensions"]["code"] == "invalid_input"
     assert "unknown provider 'not-a-provider'" in error["message"]
+
+
+async def test_configured_providers_requires_authentication(client):
+    response = await graphql(client, "{ configuredProviders { id configured } }")
+    assert response.json()["errors"][0]["extensions"]["code"] == "unauthenticated"
+
+
+async def test_configured_providers_lists_every_known_provider(client, auth_headers):
+    """The dashboard builds its whole provider dropdown from this, so a
+    provider missing here is a provider nobody can select."""
+    from app.llm.registry import KNOWN_PROVIDERS
+
+    response = await graphql(client, "{ configuredProviders { id } }", headers=auth_headers)
+    body = response.json()
+    assert "errors" not in body, body
+    assert [p["id"] for p in body["data"]["configuredProviders"]] == list(KNOWN_PROVIDERS)
+
+
+async def test_configured_providers_reports_fake_as_configured(client, auth_headers):
+    response = await graphql(
+        client, "{ configuredProviders { id configured } }", headers=auth_headers
+    )
+    by_id = {p["id"]: p["configured"] for p in response.json()["data"]["configuredProviders"]}
+    assert by_id["fake"] is True
+
+
+async def test_configured_providers_reflects_which_keys_are_set(client, auth_headers, monkeypatch):
+    """Monkeypatched rather than read from the ambient .env: a test whose
+    result depends on whether the developer happens to have an OpenAI key is
+    not a test."""
+    from app.core.config import get_settings
+
+    base = get_settings()
+    patched = base.model_copy(
+        update={
+            "openai_api_key": "test-key",
+            "anthropic_api_key": None,
+            "openrouter_api_key": None,
+        }
+    )
+    monkeypatch.setattr("app.llm.registry.get_settings", lambda: patched)
+
+    response = await graphql(
+        client, "{ configuredProviders { id configured } }", headers=auth_headers
+    )
+    by_id = {p["id"]: p["configured"] for p in response.json()["data"]["configuredProviders"]}
+    assert by_id["openai"] is True
+    assert by_id["anthropic"] is False
+    assert by_id["openrouter"] is False
+
+
+async def test_create_agent_input_declares_provider_and_model_non_null():
+    """Non-null in the schema itself, not merely rejected by pydantic inside
+    the resolver. This is what the dashboard's codegen reads: with these
+    nullable, a `createAgent` call that omits them still type-checks in the
+    web app and only fails at runtime, which is how every agent ended up on
+    `fake` in the first place."""
+    from app.graphql.schema import schema
+
+    sdl = schema.as_str()
+    block = sdl[sdl.index("input CreateAgentInput") :]
+    block = block[: block.index("}")]
+    assert "provider: String!" in block, block
+    assert "model: String!" in block, block
+
+
+async def test_create_agent_omitting_them_fails_before_execution(client, auth_headers):
+    """The corollary: the request is rejected as an invalid query rather than
+    reaching the resolver. `AppErrorExtension` labels both cases
+    `invalid_input`, so the message is what tells them apart -- and naming the
+    required field and its type is the more useful of the two for a client."""
+    response = await graphql(
+        client,
+        'mutation { createAgent(input: {name: "Nameless Bot"}) { id } }',
+        headers=auth_headers,
+    )
+    body = response.json()
+    assert "data" not in body or body["data"] is None, body
+    message = body["errors"][0]["message"]
+    assert "CreateAgentInput.provider" in message, message
+    assert "required type 'String!'" in message, message
+
+
+async def test_create_agent_rejects_an_empty_model(client, auth_headers):
+    """The dashboard's model picker starts empty, so this is exactly what an
+    unfilled form sends -- it must not create an agent with no model."""
+    response = await create_agent(client, auth_headers, "Modelless Bot", model="")
+    body = response.json()
+    assert body["errors"][0]["extensions"]["code"] == "invalid_input"

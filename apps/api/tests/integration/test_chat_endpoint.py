@@ -8,7 +8,6 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
-from app.agents.schemas import CreateAgentInput
 from app.agents.service import AgentService
 from app.api import chat as chat_api
 from app.core.tenancy import TenantContext, tenant_session
@@ -28,6 +27,7 @@ from app.llm.types import (
     Usage,
 )
 from app.main import create_app
+from tests.factories import agent_input
 
 pytestmark = pytest.mark.anyio
 
@@ -88,9 +88,7 @@ async def _make_agent(org_id: uuid.UUID, **overrides: object) -> uuid.UUID:
     )
     name = str(overrides.pop("name", "Sales Bot"))
     async with tenant_session(tenant) as session:
-        agent = await AgentService(session, tenant).create_agent(
-            CreateAgentInput(name=name, **overrides)  # type: ignore[arg-type]
-        )
+        agent = await AgentService(session, tenant).create_agent(agent_input(name, **overrides))
     return agent.id
 
 
