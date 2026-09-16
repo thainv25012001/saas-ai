@@ -122,7 +122,18 @@ Create the project and, because this workflow builds and uploads the app itself:
 - Turn off the Git integration's automatic deploys (Settings → Git), or every push deploys twice,
   once unverified.
 - Add `NEXT_PUBLIC_API_URL` to the Production environment, pointing at the Render URL. `vercel pull`
-  brings it into the CI build.
+  brings it into the CI build. It has to be present *at build time*, not just at runtime: the
+  rewrite that proxies the auth routes is baked into the build (see below).
+
+The auth routes — and only those — are served from the Vercel origin and proxied to Render, via the
+rewrite in `next.config.ts` (`src/lib/auth-proxy.ts` has the rules and the full reasoning). The
+refresh token is an httpOnly cookie, and `saas-ai.vercel.app` and `saas-ai-api.onrender.com` are
+different registrable domains that cannot share one. Calling the auth routes cross-origin therefore
+left the cookie unreadable by `middleware.ts` and unsent by the browser, so a successful login
+landed straight back on the login form. Do not "simplify" those calls back onto `NEXT_PUBLIC_API_URL`.
+
+GraphQL and the SSE chat stream still go to Render directly on a Bearer token, which is why
+`CORS_ORIGINS` above is still required.
 
 Take `VERCEL_ORG_ID` and `VERCEL_PROJECT_ID` from `.vercel/project.json` after a local
 `vercel link`, and create `VERCEL_TOKEN` under Account Settings → Tokens.

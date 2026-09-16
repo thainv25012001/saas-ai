@@ -232,9 +232,13 @@ describe("streamChat token refresh", () => {
 
     await run(events, tokens);
 
+    // The two halves of the split in `auth-proxy.ts`, side by side: the
+    // stream goes straight to the API on a Bearer token, while the refresh is
+    // relative so it travels through this app's origin and keeps its cookie
+    // first-party.
     expect(calls.map((c) => c.url)).toEqual([
       "http://api.test/api/v1/chat/stream",
-      "http://localhost:8000/api/v1/auth/refresh",
+      "/api/v1/auth/refresh",
       "http://api.test/api/v1/chat/stream",
     ]);
     // The retry carries the rotated token, not the stale one.
