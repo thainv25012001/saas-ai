@@ -71,6 +71,16 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-local}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      # Provider credentials. The repo-root `.env` is NOT inside the
+      # `./apps/api` mount below, so `Settings`' env-file walk finds nothing in
+      # this container -- without these lines every real provider resolves to
+      # `LLMConfigurationError` here, and only the offline `fake` provider
+      # works. Unset on the host stays unset in the container (no `:-default`),
+      # which is what keeps `fake` the out-of-the-box path.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-fake}
     ports:
       - "8000:8000"
     volumes:
@@ -105,7 +115,14 @@ services:
     depends_on:
       - api
     environment:
+      # The browser's view of the API: it reaches the published host port, so
+      # this stays `localhost` regardless of the compose network.
       NEXT_PUBLIC_API_URL: http://localhost:8000
+      # The Next *server's* view, used for the /api/v1/auth proxy rewrite (see
+      # `src/lib/auth-proxy.ts`). That rewrite runs in this container, where
+      # `localhost:8000` is this container and not the API -- without this the
+      # proxy fails with ECONNREFUSED and every login returns a 500.
+      API_INTERNAL_URL: http://api:8000
     ports:
       - "3000:3000"
     volumes:

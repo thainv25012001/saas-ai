@@ -28,3 +28,7 @@ mutation UpdateAgentConfig($agentId: UUID!, $input: UpdateAgentConfigInput!) {
 mutation DeleteAgent($id: UUID!) {
   deleteAgent(id: $id)
 }
+
+query ProviderModels($provider: String!) {
+  providerModels(provider: $provider) { id label contextLength }
+}

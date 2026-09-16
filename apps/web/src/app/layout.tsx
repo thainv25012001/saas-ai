@@ -13,7 +13,12 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body className="min-h-screen bg-canvas font-sans text-ink antialiased">
+      {/* Browser extensions (e.g. Grammarly) inject attributes on <body> before
+          React hydrates, which mismatches the server-rendered HTML. */}
+      <body
+        className="min-h-screen bg-canvas font-sans text-ink antialiased"
+        suppressHydrationWarning
+      >
         <AuthProvider>
           <UrqlProvider>{children}</UrqlProvider>
         </AuthProvider>

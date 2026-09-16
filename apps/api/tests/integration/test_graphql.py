@@ -484,3 +484,61 @@ async def test_agent_config_field_batches_into_a_single_query(client, auth_heade
 
     assert "errors" not in response.json()
     assert len(config_statements) == 1
+
+
+async def test_provider_models_requires_authentication(client):
+    response = await graphql(client, '{ providerModels(provider: "openrouter") { id } }')
+    assert response.json()["errors"][0]["extensions"]["code"] == "unauthenticated"
+
+
+async def test_provider_models_lists_openrouter_models(client, auth_headers, monkeypatch):
+    """Monkeypatched, not live: the dashboard's dropdown must not make this
+    suite depend on OpenRouter being up."""
+    from app.llm import openrouter_models as om
+
+    async def _fake_fetch():
+        return {
+            "data": [
+                {"id": "vendor/free-one:free", "name": "Free One", "context_length": 128},
+                {"id": "vendor/paid", "name": "Paid"},
+            ]
+        }
+
+    om.reset_cache()
+    monkeypatch.setattr(om, "_fetch_payload", _fake_fetch)
+
+    response = await graphql(
+        client,
+        '{ providerModels(provider: "openrouter") { id label contextLength } }',
+        headers=auth_headers,
+    )
+    assert response.json()["data"]["providerModels"] == [
+        {"id": "vendor/free-one:free", "label": "Free One", "contextLength": 128}
+    ]
+    om.reset_cache()
+
+
+async def test_provider_models_returns_static_options_for_other_providers(client, auth_headers):
+    """OpenRouter is the only provider with a model-list API. The others still
+    answer, so the dashboard has one query rather than a special case."""
+    response = await graphql(
+        client,
+        '{ providerModels(provider: "anthropic") { id } }',
+        headers=auth_headers,
+    )
+    ids = [m["id"] for m in response.json()["data"]["providerModels"]]
+    assert "claude-opus-5" in ids
+
+
+async def test_provider_models_rejects_an_unknown_provider(client, auth_headers):
+    """The message assertion is load-bearing: a query naming a field that does
+    not exist also errors, so without it this test passed before the resolver
+    was written at all."""
+    response = await graphql(
+        client,
+        '{ providerModels(provider: "not-a-provider") { id } }',
+        headers=auth_headers,
+    )
+    error = response.json()["errors"][0]
+    assert error["extensions"]["code"] == "invalid_input"
+    assert "unknown provider 'not-a-provider'" in error["message"]

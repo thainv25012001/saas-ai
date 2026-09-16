@@ -64,6 +64,12 @@ type Me {
   role: String!
 }
 
+type ModelOption {
+  id: String!
+  label: String!
+  contextLength: Int
+}
+
 type Mutation {
   createAgent(input: CreateAgentInput!): Agent!
   updateAgent(id: UUID!, input: UpdateAgentInput!): Agent!
@@ -104,6 +110,7 @@ type Query {
   organization: Organization!
   agents: [Agent!]!
   agent(id: UUID!): Agent!
+  providerModels(provider: String!): [ModelOption!]!
   prompts: [Prompt!]!
   prompt(id: UUID!): Prompt!
 }

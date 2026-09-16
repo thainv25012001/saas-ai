@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonLink } from "@/components/ui/Button";
 import { Card, CardBody, CardFooter, CardHeader } from "@/components/ui/Card";
 import { Field } from "@/components/ui/Field";
+import { ModelPicker } from "@/components/agents/ModelPicker";
 import { Input, Select } from "@/components/ui/Input";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { LoadingState } from "@/components/ui/Spinner";
@@ -15,31 +16,16 @@ import {
   AgentDocument,
   AgentStatus,
   DeleteAgentDocument,
+  ProviderModelsDocument,
   UpdateAgentConfigDocument,
   UpdateAgentDocument,
 } from "@/graphql/generated";
 import { agentStatusLabel, agentStatusTone } from "@/lib/agent-status";
 import { useAuth } from "@/lib/auth";
+import { PROVIDERS, modelFieldHelp, providerLabel } from "@/lib/providers";
 import { firstGraphQLError } from "@/lib/graphql-errors";
 
 const STATUSES: AgentStatus[] = ["DRAFT", "ACTIVE", "DISABLED"];
-// Mirrors `app/llm/registry.KNOWN_PROVIDERS`, which is what the API now
-// validates against. `fake` belongs here: `DEFAULT_LLM_PROVIDER` is `fake`
-// out of the box, so every agent created by a fresh clone has
-// `provider="fake"` -- without it in this list the select rendered blank for
-// exactly those agents, and a user who touched the dropdown could never put
-// it back.
-const PROVIDERS = ["fake", "openai", "anthropic"];
-
-// Mirrors `MODEL_PRICING` in `apps/api/app/llm/pricing.py`: the models the API
-// can both run and cost. The input stays free text -- the API validates the
-// model per provider -- but a datalist makes a valid id guessable instead of
-// something you have to already know.
-const MODEL_SUGGESTIONS: Record<string, string[]> = {
-  fake: ["fake-1"],
-  openai: ["gpt-4o-mini", "gpt-4o"],
-  anthropic: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
-};
 
 export default function AgentDetailPage({
   params,
@@ -64,8 +50,24 @@ export default function AgentDetailPage({
 
   const [name, setName] = useState("");
   const [status, setStatus] = useState<AgentStatus>("DRAFT");
-  const [provider, setProvider] = useState(PROVIDERS[0]);
+  // Empty until the effect below seeds it from the agent, and explicitly
+  // `string` because `PROVIDERS` is a const tuple whose element type would
+  // otherwise narrow this and reject the agent's own provider. Seeding it with
+  // `PROVIDERS[0]` instead would make the query below fire once for "fake" and
+  // throw the answer away before re-firing for the provider the agent is
+  // actually on.
+  const [provider, setProvider] = useState<string>("");
   const [model, setModel] = useState("");
+
+  // Re-runs whenever the provider dropdown changes, so the model list always
+  // belongs to the provider actually selected rather than the one the agent was
+  // loaded with.
+  const [modelsResult] = useQuery({
+    query: ProviderModelsDocument,
+    variables: { provider },
+    pause: loading || !user || !provider,
+  });
+
   const [temperature, setTemperature] = useState(0.3);
   const [maxTokens, setMaxTokens] = useState(1024);
   const [agentSaved, setAgentSaved] = useState(false);
@@ -202,13 +204,13 @@ export default function AgentDetailPage({
           <CardBody className="space-y-4">
             <Field
               label="Provider"
-              description="`fake` answers offline with a canned reply and costs nothing — useful for wiring, useless for real answers. Switch to openai or anthropic once the matching API key is set."
+              description="Fake answers offline with a canned reply and costs nothing — useful for wiring, useless for real answers. Switch to OpenAI, Anthropic or OpenRouter once the matching API key is set. OpenRouter models ending in `:free` cost nothing but are rate limited."
             >
               {(control) => (
                 <Select {...control} value={provider} onChange={(e) => setProvider(e.target.value)}>
                   {PROVIDERS.map((option) => (
                     <option key={option} value={option}>
-                      {option}
+                      {providerLabel(option)}
                     </option>
                   ))}
                 </Select>
@@ -217,24 +219,18 @@ export default function AgentDetailPage({
 
             <Field
               label="Model"
-              description="Must be a model the selected provider offers. Suggestions come from the API's pricing table."
+              description={modelFieldHelp(provider)}
               required
             >
               {(control) => (
-                <>
-                  <Input
-                    {...control}
-                    type="text"
-                    list={`${control.id}-models`}
-                    value={model}
-                    onChange={(e) => setModel(e.target.value)}
-                  />
-                  <datalist id={`${control.id}-models`}>
-                    {(MODEL_SUGGESTIONS[provider] ?? []).map((option) => (
-                      <option key={option} value={option} />
-                    ))}
-                  </datalist>
-                </>
+                <ModelPicker
+                  {...control}
+                  value={model}
+                  onChange={setModel}
+                  options={modelsResult.data?.providerModels ?? []}
+                  fetching={modelsResult.fetching}
+                  failed={modelsResult.error !== undefined}
+                />
               )}
             </Field>
 

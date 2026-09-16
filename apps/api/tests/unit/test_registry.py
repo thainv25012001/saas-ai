@@ -40,3 +40,37 @@ def test_openai_without_a_key_is_a_configuration_error(monkeypatch):
     reset_providers()
     with pytest.raises(LLMConfigurationError):
         get_provider("openai")
+
+
+def test_openrouter_without_a_key_is_a_configuration_error(monkeypatch):
+    from app.llm.errors import LLMConfigurationError
+
+    base = get_settings()
+    no_key_settings = base.model_copy(update={"openrouter_api_key": None})
+    monkeypatch.setattr("app.llm.registry.get_settings", lambda: no_key_settings)
+    reset_providers()
+    with pytest.raises(LLMConfigurationError):
+        get_provider("openrouter")
+
+
+def test_openrouter_resolves_to_its_own_provider_pointed_at_openrouter(monkeypatch):
+    """OpenRouter speaks OpenAI's wire format, so it reuses that adapter -- but
+    it must stay a distinct provider with its own name and base URL, or an
+    agent configured for OpenRouter would silently bill an OpenAI key."""
+    base = get_settings()
+    keyed = base.model_copy(update={"openrouter_api_key": "test-key"})
+    monkeypatch.setattr("app.llm.registry.get_settings", lambda: keyed)
+    reset_providers()
+
+    provider = get_provider("openrouter")
+
+    assert provider.name == "openrouter"
+    assert "openrouter.ai" in str(provider._client.base_url)  # noqa: SLF001
+
+
+def test_the_openrouter_default_model_is_a_free_one():
+    """The point of adding this provider was the free tier. A default that
+    is not `:free` spends real money on an agent created with no model set."""
+    from app.llm.registry import DEFAULT_MODELS
+
+    assert DEFAULT_MODELS["openrouter"].endswith(":free")

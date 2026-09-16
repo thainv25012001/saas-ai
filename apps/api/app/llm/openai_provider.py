@@ -62,13 +62,32 @@ _NO_TEXT_EXPECTED_STOP_REASONS = frozenset({"tool_calls", "function_call", "leng
 
 
 class OpenAIProvider:
-    name = "openai"
-
-    def __init__(self, api_key: str) -> None:
-        self._client = openai.AsyncOpenAI(api_key=api_key)
+    def __init__(self, api_key: str, base_url: str | None = None, name: str = "openai") -> None:
+        # `base_url` and `name` are parameters rather than constants because
+        # several vendors serve this exact wire format (OpenRouter today, see
+        # `app/llm/openrouter_provider.py`). A subclass overriding only those
+        # two inherits the stream loop and -- more importantly -- the error
+        # mapping below, instead of copying a second, slowly diverging version
+        # of it. `name` is an instance attribute for the same reason; the
+        # `LLMProvider` Protocol only requires that `provider.name` reads as a
+        # `str`, not that it is declared on the class.
+        self.name = name
+        self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     def capabilities(self, model: str) -> ModelCapabilities:
         return _CAPABILITIES
+
+    def _extra_body(self) -> dict[str, object] | None:
+        """Vendor-specific request body fields, merged in by the SDK.
+
+        `None` for OpenAI itself, which rejects body fields it does not know.
+        A hook rather than each subclass rebuilding the `create(...)` kwargs:
+        those two call sites below are written out literally to keep the SDK's
+        `stream=`-overload resolution (see the comment there), and a subclass
+        spreading its own `dict` over them would erase exactly the typing that
+        is written out to preserve.
+        """
+        return None
 
     def _messages(self, request: CompletionRequest) -> list[ChatCompletionMessageParam]:
         # OpenAI has no top-level system parameter — the mirror image of
@@ -143,6 +162,7 @@ class OpenAIProvider:
                     stream=True,
                     stream_options={"include_usage": True},
                     temperature=request.temperature,
+                    extra_body=self._extra_body(),
                 )
             else:
                 stream = await self._client.chat.completions.create(
@@ -151,6 +171,7 @@ class OpenAIProvider:
                     max_tokens=max_tokens,
                     stream=True,
                     stream_options={"include_usage": True},
+                    extra_body=self._extra_body(),
                 )
 
             yield MessageStartEvent(model=request.model)
