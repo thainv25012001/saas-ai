@@ -15,7 +15,6 @@ type ModelPickerProps = {
   fetching?: boolean;
   /** The model list could not be loaded at all. */
   failed?: boolean;
-  disabled?: boolean;
   // Exactly what `Field` hands its control, not the full element attributes:
   // this renders EITHER a select or an input, and select-typed event handlers
   // do not fit an input.
@@ -48,7 +47,6 @@ export function ModelPicker({
   onChange,
   fetching = false,
   failed = false,
-  disabled = false,
   ...rest
 }: ModelPickerProps) {
   if (failed) {
@@ -69,14 +67,13 @@ export function ModelPicker({
   // paid one, or anything set before this picker existed. Without this entry
   // the select would show a DIFFERENT model as selected and quietly repoint the
   // agent on the next save.
-  const isListed = options.some((option) => option.id === value);
-  const unlisted = value !== "" && !isListed;
+  const unlisted = value !== "" && !options.some((option) => option.id === value);
 
   return (
     <Select
       {...rest}
       value={value}
-      disabled={fetching || disabled}
+      disabled={fetching}
       onChange={(e) => onChange(e.target.value)}
       // The closed control clips the longer OpenRouter labels. Hover is the
       // only way back to the id they were cut from.

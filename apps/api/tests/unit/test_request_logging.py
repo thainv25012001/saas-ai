@@ -129,20 +129,19 @@ class TestProbesThatPassAreNotLogged:
 
         assert [entry for entry in captured_logs if entry["event"] == "request"] == []
 
-    async def test_readiness_that_is_degraded_is_logged(self, client, captured_logs, monkeypatch):
+    async def test_readiness_that_is_degraded_is_logged(
+        self, client, captured_logs, healthy_dependencies, monkeypatch
+    ):
         """A degraded readiness answers 200 — the body, not the status, is the
         verdict — so status alone cannot decide this. It is the one failure
         the suppression could swallow, which is why it is pinned here."""
         from app.core import redis as redis_module
-        from app.db import session as session_module
-
-        async def ok() -> bool:
-            return True
 
         async def down() -> bool:
             return False
 
-        monkeypatch.setattr(session_module, "check_database", ok)
+        # Everything healthy from the fixture, then exactly one thing knocked
+        # over: the later `setattr` wins and is undone first.
         monkeypatch.setattr(redis_module, "check_redis", down)
 
         response = await client.get("/health/ready")

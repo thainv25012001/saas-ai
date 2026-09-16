@@ -29,6 +29,20 @@ _PROBE_PATHS = frozenset({"/health", "/health/ready"})
 logger = get_logger(__name__)
 
 
+def _probe_passed(request: Request, status: int) -> bool:
+    """A probe request that reported everything healthy.
+
+    Two ways to fail, and both must still be logged. The status code catches a
+    probe that errored outright. It does not catch a degraded readiness, which
+    answers 200 with `"status":"degraded"` in the body — so `ready()` records
+    its own verdict on the request scope, which the route and the access-log
+    middleware share.
+    """
+    if request.url.path not in _PROBE_PATHS or status >= 400:
+        return False
+    return not getattr(request.state, "probe_failed", False)
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
@@ -53,19 +67,6 @@ def create_app() -> FastAPI:
         token = request_id_var.set(request_id)
         started = time.perf_counter()
 
-        def probe_passed(status: int) -> bool:
-            """A probe request that reported everything healthy.
-
-            Two ways to fail, and both must still be logged. The status code
-            catches a probe that errored outright. It does not catch a
-            degraded readiness, which answers 200 with `"status":"degraded"`
-            in the body — so `ready()` records its own verdict on the request
-            scope, which the route and this middleware share.
-            """
-            if request.url.path not in _PROBE_PATHS or status >= 400:
-                return False
-            return not getattr(request.state, "probe_failed", False)
-
         def log(status: int) -> None:
             """One structured access line per request, except a probe that
             passed.
@@ -80,7 +81,7 @@ def create_app() -> FastAPI:
             carry no id and so correlate with nothing - which is the whole
             point of having the id.
             """
-            if probe_passed(status):
+            if _probe_passed(request, status):
                 return
             logger.info(
                 "request",

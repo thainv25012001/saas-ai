@@ -4,6 +4,10 @@ from app.llm.base import LLMProvider
 from app.llm.errors import LLMConfigurationError
 from app.llm.fake_provider import FakeProvider
 
+# Eager, unlike the provider imports in `_build`: this module holds no SDK, only
+# the OpenRouter model list and the ids that go with it.
+from app.llm.openrouter_models import FALLBACK_MODELS
+
 _PROVIDERS: dict[str, LLMProvider] = {}
 
 # Public, because it is the single source of truth for "is this a provider
@@ -22,18 +26,25 @@ DEFAULT_MODELS: dict[str, str] = {
     "anthropic": "claude-opus-5",
     # OpenRouter's reason for existing here is its free tier, so the default
     # must be a `:free` id -- an agent created without an explicit model must
-    # not start spending.
-    #
-    # Chosen by running this exact adapter against the live API on 2026-09-16,
-    # not from the model list alone, because many free ids are REASONING
-    # models: OpenRouter returns their thinking on a `reasoning` field the
-    # OpenAI-compatible `content` never carries, so they answer a one-sentence
-    # question with an empty string, `finish_reason="length"` and the entire
-    # output budget spent (`z-ai/glm-5.2:free` took 80s to return nothing).
-    # This one replies in ~1.3s with plain prose. Free ids are also retired
-    # without notice, so treat it as a value to re-check, not assume.
-    "openrouter": "google/gemma-4-31b-it:free",
+    # not start spending. Taken from `FALLBACK_MODELS` rather than repeated as
+    # a literal: both are "an id verified to answer", both are retired without
+    # notice, and two copies means retiring one leaves the other pointing at a
+    # dead endpoint. That module documents how the list was verified.
+    "openrouter": FALLBACK_MODELS[0].id,
 }
+
+
+def require_known_provider(name: str) -> None:
+    """Reject a provider name nothing here can serve.
+
+    Public because `app/llm/catalog.py` asks the same question of the same
+    tuple: one wording of the error -- which the integration tests assert on
+    literally -- and one place to change when a provider is added.
+    """
+    if name not in KNOWN_PROVIDERS:
+        raise ValidationError(
+            f"unknown provider '{name}'; expected one of {', '.join(KNOWN_PROVIDERS)}"
+        )
 
 
 def get_provider(name: str) -> LLMProvider:
@@ -42,10 +53,7 @@ def get_provider(name: str) -> LLMProvider:
     Cached because each real provider holds an SDK client with its own connection
     pool; building one per request would leak sockets under load.
     """
-    if name not in KNOWN_PROVIDERS:
-        raise ValidationError(
-            f"unknown provider '{name}'; expected one of {', '.join(KNOWN_PROVIDERS)}"
-        )
+    require_known_provider(name)
 
     cached = _PROVIDERS.get(name)
     if cached is not None:

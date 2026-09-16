@@ -43,6 +43,14 @@ class ModelOption:
 # Used only when the live fetch fails. Each was run against the live API on
 # 2026-09-16 and answered in prose in under two seconds. Deliberately short: it
 # is a safety net, not a mirror of the roster.
+#
+# Verified by running the adapter, not read off the model list, because many
+# free ids are REASONING models: OpenRouter returns their thinking on a
+# `reasoning` field the OpenAI-compatible `content` never carries, so they
+# answer a one-sentence question with an empty string, `finish_reason="length"`
+# and the whole output budget spent (`z-ai/glm-5.2:free` took 80s to return
+# nothing). The first entry is also `registry.DEFAULT_MODELS["openrouter"]`, so
+# it is the one to re-verify first -- free ids are retired without notice.
 FALLBACK_MODELS: tuple[ModelOption, ...] = (
     ModelOption("google/gemma-4-31b-it:free", "Gemma 4 31B", 262_144),
     ModelOption("nex-agi/nex-n2.5-mini:free", "Nex N2.5 Mini", 262_144),
@@ -50,6 +58,14 @@ FALLBACK_MODELS: tuple[ModelOption, ...] = (
     ModelOption("poolside/laguna-xs-2.1:free", "Laguna XS 2.1", 262_144),
 )
 
+# How long a failed refresh is honoured before trying OpenRouter again. Short,
+# because it only delays noticing that OpenRouter came back -- but not zero:
+# without it every request during an outage pays the full `_FETCH_TIMEOUT_SECONDS`
+# inside the handler to rediscover the same failure.
+_FAILURE_TTL_SECONDS = 60.0
+
+# `(expires_at, options)`. Expiry rather than a write timestamp so a successful
+# fetch and a failed one can be held for different lengths of time.
 _cache: tuple[float, list[ModelOption]] | None = None
 
 
@@ -127,12 +143,12 @@ async def _fetch_payload() -> object:
 async def get_free_models() -> list[ModelOption]:
     """The offered models, cached for `CACHE_TTL_SECONDS`.
 
-    Falls back to `FALLBACK_MODELS` whenever the live list cannot be obtained or
-    turns out to be empty -- an empty dropdown is a form that cannot be saved,
-    which is a worse failure than a short, slightly stale list.
+    A refresh that fails or comes back empty serves the last list OpenRouter
+    gave us, or `FALLBACK_MODELS` if it never gave us one -- an empty dropdown
+    is a form that cannot be saved, which is a worse failure than a stale list.
     """
     global _cache
-    if _cache is not None and _now() - _cache[0] < CACHE_TTL_SECONDS:
+    if _cache is not None and _now() < _cache[0]:
         return _cache[1]
 
     try:
@@ -142,9 +158,14 @@ async def get_free_models() -> list[ModelOption]:
         options = []
 
     if not options:
-        # Not cached: a fallback is a symptom, and caching it would keep serving
-        # the stub for an hour after OpenRouter came back.
-        return list(FALLBACK_MODELS)
+        # Prefer the last list OpenRouter actually served: real data an hour old
+        # beats a literal written months ago. Held for `_FAILURE_TTL_SECONDS`
+        # rather than the full TTL, so recovery is noticed within a minute --
+        # and rather than not at all, so an outage costs one timed-out fetch a
+        # minute instead of one on every request.
+        served = _cache[1] if _cache is not None else list(FALLBACK_MODELS)
+        _cache = (_now() + _FAILURE_TTL_SECONDS, served)
+        return served
 
-    _cache = (_now(), options)
+    _cache = (_now() + CACHE_TTL_SECONDS, options)
     return options

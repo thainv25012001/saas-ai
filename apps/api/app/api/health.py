@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -19,8 +20,14 @@ async def ready(request: Request) -> dict[str, Any]:
     from app.core import redis as redis_module
     from app.db import session as session_module
 
-    database_ok = await session_module.check_database()
-    redis_ok = await redis_module.check_redis()
+    # Concurrently: the two checks share nothing, and this path is polled every
+    # few seconds by the compose healthcheck, whose own timeout their sum has to
+    # fit inside. Both swallow their exceptions and answer with a bool, so there
+    # is nothing here for `gather` to re-raise.
+    database_ok, redis_ok = await asyncio.gather(
+        session_module.check_database(),
+        redis_module.check_redis(),
+    )
     dependencies_ok = database_ok and redis_ok
     # The access-log middleware drops the line for a probe that passed (see
     # `_probe_passed` in app.main). It only sees the status code, and a

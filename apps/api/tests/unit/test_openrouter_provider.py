@@ -6,12 +6,12 @@ itself, and one end-to-end smoke test proving the inherited loop really does
 run when driven through this subclass.
 """
 
-from unittest.mock import AsyncMock, MagicMock
-
 import pytest
 
 from app.llm.openrouter_provider import OPENROUTER_BASE_URL, OpenRouterProvider
 from app.llm.types import CompletionRequest, Message
+
+from ._llm_stubs import chunk, streaming
 
 pytestmark = pytest.mark.anyio
 
@@ -26,33 +26,11 @@ def _request() -> CompletionRequest:
 
 
 def _chunk(text=None, usage=None, finish_reason=None):
-    chunk = MagicMock()
-    if usage is None:
-        chunk.usage = None
-    else:
-        chunk.usage = MagicMock(prompt_tokens=usage[0], completion_tokens=usage[1])
-    if text is None and finish_reason is None:
-        chunk.choices = []
-    else:
-        choice = MagicMock()
-        choice.delta.content = text
-        choice.finish_reason = finish_reason
-        chunk.choices = [choice]
-    return chunk
+    return chunk(text=text, usage=usage, finish_reason=finish_reason)
 
 
 def _provider_with(chunks) -> OpenRouterProvider:
-    def _aiter(**_kwargs):
-        async def gen():
-            for chunk in chunks:
-                yield chunk
-
-        return gen()
-
-    provider = OpenRouterProvider(api_key="test-key")
-    provider._client = MagicMock()  # noqa: SLF001
-    provider._client.chat.completions.create = AsyncMock(side_effect=_aiter)  # noqa: SLF001
-    return provider
+    return streaming(OpenRouterProvider(api_key="test-key"), chunks)
 
 
 def test_requests_go_to_openrouter_not_openai():

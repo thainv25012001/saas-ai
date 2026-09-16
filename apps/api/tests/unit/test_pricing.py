@@ -48,6 +48,28 @@ def test_every_default_model_is_priced():
     assert unpriced == []
 
 
+def test_every_offered_model_is_priced():
+    """`app/llm/catalog.py` hand-maintains the models the dashboard offers, and
+    its own comment says it mirrors this table -- but the model picker is a
+    `<select>`, so anything listed there is a model a user can actually save.
+    Without this, dropping a price leaves the dropdown offering a model whose
+    `cost_usd` lands as NULL on every `usage_events` row."""
+    from app.llm.catalog import _STATIC_MODELS
+
+    offered = [option.id for options in _STATIC_MODELS.values() for option in options]
+    assert [model for model in offered if estimate_cost(model, Usage()) is None] == []
+
+
+def test_every_known_provider_has_a_catalog():
+    """A provider in `KNOWN_PROVIDERS` that no catalog answers for renders an
+    empty dropdown -- a form that cannot be saved, with nothing in the logs to
+    say why. Cheaper to catch here than to explain there."""
+    from app.llm.catalog import _LIVE_CATALOGS, _STATIC_MODELS
+    from app.llm.registry import KNOWN_PROVIDERS
+
+    assert set(KNOWN_PROVIDERS) == set(_STATIC_MODELS) | set(_LIVE_CATALOGS)
+
+
 def test_openrouter_free_models_cost_nothing():
     """OpenRouter's free tier charges nothing, and its roster churns often
     enough that a hardcoded table entry per model would go stale. The `:free`

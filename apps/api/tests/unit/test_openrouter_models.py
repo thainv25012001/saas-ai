@@ -130,6 +130,50 @@ async def test_an_empty_upstream_list_falls_back_too(monkeypatch):
     assert await om.get_free_models() == list(om.FALLBACK_MODELS)
 
 
+async def test_a_failed_refresh_serves_the_last_good_list_not_the_stub(monkeypatch):
+    """Real data an hour old beats a literal written months ago. Without this
+    the dropdown shrinks to four hardcoded ids the moment OpenRouter blinks."""
+    payload: dict = {"data": [_entry("vendor/ok:free")]}
+
+    async def _fetch():
+        if payload is None:
+            raise RuntimeError("openrouter is down")
+        return payload
+
+    clock = 1000.0
+    monkeypatch.setattr(om, "_fetch_payload", _fetch)
+    monkeypatch.setattr(om, "_now", lambda: clock)
+    assert [o.id for o in await om.get_free_models()] == ["vendor/ok:free"]
+
+    payload = None
+    clock += om.CACHE_TTL_SECONDS + 1
+    assert [o.id for o in await om.get_free_models()] == ["vendor/ok:free"]
+
+
+async def test_an_outage_is_not_re_dialled_on_every_request(monkeypatch):
+    """The fetch blocks for `_FETCH_TIMEOUT_SECONDS` inside the request handler,
+    so retrying per request means every caller waits out the same timeout to
+    learn the same thing."""
+    calls = 0
+
+    async def _boom():
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("openrouter is down")
+
+    clock = 1000.0
+    monkeypatch.setattr(om, "_fetch_payload", _boom)
+    monkeypatch.setattr(om, "_now", lambda: clock)
+    await om.get_free_models()
+    await om.get_free_models()
+    assert calls == 1
+
+    # ...but the outage is re-checked soon enough to notice recovery.
+    clock += om._FAILURE_TTL_SECONDS + 1
+    await om.get_free_models()
+    assert calls == 2
+
+
 def test_every_fallback_model_is_free():
     """The fallback is hardcoded, so nothing but this test stops a paid id
     being pasted into it."""

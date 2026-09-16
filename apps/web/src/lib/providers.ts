@@ -22,3 +22,19 @@ const LABELS: Record<string, string> = {
 export function providerLabel(provider: string): string {
   return LABELS[provider] ?? provider;
 }
+
+/**
+ * What the Model field says about a provider, keyed by provider id rather than
+ * branched on in the form: the form asks the same question of every provider,
+ * and a new one is a row here rather than another arm of a ternary in the page.
+ */
+const MODEL_HELP: Record<string, string> = {
+  openrouter:
+    "Every model OpenRouter currently serves for free. The list is fetched from OpenRouter, so it follows their roster.",
+};
+
+const DEFAULT_MODEL_HELP = "The models this app can both run and cost for the selected provider.";
+
+export function modelFieldHelp(provider: string): string {
+  return MODEL_HELP[provider] ?? DEFAULT_MODEL_HELP;
+}

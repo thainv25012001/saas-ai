@@ -13,6 +13,8 @@ from app.llm.errors import (
 from app.llm.openai_provider import OpenAIProvider
 from app.llm.types import CompletionRequest, Message
 
+from ._llm_stubs import chunk, streaming
+
 pytestmark = pytest.mark.anyio
 
 
@@ -28,49 +30,11 @@ def _request(**overrides) -> CompletionRequest:
 
 
 def _chunk(text=None, usage=None, finish_reason=None):
-    chunk = MagicMock()
-    if usage is None:
-        chunk.usage = None
-    else:
-        chunk.usage = MagicMock(prompt_tokens=usage[0], completion_tokens=usage[1])
-    if text is None and finish_reason is None:
-        chunk.choices = []
-    else:
-        choice = MagicMock()
-        choice.delta.content = text
-        choice.finish_reason = finish_reason
-        chunk.choices = [choice]
-    return chunk
+    return chunk(text=text, usage=usage, finish_reason=finish_reason)
 
 
 def _provider_with(chunks):
-    """Stands in for the SDK's `create(..., stream=True)`.
-
-    `AsyncCompletions.create` is a real `async def` — calling it returns a
-    coroutine, and only *awaiting* that coroutine yields the async-iterable
-    stream (verified against the installed SDK: calling it without awaiting
-    produces a bare `coroutine` object with no `__aiter__`). A plain
-    `MagicMock` whose `side_effect` returns an async generator directly would
-    make `await create(...)` raise `TypeError: object async_generator can't
-    be used in 'await' expression` — which would only be caught by writing
-    provider code that skips the `await`, and that code would then be unable
-    to iterate the real SDK's coroutine return value in production. `AsyncMock`
-    reproduces the real shape: calling it returns a coroutine, and awaiting
-    that coroutine runs `side_effect` and returns the async generator.
-    """
-
-    def _aiter(**_kwargs):
-        async def gen():
-            for chunk in chunks:
-                yield chunk
-
-        return gen()
-
-    provider = OpenAIProvider(api_key="test-key")
-    create = AsyncMock(side_effect=_aiter)
-    provider._client = MagicMock()  # noqa: SLF001
-    provider._client.chat.completions.create = create  # noqa: SLF001
-    return provider
+    return streaming(OpenAIProvider(api_key="test-key"), chunks)
 
 
 def _request_object() -> httpx2.Request:

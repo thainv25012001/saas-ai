@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PROVIDERS, providerLabel } from "./providers";
+import { PROVIDERS, modelFieldHelp, providerLabel } from "./providers";
 
 describe("providerLabel", () => {
   it("gives every provider a display name, the way statuses have one", () => {
@@ -24,5 +24,20 @@ describe("providerLabel", () => {
     for (const id of PROVIDERS) {
       expect(providerLabel(id)).not.toBe("");
     }
+  });
+});
+
+describe("modelFieldHelp", () => {
+  it("says where OpenRouter's list comes from, since it is the one that moves", () => {
+    expect(modelFieldHelp("openrouter")).toMatch(/fetched from OpenRouter/);
+  });
+
+  it("describes every other provider without the form branching on its name", () => {
+    // The point of the lookup: adding a provider must not mean adding an arm
+    // to a ternary in the page.
+    for (const id of PROVIDERS) {
+      expect(modelFieldHelp(id)).not.toBe("");
+    }
+    expect(modelFieldHelp("mistral")).toBe(modelFieldHelp("openai"));
   });
 });

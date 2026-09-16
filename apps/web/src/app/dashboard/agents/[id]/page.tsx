@@ -22,7 +22,7 @@ import {
 } from "@/graphql/generated";
 import { agentStatusLabel, agentStatusTone } from "@/lib/agent-status";
 import { useAuth } from "@/lib/auth";
-import { PROVIDERS, providerLabel } from "@/lib/providers";
+import { PROVIDERS, modelFieldHelp, providerLabel } from "@/lib/providers";
 import { firstGraphQLError } from "@/lib/graphql-errors";
 
 const STATUSES: AgentStatus[] = ["DRAFT", "ACTIVE", "DISABLED"];
@@ -50,9 +50,13 @@ export default function AgentDetailPage({
 
   const [name, setName] = useState("");
   const [status, setStatus] = useState<AgentStatus>("DRAFT");
-  // Explicitly `string`: `PROVIDERS` is a const tuple, so inference would
-  // narrow this to the literal "fake" and reject the agent's own provider.
-  const [provider, setProvider] = useState<string>(PROVIDERS[0]);
+  // Empty until the effect below seeds it from the agent, and explicitly
+  // `string` because `PROVIDERS` is a const tuple whose element type would
+  // otherwise narrow this and reject the agent's own provider. Seeding it with
+  // `PROVIDERS[0]` instead would make the query below fire once for "fake" and
+  // throw the answer away before re-firing for the provider the agent is
+  // actually on.
+  const [provider, setProvider] = useState<string>("");
   const [model, setModel] = useState("");
 
   // Re-runs whenever the provider dropdown changes, so the model list always
@@ -215,11 +219,7 @@ export default function AgentDetailPage({
 
             <Field
               label="Model"
-              description={
-                provider === "openrouter"
-                  ? "Every model OpenRouter currently serves for free. The list is fetched from OpenRouter, so it follows their roster."
-                  : "The models this app can both run and cost for the selected provider."
-              }
+              description={modelFieldHelp(provider)}
               required
             >
               {(control) => (
