@@ -112,6 +112,13 @@ def _pack_sentences(
     worth of overlap, but never backs up past the start of the chunk that
     was just closed, which is what guarantees forward progress even when a
     single oversized sentence fills a whole chunk by itself.
+
+    The back-off starts its search from `k = j` -- i.e. from *zero* overlap
+    -- and only retreats while the accumulated overlap is still short of
+    `overlap_target`. Starting from `j - 1` instead (one sentence already
+    included) would make the minimum possible overlap "one whole sentence"
+    no matter how small `overlap_ratio` is, including `0.0`, which would
+    make the ratio argument meaningless at its low end.
     """
     spans: list[tuple[int, int]] = []
     n = len(sentences)
@@ -132,7 +139,7 @@ def _pack_sentences(
             break
 
         overlap_target = overlap_ratio * target_tokens
-        back = j - 1
+        back = j
         while back > idx and _approx_tokens(text[sentences[back][0] : end]) < overlap_target:
             back -= 1
         idx = back if back > idx else j
@@ -141,7 +148,19 @@ def _pack_sentences(
 
 def _page_for_offset(pages: list[ExtractedPage], offset: int) -> int | None:
     """Which page (1-based) an absolute offset into the joined text falls
-    in, walking the same `PAGE_SEPARATOR`-joined layout `extract()` built."""
+    in, walking the same `PAGE_SEPARATOR`-joined layout `extract()` built.
+
+    Seam rule, pinned deliberately: `offset == end` (one past a page's last
+    character, i.e. the position where its trailing separator begins) is
+    attributed to that page, not the next one -- `<=`, not `<`. Any offset
+    further into the separator falls through to the next page. In practice
+    a chunk's `char_start` never lands inside the separator itself (sentence
+    splitting folds the separator's whitespace into the sentence before
+    it), so the only offset this choice actually governs is the exact
+    boundary case, and treating it as "still on the earlier page" matches
+    how `char_end` elsewhere in this module is an exclusive, one-past-the-
+    end bound that still names the span it closes.
+    """
     if not pages:
         return None
     cursor = 0
@@ -160,9 +179,11 @@ def chunk_document(
     overlap_ratio: float = 0.15,
 ) -> list[Chunk]:
     text = doc.text
-    if not text.strip():
-        return []
-
+    # No separate "is the whole document blank" guard: a blank `text` has
+    # exactly one section (the whole-document fallback in `_split_sections`)
+    # whose text is also blank, and the per-section blank check below always
+    # fires on that same section, so a dedicated outer check can never catch
+    # anything the inner one doesn't already catch.
     chunks: list[Chunk] = []
     for section in _split_sections(text):
         section_text = text[section.start : section.end]

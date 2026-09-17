@@ -7,7 +7,12 @@ def _doc(text: str, pages: list[ExtractedPage] | None = None) -> ExtractedDocume
 
 
 def _sentence(i: int) -> str:
-    return f"This is sentence number {i} with a few extra padding words."
+    # The unique part is at the very end, right before the period: tests
+    # that check "does chunk n's tail reappear in chunk n+1" need a tail
+    # that could only have come from *this* sentence, not one that every
+    # sentence shares (a shared suffix would make such a test pass whether
+    # or not real overlap exists).
+    return f"This is a padding sentence that ends with the unique marker zzq{i}."
 
 
 def test_empty_input_produces_zero_chunks():
@@ -28,26 +33,71 @@ def test_a_short_document_produces_exactly_one_chunk():
 
 def test_char_offsets_of_every_chunk_reproduce_its_content():
     """The offset arithmetic that Task 7's citations depend on. Overlap and
-    sentence-boundary back-off are exactly where this goes subtly wrong."""
-    text = " ".join(_sentence(i) for i in range(40))
+    sentence-boundary back-off are exactly where this goes subtly wrong.
+
+    Deliberately does NOT derive the expected offsets from `chunk.metadata`
+    itself (that was the bug in an earlier version of this test: comparing
+    `text[start:end]` against `content` when both `start`/`end` and
+    `content` came from the same two variables is a tautology that no
+    implementation bug could ever fail). Instead, the expected offsets are
+    computed independently from the test's own knowledge of how the fixture
+    text was assembled -- each sentence's exact text is unique (via its
+    `zzq{i}` marker) and locatable with `str.index`, and the fixture joins
+    sentences with a single space, so a chunk's end must land exactly at
+    the start of the sentence following its last one (or at `len(text)` if
+    it contains the final sentence).
+    """
+    sentences = [_sentence(i) for i in range(40)]
+    text = " ".join(sentences)
     doc = _doc(text)
+    # Independently located, not read back from anything chunk.py computed.
+    sentence_starts = [text.index(sentences[i]) for i in range(len(sentences))]
+
     chunks = chunk_document(doc, target_tokens=50, overlap_ratio=0.2)
     assert len(chunks) > 1
+
     for chunk in chunks:
-        start = chunk.metadata["char_start"]
-        end = chunk.metadata["char_end"]
-        assert doc.text[start:end] == chunk.content
+        contained = [i for i, s in enumerate(sentences) if s in chunk.content]
+        assert contained, "every chunk must contain at least one whole sentence"
+        first_idx, last_idx = min(contained), max(contained)
+        expected_start = sentence_starts[first_idx]
+        expected_end = sentence_starts[last_idx + 1] if last_idx + 1 < len(sentences) else len(text)
+        assert chunk.metadata["char_start"] == expected_start
+        assert chunk.metadata["char_end"] == expected_end
+        assert doc.text[expected_start:expected_end] == chunk.content
+
+    assert chunks[-1].metadata["char_end"] == len(text)
+    starts = [chunk.metadata["char_start"] for chunk in chunks]
+    ends = [chunk.metadata["char_end"] for chunk in chunks]
+    assert all(a < b for a, b in zip(starts, starts[1:], strict=False))
+    assert all(a < b for a, b in zip(ends, ends[1:], strict=False))
 
 
 def test_consecutive_chunks_overlap_by_roughly_the_requested_ratio():
+    """Each sentence's tail is unique (see `_sentence`), so this can only
+    pass if a whole trailing sentence genuinely reappears -- see
+    `test_zero_overlap_ratio_produces_no_overlap` for the falsifying half of
+    this proof: the same fixture at `overlap_ratio=0.0` finds no overlap."""
     text = " ".join(_sentence(i) for i in range(40))
     chunks = chunk_document(_doc(text), target_tokens=50, overlap_ratio=0.2)
     assert len(chunks) > 1
     for previous, current in zip(chunks, chunks[1:], strict=False):
         # the tail of the previous chunk (a whole trailing sentence) must
         # reappear verbatim at the head of the next one.
-        tail = previous.content[-20:]
+        tail = previous.content[-30:]
         assert tail in current.content
+
+
+def test_zero_overlap_ratio_produces_no_overlap():
+    """The falsifying half of the overlap proof: with the exact same
+    fixture as the test above, asking for zero overlap must actually
+    produce none -- no previous chunk's tail sentence should reappear."""
+    text = " ".join(_sentence(i) for i in range(40))
+    chunks = chunk_document(_doc(text), target_tokens=50, overlap_ratio=0.0)
+    assert len(chunks) > 1
+    for previous, current in zip(chunks, chunks[1:], strict=False):
+        tail = previous.content[-30:]
+        assert tail not in current.content
 
 
 def test_no_chunk_ends_mid_sentence():
@@ -125,6 +175,24 @@ def test_page_metadata_names_the_page_a_chunk_came_from():
     assert len(chunks) == 2
     assert chunks[0].metadata["page"] == 1
     assert chunks[1].metadata["page"] == 2
+
+
+def test_page_for_offset_at_the_exact_page_separator_seam():
+    """Pins the seam rule documented on `_page_for_offset`: an offset that
+    lands exactly one-past a page's last character (where its trailing
+    `PAGE_SEPARATOR` begins) belongs to that page, not the next one; an
+    offset anywhere inside the separator itself belongs to the next page."""
+    from app.rag.chunk import _page_for_offset
+    from app.rag.extract import PAGE_SEPARATOR
+
+    pages = [ExtractedPage(number=1, text="AAAAA"), ExtractedPage(number=2, text="BBBBB")]
+    page_one_end = len(pages[0].text)  # 5: one past "AAAAA"'s last character
+    separator_interior = page_one_end + 1  # inside the "\n\n" gap
+    page_two_start = page_one_end + len(PAGE_SEPARATOR)  # 7: "BBBBB" begins here
+
+    assert _page_for_offset(pages, page_one_end) == 1
+    assert _page_for_offset(pages, separator_interior) == 2
+    assert _page_for_offset(pages, page_two_start) == 2
 
 
 def test_no_page_metadata_when_pages_are_unknown():
