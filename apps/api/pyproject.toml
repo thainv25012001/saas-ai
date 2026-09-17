@@ -18,6 +18,7 @@ dependencies = [
     "email-validator>=2.2",
     "strawberry-graphql[fastapi]>=0.248",
     "anthropic>=0.40",
+    "pgvector>=0.3",
     # Already in the closure via the OpenAI and Anthropic SDKs; declared
     # explicitly because `app/llm/openrouter_models.py` imports it directly
     # rather than relying on a transitive dependency staying put.

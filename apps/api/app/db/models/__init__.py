@@ -8,6 +8,12 @@ from app.db.models.conversation import (
     UsageEvent,
     UsageKind,
 )
+from app.db.models.document import (
+    Document,
+    DocumentChunk,
+    DocumentSourceType,
+    DocumentStatus,
+)
 from app.db.models.membership import Membership, MembershipRole
 from app.db.models.organization import Organization
 from app.db.models.prompt import Prompt, PromptVersion
@@ -27,6 +33,10 @@ __all__ = [
     "ConversationChannel",
     "ConversationMessage",
     "ConversationStatus",
+    "Document",
+    "DocumentChunk",
+    "DocumentSourceType",
+    "DocumentStatus",
     "Membership",
     "MembershipRole",
     "Message",

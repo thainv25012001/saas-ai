@@ -84,6 +84,35 @@ async def test_tenant_tables_have_rls_enabled_with_a_tenant_isolation_policy(
     assert policy_count.scalar_one() == 1
 
 
+@pytest.mark.parametrize("table", ["documents", "document_chunks"])
+async def test_document_tables_have_rls_enabled_with_a_tenant_isolation_policy(
+    owner_connection, table
+):
+    """Same invariant as the agents/prompts block above, extended to the two
+    tables Task 2 adds. document_chunks in particular is the table whose FK
+    checks bypass RLS entirely (see DocumentService.replace_chunks), so RLS
+    being enabled here is one layer of defence among several, not the only
+    one -- but it must still be present."""
+    enabled = await owner_connection.execute(
+        text(
+            "SELECT relrowsecurity FROM pg_class "
+            "WHERE relname = :table AND relnamespace = 'public'::regnamespace"
+        ),
+        {"table": table},
+    )
+    assert enabled.scalar_one() is True
+
+    policy_count = await owner_connection.execute(
+        text(
+            "SELECT COUNT(*) FROM pg_policy "
+            "JOIN pg_class ON pg_class.oid = pg_policy.polrelid "
+            "WHERE pg_class.relname = :table AND pg_policy.polname = 'tenant_isolation'"
+        ),
+        {"table": table},
+    )
+    assert policy_count.scalar_one() == 1
+
+
 async def test_readiness_reports_dependencies_up(client):
     response = await client.get("/health/ready")
     assert response.json()["checks"] == {"database": True, "redis": True}
