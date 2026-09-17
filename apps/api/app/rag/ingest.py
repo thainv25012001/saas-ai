@@ -130,6 +130,21 @@ async def ingest_document(
     in `error` through yet another independent transaction, and re-raises.
     See the module docstring for why each of those three writes needs its
     own transaction rather than sharing one.
+
+    **The document row must already be committed** before this is called --
+    it cannot be created in the same transaction `session` belongs to.
+    `mark_processing` looks it up through its own independent
+    `tenant_session` (above), which cannot see a row only flushed, not
+    committed, in a different session/connection; and because that lookup
+    runs *before* the `try` block, the `NotFoundError` it raises for an
+    uncommitted document escapes uncaught, with no `status=failed` ever
+    recorded. The worker (`app.workers.tasks.ingest_document_task`)
+    satisfies this by construction: it reads the document under its own
+    fresh `tenant_session`, necessarily after whatever request created and
+    committed it has already returned. Any future caller -- Task 5's
+    upload endpoint included -- must commit the document's own creation
+    before calling this, not pass it straight through from a still-open
+    create.
     """
     async with tenant_session(tenant) as processing_session:
         await DocumentService(processing_session, tenant).mark_processing(document_id)
@@ -177,19 +192,25 @@ async def ingest_document(
         #
         # `session` is rolled back first rather than left for the caller's
         # own `tenant_session` to clean up once this exception reaches it.
-        # `mark_processing` no longer writes through `session` (it commits
-        # through its own independent transaction above, before the `try`
-        # even starts), so as this pipeline stands today `session` reaching
-        # this point never holds a lock that conflicts with
-        # `failure_session`'s own `UPDATE` -- removing this rollback does
-        # not currently reproduce the deadlock that first motivated it
-        # (verified by removing it and re-running the full suite, including
-        # the genuine-database-error test below, with no hang). It stays
-        # anyway: it is a correct, cheap thing to do with a session this
-        # function is about to stop using regardless, and it is what
-        # prevents a *future* change that adds another `documents`-row
-        # write to `session` before this point from silently reintroducing
-        # exactly that deadlock.
+        # This guards a real, reachable window, not a hypothetical one:
+        # `mark_ready` is the last statement in the `try` block above, and
+        # it is itself a write to *this same* `documents` row on `session`
+        # -- a `FOR NO KEY UPDATE` row lock. A failure raised at or after
+        # that `UPDATE` (a constraint violation, a trigger, a serialization
+        # failure -- anything that reaches this `except` without `session`
+        # having committed or rolled back first) leaves `session` holding
+        # that lock open, and `failure_session`'s own `UPDATE` on the same
+        # row -- also `FOR NO KEY UPDATE`, which conflicts with itself --
+        # would then block on it indefinitely: this function waiting on its
+        # own earlier, still-open write. `mark_processing` moving to its
+        # own independent transaction (see above) closed the *other* way
+        # this used to deadlock, but not this one.
+        #
+        # No test in this suite currently forces this specific window: the
+        # genuine-database-error test below fails earlier, inside
+        # `replace_chunks`, before `mark_ready` ever runs. This line stays
+        # unverified by the suite for that path, but the path itself is
+        # real, not removed by anything changed so far.
         await session.rollback()
         async with tenant_session(tenant) as failure_session:
             await DocumentService(failure_session, tenant).mark_failed(document_id, message)

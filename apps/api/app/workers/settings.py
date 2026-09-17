@@ -24,3 +24,14 @@ class WorkerSettings:
     # legitimately run for minutes; 600s gives that room without letting a
     # truly stuck job hold a worker slot forever.
     job_timeout = 600
+    # arq defaults `max_jobs` to 10 -- fine for jobs that hold at most one
+    # connection each, wrong here: `ingest_document` holds up to two of this
+    # process's own pool connections per job (see `settings.worker_max_jobs`
+    # in app/core/config.py for the arithmetic against `pool_size` +
+    # `max_overflow`). Left at arq's default, 10 concurrent jobs could want
+    # 20 connections against a 15-connection pool -- not a deadlock (the
+    # jobs that get a second connection finish and release, so the queue
+    # always drains), but a `pool_timeout` (30s) stall on every job past
+    # the first few that did not exist before this pipeline held two
+    # connections at once.
+    max_jobs = get_settings().worker_max_jobs

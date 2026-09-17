@@ -107,6 +107,18 @@ class Settings(BaseSettings):
     # attempt number for simple linear backoff. Small default so a failing
     # embedding call does not make an already-failing test slow too.
     embedding_retry_backoff_seconds: float = 0.1
+    # How many ingest jobs `app.workers.settings.WorkerSettings` runs at
+    # once. `ingest_document(app/rag/ingest.py)` holds up to two of this
+    # worker process's own connections at a time -- the caller's `session`
+    # plus a second, independent `tenant_session` for `mark_processing` or
+    # (on failure) `mark_failed` -- never three, since `mark_processing`'s
+    # transaction always closes before the failure path could open a third.
+    # `app/db/session.py`'s engine gives this process `pool_size=10 +
+    # max_overflow=5 = 15` connections total, so `2 * worker_max_jobs` must
+    # stay comfortably under that; 5 (10 connections at saturation) leaves
+    # headroom rather than running right up against 7 (the exact floor).
+    # Change this alongside `pool_size`/`max_overflow` if either moves.
+    worker_max_jobs: int = 5
 
     @field_validator("database_url", "migration_database_url", mode="after")
     @classmethod
