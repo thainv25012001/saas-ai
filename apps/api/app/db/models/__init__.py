@@ -1,4 +1,5 @@
 from app.db.models.agent import Agent, AgentConfig, AgentStatus
+from app.db.models.citation import MessageCitation
 from app.db.models.conversation import (
     Conversation,
     ConversationChannel,
@@ -40,6 +41,7 @@ __all__ = [
     "Membership",
     "MembershipRole",
     "Message",
+    "MessageCitation",
     "MessageRole",
     "Organization",
     "Prompt",

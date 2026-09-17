@@ -11,23 +11,39 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.service import AgentService
 from app.conversations.schemas import AppendMessageInput, CreateConversationInput, RecordUsageInput
 from app.conversations.service import ConversationService
-from app.core.errors import AppError
+from app.core.errors import AppError, NotFoundError
 from app.core.ids import uuid7
+from app.core.logging import get_logger
 from app.core.tenancy import TenantContext
 from app.db.models import (
     Agent,
     ConversationChannel,
+    ConversationMessage,
+    DocumentStatus,
+    MessageCitation,
     MessageRole,
     Organization,
     UsageKind,
 )
+from app.documents.service import DocumentService
 from app.llm.base import LLMProvider
 from app.llm.pricing import estimate_cost
 from app.llm.registry import get_provider
 from app.llm.types import CompletionRequest, Usage
 from app.llm.types import Message as LLMMessage
+from app.prompts.context import assemble_context
 from app.prompts.defaults import DEFAULT_SALES_SYSTEM_PROMPT
 from app.prompts.service import PromptService
+from app.rag.retrieve import RetrievalService, RetrievedChunk
+
+logger = get_logger(__name__)
+
+# A preview only -- the SSE `citations` payload deliberately does not carry
+# the full chunk (see `ChatCitations`'s docstring below), so this bounds how
+# much of it the UI gets instead. Long enough to recognise which passage
+# matched at a glance, short enough that a handful of citations does not
+# meaningfully add to the bytes of every `message_start` turn.
+_EXCERPT_MAX_CHARS = 240
 
 # PHASE-2.md §6: "the last `history_window` turns (config, default 20)".
 # There is no dedicated schema column for this yet (see `agent_configs` in
@@ -67,6 +83,34 @@ class ChatMessageStart:
 
 
 @dataclass(frozen=True, slots=True)
+class CitationPayload:
+    """One retrieved passage's SSE-facing shape.
+
+    Deliberately narrower than `RetrievedChunk`: `excerpt` is a short
+    preview (see `_excerpt`), not the full chunk `content`, which would
+    double the bytes of every grounded turn on the wire for no benefit the
+    UI needs -- it already has `chunk_id` to fetch the rest on demand.
+    """
+
+    chunk_id: uuid.UUID
+    document_id: uuid.UUID
+    document_title: str
+    rank: int
+    score: float
+    excerpt: str
+
+
+@dataclass(frozen=True, slots=True)
+class ChatCitations:
+    """Emitted after `ChatMessageStart` and before the first `ChatTextDelta`
+    -- see `ChatService.send` -- so the UI can render sources while the
+    answer is still streaming in, rather than only once the turn ends.
+    """
+
+    citations: list[CitationPayload]
+
+
+@dataclass(frozen=True, slots=True)
 class ChatTextDelta:
     text: str
 
@@ -86,7 +130,24 @@ class ChatError:
     message: str
 
 
-ChatEvent = ChatMessageStart | ChatTextDelta | ChatMessageEnd | ChatError
+ChatEvent = ChatMessageStart | ChatCitations | ChatTextDelta | ChatMessageEnd | ChatError
+
+
+def _excerpt(content: str) -> str:
+    if len(content) <= _EXCERPT_MAX_CHARS:
+        return content
+    return content[:_EXCERPT_MAX_CHARS].rstrip() + "..."
+
+
+def _citation_payload(chunk: RetrievedChunk) -> CitationPayload:
+    return CitationPayload(
+        chunk_id=chunk.chunk_id,
+        document_id=chunk.document_id,
+        document_title=chunk.document_title,
+        rank=chunk.rank,
+        score=chunk.score,
+        excerpt=_excerpt(chunk.content),
+    )
 
 
 class ChatService:
@@ -114,6 +175,7 @@ class ChatService:
         self._agents = AgentService(session, tenant)
         self._prompts = PromptService(session, tenant)
         self._conversations = ConversationService(session, tenant)
+        self._documents = DocumentService(session, tenant)
 
     async def send(
         self,
@@ -151,6 +213,17 @@ class ChatService:
         # failure) is created under this same id.
         message_id = uuid7()
         yield ChatMessageStart(conversation_id=conversation.id, message_id=message_id)
+
+        # Grounding happens here: after ChatMessageStart (so the caller
+        # already knows which message is coming) and before history/the
+        # provider request are built (so a hit can still extend
+        # `system_prompt` below). `retrieved_chunks` is threaded through to
+        # the persistence step near the end of this method, in the same
+        # transaction as the assistant message it grounded.
+        retrieved_chunks = await self._retrieve_context(user_text)
+        if retrieved_chunks:
+            yield ChatCitations(citations=[_citation_payload(c) for c in retrieved_chunks])
+            system_prompt = f"{system_prompt}\n\n{assemble_context(retrieved_chunks)}"
 
         # History is fetched *before* the new user message is persisted, so
         # it holds only prior turns; the new user text is appended to the
@@ -230,6 +303,10 @@ class ChatService:
                     finish_reason=finish_reason,
                 ),
             )
+            # Same transaction as the assistant message above -- a citation
+            # row naming a message that never actually got committed would
+            # be worse than no citation at all.
+            await self._record_citations(message_id, retrieved_chunks)
             await self._conversations.record_usage(
                 RecordUsageInput(
                     agent_id=agent.id,
@@ -269,6 +346,86 @@ class ChatService:
                 ),
             )
             yield chat_error
+
+    async def _retrieve_context(self, query: str) -> list[RetrievedChunk]:
+        """Grounds this turn in the organization's own documents when there
+        is a corpus to ground it in.
+
+        An organization with none must behave exactly as it did before this
+        task existed -- no query against `document_chunks`, no citations
+        event -- which is why this checks for a ready document first rather
+        than simply calling `RetrievalService` and trusting an empty result
+        to look the same as "never asked": a retrieval call that happens to
+        find nothing is not "no retrieval call".
+
+        A failure past that point is caught, not propagated: a retrieval
+        outage (or a failure in the readiness check itself) must cost the
+        user grounding, not the answer they came here for. See
+        `docs/ARCHITECTURE.md` §2.3 for why `self._documents` -- not a raw
+        query -- is what does that check: it already carries the explicit
+        `organization_id` filter this codebase requires alongside RLS.
+        """
+        try:
+            ready_documents = await self._documents.list_documents(
+                status=DocumentStatus.READY, limit=1
+            )
+            if not ready_documents:
+                return []
+            return await RetrievalService(self.session, self.tenant).retrieve(query)
+        except Exception:
+            logger.warning("rag_retrieval_failed", exc_info=True)
+            return []
+
+    async def _record_citations(self, message_id: uuid.UUID, chunks: list[RetrievedChunk]) -> None:
+        """Writes one `MessageCitation` row per retrieved chunk, in the
+        caller's open transaction.
+
+        The scoped `SELECT` on `message_id` below is load-bearing, not
+        belt-and-braces -- identical in shape and reason to
+        `ConversationService.append_message`'s own ownership check: a
+        Postgres FK constraint check runs with elevated privileges and does
+        not consult this session's RLS policy, so an INSERT here would
+        happily attach a citation to another tenant's `message_id` even
+        though a plain SELECT under this session's RLS sees zero rows for
+        it. In `ChatService.send`'s own call path `message_id` is always one
+        this same call just minted for this same tenant, so this specific
+        check can never actually fire today -- but the FK-bypass hazard is a
+        property of the table, not of today's one caller, and this is what
+        keeps that true regardless of who calls this method next.
+
+        `chunk_id`/`document_id` need no equivalent check: both come
+        straight out of `RetrievalService.retrieve`, which is itself
+        two-layer tenant-scoped (see `app/rag/retrieve.py`), so a value
+        reaching here has already been proven to belong to this
+        organization.
+        """
+        if not chunks:
+            return
+
+        result = await self.session.execute(
+            select(ConversationMessage.id).where(
+                ConversationMessage.id == message_id,
+                ConversationMessage.organization_id == self.tenant.organization_id,
+            )
+        )
+        if result.scalar_one_or_none() is None:
+            raise NotFoundError("message not found")
+
+        self.session.add_all(
+            [
+                MessageCitation(
+                    id=uuid7(),
+                    organization_id=self.tenant.organization_id,
+                    message_id=message_id,
+                    chunk_id=chunk.chunk_id,
+                    document_id=chunk.document_id,
+                    rank=chunk.rank,
+                    score=chunk.score,
+                )
+                for chunk in chunks
+            ]
+        )
+        await self.session.flush()
 
     async def _resolve_system_prompt(self, agent: Agent) -> tuple[str, uuid.UUID | None]:
         """Step 2+3: resolve the active prompt version (or the default) and

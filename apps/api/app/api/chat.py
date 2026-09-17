@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_tenant
 from app.chat.service import (
+    ChatCitations,
     ChatError,
     ChatEvent,
     ChatMessageEnd,
@@ -128,6 +129,21 @@ def _event_payload(event: ChatEvent) -> dict[str, object]:
             "type": "message_start",
             "conversation_id": str(event.conversation_id),
             "message_id": str(event.message_id),
+        }
+    if isinstance(event, ChatCitations):
+        return {
+            "type": "citations",
+            "citations": [
+                {
+                    "chunk_id": str(c.chunk_id),
+                    "document_id": str(c.document_id),
+                    "document_title": c.document_title,
+                    "rank": c.rank,
+                    "score": c.score,
+                    "excerpt": c.excerpt,
+                }
+                for c in event.citations
+            ],
         }
     if isinstance(event, ChatTextDelta):
         return {"type": "text_delta", "text": event.text}
