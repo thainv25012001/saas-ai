@@ -91,6 +91,23 @@ class Settings(BaseSettings):
     # Set to `openai` once a key is present.
     embedding_provider: str = "hashing"
 
+    # Where uploaded document bytes live between the upload request and the
+    # worker picking them up. A local directory, not object storage -- see
+    # the module docstring on `app/rag/storage.py` for why that is fine for
+    # a single instance and wrong for production.
+    upload_dir: str = "./var/uploads"
+    # Chunks per embedding API call. Higher batches ingest faster but put
+    # more chunks at risk of a single request failing; 64 is comfortably
+    # under every provider's per-request item limit we target.
+    embedding_batch_size: int = 64
+    # Attempts per batch before the whole ingest job is failed rather than
+    # storing whatever batches happened to succeed.
+    embedding_max_retries: int = 3
+    # Base delay between retries of the same batch; multiplied by the
+    # attempt number for simple linear backoff. Small default so a failing
+    # embedding call does not make an already-failing test slow too.
+    embedding_retry_backoff_seconds: float = 0.1
+
     @field_validator("database_url", "migration_database_url", mode="after")
     @classmethod
     def normalize_postgres_dsn(cls, value: str) -> str:

@@ -100,8 +100,8 @@ REDIS_URL=rediss://default:...@your-host.upstash.io:6379
 ```
 
 `db` and `redis` sit behind the `local-infra` profile, so with it off they are never
-started and `docker compose up` brings up only `api` and `web`. Paste managed URLs
-exactly as the provider gives them — the scheme and the libpq-only parameters
+started and `docker compose up` brings up only `api`, `worker` and `web`. Paste managed
+URLs exactly as the provider gives them — the scheme and the libpq-only parameters
 (`sslmode`, `channel_binding`) are normalized at startup.
 
 Two things that are easy to get wrong here, both silent:
@@ -118,6 +118,28 @@ Two things that are easy to get wrong here, both silent:
 
 Also set `ENVIRONMENT` to something other than `local` anywhere that is not a developer
 machine — `local` enables the GraphQL IDE and permits the seed script.
+
+### Document ingestion: the `worker` service
+
+Uploading a document (Phase 3) does not extract, chunk or embed it inline on the HTTP
+request — that work is queued (`app/rag/queue.py`'s `enqueue_ingest`, onto arq/Redis) and
+picked up by the `worker` service, an arq worker running the same image as `api`
+(`app/workers/settings.py`, `app/workers/tasks.py`). This is what keeps a 200-page PDF
+from holding an HTTP connection, or a request timeout, open for as long as embedding it
+takes.
+
+`api` and `worker` share a `uploads` named volume for `UPLOAD_DIR` (default
+`/data/uploads` in containers, `./var/uploads` for a native `uv run`) — the directory a
+freshly uploaded document's bytes land in before the worker reads them back out by
+`organization_id/document_id`. **This is a local-disk placeholder, not the production
+design** (see the comment in `app/rag/storage.py`): it works only as long as `api` and
+`worker` share one disk, which stops being true the moment either runs as more than one
+replica or on more than one host. Object storage (S3 or compatible) is what `UPLOAD_DIR`
+should become in that case — a swap `app/rag/storage.py` isolates to one module.
+
+Running natively instead of in containers: `make worker` (or, without `make`,
+`cd apps/api && uv run arq app.workers.settings.WorkerSettings`), same `DATABASE_URL`/
+`REDIS_URL` as `make api`.
 
 Then open [http://localhost:3000](http://localhost:3000) and sign in with the seeded
 demo account:
@@ -159,8 +181,12 @@ apps/
       agents/     agent + agent-config service and schemas
       prompts/    prompt + prompt-version service (versioning, single-active invariant)
       llm/        provider abstraction: openai, anthropic, fake; capabilities, pricing, registry
+      embeddings/ embedding provider abstraction: openai, hashing (offline, network-free); registry
       chat/       the chat service: prompt resolution, history window, streaming, persistence
       conversations/  conversation + message + usage-event service
+      documents/  document + document_chunk service (pgvector-backed, RLS-scoped)
+      rag/        extraction, chunking, and the ingest pipeline that ties them to embeddings
+      workers/    arq worker: settings (job registration, retries) and the ingest job itself
       graphql/    Strawberry schema, context, resolvers
       api/        REST routers: auth, health, chat (SSE)
     alembic/      migrations (RLS policies land here, not in application code)
@@ -194,7 +220,8 @@ without `make`.
 | `make logs` | Follows logs for all compose services. | `docker compose logs -f` |
 | `make verify-db` | Asserts the Postgres extensions, `app_owner`/`app_user` roles, and RLS configuration are correct. Requires `db`/`redis` to be up. Needs a `bash` shell (Git Bash/WSL on Windows). | `bash infrastructure/scripts/verify_db.sh` |
 | `make api` | Runs the API natively (not in a container) with autoreload, against whatever `DATABASE_URL`/`REDIS_URL` your shell has set (e.g. from `make up`). | `cd apps/api && uv run uvicorn app.main:app --reload --port 8000` |
-| `make test` | Runs the backend test suite (281 tests: unit + integration, incl. tenant isolation, RLS, and the chat/streaming suites). | `cd apps/api && uv run pytest -v` |
+| `make worker` | Runs the RAG ingest worker natively (an arq worker, not an HTTP server), against the same `DATABASE_URL`/`REDIS_URL`. This is what actually drains the ingest queue `enqueue_ingest` (`app/rag/queue.py`) puts jobs on. | `cd apps/api && uv run arq app.workers.settings.WorkerSettings` |
+| `make test` | Runs the backend test suite (442 tests: unit + integration, incl. tenant isolation, RLS, the chat/streaming suites, and the RAG ingestion pipeline). | `cd apps/api && uv run pytest -v` |
 | `make lint` | Backend lint/format/type gate: `ruff check`, `ruff format --check`, `mypy --strict`. | `cd apps/api && uv run ruff check . && uv run ruff format --check . && uv run mypy app/` |
 | `make migrate` | Applies every Alembic migration up to head. | `cd apps/api && uv run alembic upgrade head` |
 | `make revision m="message"` | Creates a new Alembic revision with an autogenerated diff. | `cd apps/api && uv run alembic revision -m "message"` |
@@ -238,7 +265,7 @@ outage or a slow database never blocks a frontend-only PR.
 |---|---|---|
 | **1 — Foundation** | Repo structure, FastAPI, GraphQL, Postgres + RLS, migrations, auth, organizations, users, agents, basic Next.js dashboard. | **Complete** (this repository) |
 | **2 — Basic LLM chat** | Next.js → chat API → LLM provider → streaming response. OpenAI first, then an Anthropic adapter behind the same interface. | **Complete** (this repository) — see [`docs/PHASE-2.md`](docs/PHASE-2.md) |
-| 3 — RAG | Document upload → extraction → chunking → embedding → pgvector → retrieval → LLM. | Not started |
+| 3 — RAG | Document upload → extraction → chunking → embedding → pgvector → retrieval → LLM. | In progress: storage, extraction/chunking, and the ingest pipeline + arq worker are in this repository; upload endpoint and retrieval are not yet built. |
 | 4 — Agent + tools | The agent decides when to call `retrieve_knowledge`, `search_products`, `get_product`, `create_lead`. | Not started |
 | 5 — Evaluation | Test datasets, evaluation runs, retrieval and answer scoring. | Not started |
 | 6 — MCP | Expose selected business capabilities through MCP, once the built-in tool system is stable. | Not started |

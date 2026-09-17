@@ -1,3 +1,6 @@
+from collections.abc import Awaitable
+from typing import cast
+
 from redis.exceptions import RedisError
 
 from app.core.errors import RateLimitError
@@ -31,7 +34,17 @@ async def enforce_rate_limit(key: str, *, limit: int, window_seconds: int) -> No
     redis = get_redis()
     redis_key = f"ratelimit:{key}"
     try:
-        count = await redis.eval(_INCR_AND_EXPIRE, 1, redis_key, window_seconds)
+        # redis-py 5.x (arq's `redis<6` pin forces this project onto it)
+        # types `eval`'s ARGV varargs as `str` and its return as
+        # `Awaitable[str] | str` -- a sync/async-shared stub that does not
+        # narrow for the async client actually in use here. Both casts state
+        # what is true at runtime: Lua ARGV values are always strings on the
+        # wire regardless of what Python type produced them, and this
+        # client's `eval` always returns an awaitable.
+        raw = await cast(
+            Awaitable[str],
+            redis.eval(_INCR_AND_EXPIRE, 1, redis_key, str(window_seconds)),
+        )
     except RedisError:
         # Deliberate trade, not an oversight: fail OPEN. An auth endpoint
         # that is entirely unavailable because its rate limiter's backing
@@ -42,5 +55,6 @@ async def enforce_rate_limit(key: str, *, limit: int, window_seconds: int) -> No
         # be caught by it.
         logger.warning("rate_limit_backend_unavailable", key=redis_key)
         return
+    count = int(raw)
     if count > limit:
         raise RateLimitError("too many requests, please try again shortly")

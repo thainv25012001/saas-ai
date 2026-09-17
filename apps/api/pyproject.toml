@@ -27,6 +27,10 @@ dependencies = [
     # rather than relying on a transitive dependency staying put.
     "httpx2>=2.13",
     "openai>=1.50",
+    # Pins `redis<6` itself (see uv.lock), which downgrades this project's own
+    # redis-py from the 8.x line -- app/core/redis.py only uses `from_url`,
+    # `ping`, `scan_iter` and `delete`, all stable across that range.
+    "arq>=0.28",
 ]
 
 [dependency-groups]

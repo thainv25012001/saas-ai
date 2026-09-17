@@ -9,3 +9,6 @@ node_modules/
 .next/
 .worktrees/
 .superpowers/
+# `settings.upload_dir`'s default -- uploaded document bytes for a native
+# (non-container) run of api/worker. See app/rag/storage.py.
+apps/api/var/
