@@ -385,3 +385,115 @@ async def test_a_genuine_database_error_during_replace_chunks_still_lands_failed
 
     assert fresh.status == DocumentStatus.FAILED
     assert fresh.error is not None
+
+
+async def test_two_concurrent_ingests_of_one_document_leave_it_ready(
+    tenant_a, owner_connection, monkeypatch
+):
+    """Two workers ingesting the *same* document at once must not leave it
+    `failed` with a correct corpus underneath it.
+
+    Without the per-document advisory lock in `ingest_document`, this is
+    what happens: `replace_chunks` is delete-then-insert, and under READ
+    COMMITTED the loser's `DELETE` cannot see the rows the winner inserted
+    after the loser's statement snapshot was taken. It deletes nothing,
+    collides on `uq_chunk_document_index`, and -- worse than the wasted
+    work -- its independent failure session then overwrites the winner's
+    committed `ready` with `failed`. The corpus is intact and the document
+    is retrievable, but `_retrieve_context`'s readiness gate
+    (`list_documents(status=READY, limit=1)`) sees no ready document, so
+    for a single-document organization grounding stops entirely.
+
+    The slow embedder is what makes the overlap real rather than
+    hypothetical: both jobs are inside their `try` block, past
+    `mark_processing`, when the first one reaches `replace_chunks`. It must
+    *not* be a two-party barrier -- under the fix the second job never
+    reaches the embedder until the first has finished, which a barrier
+    would deadlock on.
+    """
+    real_embedder = ingest_module.get_embedding_provider()
+
+    class _SlowEmbedder:
+        name = real_embedder.name
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            await asyncio.sleep(0.25)
+            return await real_embedder.embed(texts)
+
+    monkeypatch.setattr(ingest_module, "get_embedding_provider", lambda: _SlowEmbedder())
+
+    async with tenant_session(tenant_a) as session:
+        document = await _document(session, tenant_a)
+
+    async def _run() -> int:
+        async with tenant_session(tenant_a) as session:
+            result = await ingest_document(
+                session, tenant_a, document.id, _MARKDOWN, "text/markdown"
+            )
+            return result.chunk_count
+
+    outcomes = await asyncio.gather(_run(), _run(), return_exceptions=True)
+
+    assert [o for o in outcomes if isinstance(o, BaseException)] == []
+    assert outcomes[0] == outcomes[1]
+
+    async with tenant_session(tenant_a) as session:
+        fresh = await DocumentService(session, tenant_a).get(document.id)
+
+    assert fresh.status == DocumentStatus.READY
+    assert fresh.error is None
+    # Exactly one job's worth of chunks: the second ingest replaced the
+    # first's rows rather than appending to or colliding with them.
+    assert await _chunk_count(owner_connection, document.id) == outcomes[0]
+
+
+async def test_a_cancelled_ingest_records_failed_and_re_raises_the_cancellation(
+    tenant_a, monkeypatch
+):
+    """arq enforces `job_timeout` (600s) by cancelling the running task,
+    which raises `asyncio.CancelledError` -- a `BaseException`, so
+    `except Exception` never sees it.
+
+    Before this was handled, that meant the one failure mode the queue
+    exists to contain (the spec's own 200-page PDF, whose extraction and
+    embedding legitimately outrun the timeout) recorded no `failed` status
+    at all: arq abandoned the job after `max_tries`, the row stayed
+    `processing` forever, and `retry_document` rejects `processing` by
+    design. Delete-and-re-upload or direct SQL were the only ways out.
+
+    Cancellation must still propagate -- swallowing it would tell arq the
+    job succeeded and would break every `wait_for`/shutdown path above this
+    one -- so this asserts both halves: the row says `failed`, and the
+    `CancelledError` still comes out.
+    """
+    started = asyncio.Event()
+
+    class _HangingEmbedder:
+        name = "hanging-for-test"
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            started.set()
+            await asyncio.sleep(3600)
+            raise AssertionError("unreachable")
+
+    monkeypatch.setattr(ingest_module, "get_embedding_provider", lambda: _HangingEmbedder())
+
+    async with tenant_session(tenant_a) as session:
+        document = await _document(session, tenant_a)
+
+    async def _run() -> None:
+        async with tenant_session(tenant_a) as session:
+            await ingest_document(session, tenant_a, document.id, _MARKDOWN, "text/markdown")
+
+    task = asyncio.create_task(_run())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    async with tenant_session(tenant_a) as session:
+        fresh = await DocumentService(session, tenant_a).get(document.id)
+
+    assert fresh.status == DocumentStatus.FAILED
+    assert fresh.error is not None
+    assert "cancel" in fresh.error.lower()
