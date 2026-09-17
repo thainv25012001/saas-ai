@@ -5,10 +5,20 @@ passages a response gets to cite; nothing upstream of this file scores
 relevance, so getting the fusion and the tenancy scoping right here is the
 whole point of the phase.
 
-Two independent candidate lists are pulled per query, both against the
-caller's tenant-bound session so RLS narrows each one to the calling
-organization on its own -- there is no separate application-level filter
-to forget:
+Tenancy here follows `docs/ARCHITECTURE.md` section 2.3's two layers, same as
+every other service in this codebase (see the explicit `organization_id`
+filters in `app/documents/service.py`): Layer 2 is RLS on the caller's
+tenant-bound session, and Layer 1 is the explicit `organization_id`
+predicate both queries below carry regardless. RLS alone would have been
+enough for any session this module is actually ever called with in this
+codebase today -- but `AsyncSession`'s type carries no proof of that, and
+nothing stops a future caller (a script, a background job wired up wrong)
+from handing this an owner-privileged, RLS-bypassing session. The explicit
+predicate is what still fails closed to zero cross-tenant rows in that
+case rather than depending entirely on the caller's session having been
+built correctly.
+
+Two independent candidate lists are pulled per query:
 
 - vector: nearest neighbours by `embedding <=> :query_vector` (pgvector's
   cosine *distance* operator -- smaller is more similar), ascending.
@@ -68,17 +78,22 @@ class _CandidateInfo:
 
 
 # Both queries select the same columns in the same order so the row-handling
-# code below (`_collect`) does not need to know which list a row came from.
-# Joined to `documents` for the title `RetrievedChunk` reports; `documents`
-# is under the same RLS policy as `document_chunks`; both are always scoped
-# by the one tenant session that runs these, so the join can never cross an
-# organization boundary even though neither the id_ nor the join condition
-# itself mentions organization_id.
+# code below does not need to know which list a row came from. Joined to
+# `documents` for the title `RetrievedChunk` reports, with `organization_id`
+# bound *twice* -- once on `document_chunks`, once on the join condition
+# itself -- rather than once and trusting the `document_id` foreign key to
+# carry the same organization on both sides. `DocumentService.replace_chunks`
+# already treats that as not a given (see its docstring: a chunk INSERT can
+# attach to another org's document_id because the FK check itself does not
+# consult RLS); binding organization_id independently on both tables here
+# means a chunk that ever ended up mislinked that way still cannot leak
+# another org's document title through this join.
 _VECTOR_SQL = text(
     "SELECT dc.id AS id, dc.document_id AS document_id, d.title AS title, "
     "dc.content AS content, dc.metadata AS metadata "
     "FROM document_chunks dc "
-    "JOIN documents d ON d.id = dc.document_id "
+    "JOIN documents d ON d.id = dc.document_id AND d.organization_id = :organization_id "
+    "WHERE dc.organization_id = :organization_id "
     "ORDER BY dc.embedding <=> CAST(:query_vector AS vector) ASC "
     "LIMIT :candidates"
 )
@@ -87,8 +102,9 @@ _KEYWORD_SQL = text(
     "SELECT dc.id AS id, dc.document_id AS document_id, d.title AS title, "
     "dc.content AS content, dc.metadata AS metadata "
     "FROM document_chunks dc "
-    "JOIN documents d ON d.id = dc.document_id "
-    "WHERE dc.content_tsv @@ websearch_to_tsquery('english', :query_text) "
+    "JOIN documents d ON d.id = dc.document_id AND d.organization_id = :organization_id "
+    "WHERE dc.organization_id = :organization_id "
+    "AND dc.content_tsv @@ websearch_to_tsquery('english', :query_text) "
     "ORDER BY ts_rank_cd(dc.content_tsv, websearch_to_tsquery('english', :query_text)) DESC "
     "LIMIT :candidates"
 )
@@ -135,17 +151,26 @@ class RetrievalService:
         merely great on one, per RRF's whole premise.
         """
         [query_vector] = await self.embedder.embed([query])
+        organization_id = self.tenant.organization_id
 
         vector_rows = (
             await self.session.execute(
                 _VECTOR_SQL,
-                {"query_vector": _vector_literal(query_vector), "candidates": candidates},
+                {
+                    "query_vector": _vector_literal(query_vector),
+                    "candidates": candidates,
+                    "organization_id": organization_id,
+                },
             )
         ).all()
         keyword_rows = (
             await self.session.execute(
                 _KEYWORD_SQL,
-                {"query_text": query, "candidates": candidates},
+                {
+                    "query_text": query,
+                    "candidates": candidates,
+                    "organization_id": organization_id,
+                },
             )
         ).all()
 

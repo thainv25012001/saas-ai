@@ -328,6 +328,104 @@ async def test_cross_tenant_chunk_never_surfaces_even_as_the_best_lexical_match(
     assert other_chunk_id not in {r.chunk_id for r in results}
 
 
+async def test_organization_id_predicate_holds_even_when_rls_is_bypassed(tenant_a, tenant_b):
+    """`docs/ARCHITECTURE.md` section 2.3's two-layer tenancy: RLS (layer 2)
+    is not the only thing standing between this query and another org's
+    rows. Every other test in this file exercises retrieval on an ordinary
+    RLS-scoped session, where layer 2 alone would already stop a leak --
+    which cannot tell layer 1 (the explicit `organization_id` predicate in
+    `retrieve.py`'s SQL) apart from layer 1 not existing at all.
+
+    This test removes layer 2 entirely: `unscoped_session` runs as
+    `app_owner`, the migration role that bypasses RLS (the same role
+    `owner_connection` uses elsewhere in this suite), with no
+    `app.current_org_id` ever set on it. A *non*-bypassing but merely
+    unscoped session would not serve this purpose -- RLS's own
+    `NULLIF(current_setting(...), '')::uuid` guard makes an unset org id
+    fail closed to zero rows under RLS, which would pass this assertion
+    even with the predicate deleted from `retrieve.py`. Only a genuinely
+    RLS-bypassing session isolates layer 1: if the explicit predicate were
+    ever removed, this specific test -- and only this one -- would start
+    returning org B's chunk.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.core.config import get_settings
+
+    query = "extended vehicle protection plan details"
+    query_vector = await _embed(query)
+
+    async with tenant_session(tenant_b) as session:
+        other_document = await _document(session, tenant_b, title="Org B doc")
+        await _seed(session, tenant_b, other_document.id, [(query, query_vector)])
+
+    async with tenant_session(tenant_a) as session:
+        own_document = await _document(session, tenant_a, title="Org A doc")
+        await _seed(session, tenant_a, own_document.id, [(query, query_vector)])
+
+    unscoped_engine = create_async_engine(get_settings().migration_database_url)
+    try:
+        unscoped_session_factory = async_sessionmaker(unscoped_engine, expire_on_commit=False)
+        async with unscoped_session_factory() as unscoped_session:
+            results = await RetrievalService(unscoped_session, tenant_a).retrieve(query, top_k=5)
+    finally:
+        await unscoped_engine.dispose()
+
+    assert len(results) >= 1
+    assert all(r.document_id == own_document.id for r in results)
+
+
+async def test_rrf_score_matches_the_literal_1_based_formula(tenant_a):
+    """Ranks feeding into RRF are 1-based (`enumerate(rows, start=1)`), per
+    the published formula and per this module's own docstring/comment --
+    but nothing else in this file would catch a regression to 0-based
+    ranks: shifting every rank down by one changes every fused score by
+    roughly the same proportion and flips no *pairwise* ordering the other
+    tests check (confirmed: mutating `start=1` to `start=0` leaves every
+    other test in this file green).
+
+    This pins an absolute value instead. `target` is vector rank 2
+    (distance > 0, `decoy` takes rank 1) and the sole keyword match (rank
+    1). Under 1-based ranks its fused score is exactly
+    `1/(60+2) + 1/(60+1)`; under 0-based ranks it would be
+    `1/(60+1) + 1/(60+0)` instead -- a different value, not just a
+    different ordering.
+    """
+    query = "annual roadside assistance coverage"
+    query_vector = await _embed(query)
+
+    async with tenant_session(tenant_a) as session:
+        document = await _document(session, tenant_a)
+        await _seed(
+            session,
+            tenant_a,
+            document.id,
+            [
+                (
+                    # Vector rank 1 (identical to the query vector), no
+                    # shared vocabulary with the query -> absent from the
+                    # keyword list.
+                    "The quarterly sales meeting starts promptly every Monday morning downtown.",
+                    query_vector,
+                ),
+                (
+                    # Vector rank 2 (far from the query vector), the only
+                    # chunk containing the query's own words -> keyword
+                    # rank 1.
+                    "Annual roadside assistance coverage applies to eligible vehicles.",
+                    _negate(query_vector),
+                ),
+            ],
+        )
+
+    async with tenant_session(tenant_a) as session:
+        results = await RetrievalService(session, tenant_a).retrieve(query, top_k=2)
+
+    target = next(r for r in results if "roadside" in r.content)
+    expected_score = 1.0 / (60 + 2) + 1.0 / (60 + 1)
+    assert target.score == pytest.approx(expected_score)
+
+
 async def test_empty_corpus_returns_empty_list_rather_than_raising(tenant_a):
     async with tenant_session(tenant_a) as session:
         results = await RetrievalService(session, tenant_a).retrieve("anything at all")
