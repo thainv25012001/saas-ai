@@ -16,8 +16,8 @@ import { useAuth } from "@/lib/auth";
 import { firstGraphQLError } from "@/lib/graphql-errors";
 import { checklistProgress, deriveChecklist } from "@/lib/setup-checklist";
 
+// Phase 3 (Knowledge) is live as of Task 8 and no longer belongs in "ahead".
 const PHASES_AHEAD = [
-  "Phase 3 — Knowledge: upload documents and let the agent answer from them.",
   "Phase 4 — Products, tools and lead capture.",
   "Phase 5 — Evaluation, MCP and billing.",
 ];

@@ -49,6 +49,58 @@ describe("ChatMessage", () => {
     expect(screen.getByText(/Stopped before any response arrived/)).toBeInTheDocument();
   });
 
+  it("numbers citations by rank, sorted, not by array order", () => {
+    render(
+      <ChatMessage
+        message={assistant({
+          citations: [
+            { chunkId: "c2", documentId: "d2", documentTitle: "FAQ.md", rank: 2, score: 0.5, excerpt: "second" },
+            { chunkId: "c1", documentId: "d1", documentTitle: "Pricing.pdf", rank: 1, score: 0.9, excerpt: "first" },
+          ],
+        })}
+      />,
+    );
+    const items = screen.getAllByRole("listitem");
+    expect(items).toHaveLength(2);
+    expect(items[0]).toHaveTextContent("1.");
+    expect(items[0]).toHaveTextContent("Pricing.pdf");
+    expect(items[1]).toHaveTextContent("2.");
+    expect(items[1]).toHaveTextContent("FAQ.md");
+  });
+
+  it("renders no Sources section when there are no citations yet", () => {
+    render(<ChatMessage message={assistant({ citations: [] })} />);
+    expect(screen.queryByText("Sources")).not.toBeInTheDocument();
+  });
+
+  it("renders an untrusted document title and excerpt as literal text, never as markup", () => {
+    // Both fields come from a file the customer uploaded, and the backend
+    // deliberately does not escape them (see the module docstring on
+    // `Citation` in `@/lib/sse`). This test is what would fail if that
+    // escaping were ever done with dangerouslySetInnerHTML or a markdown
+    // renderer instead of a plain JSX text child.
+    const { container } = render(
+      <ChatMessage
+        message={assistant({
+          citations: [
+            {
+              chunkId: "c1",
+              documentId: "d1",
+              documentTitle: "<script>alert(1)</script>",
+              rank: 1,
+              score: 0.9,
+              excerpt: "click <b>here</b> to win",
+            },
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByText("<script>alert(1)</script>")).toBeInTheDocument();
+    expect(screen.getByText(/click <b>here<\/b> to win/)).toBeInTheDocument();
+    expect(container.querySelector("script")).toBeNull();
+    expect(container.querySelector("b")).toBeNull();
+  });
+
   it("shows a turn error as an alert while keeping the partial text", () => {
     render(
       <ChatMessage

@@ -141,6 +141,48 @@ describe("parseSSEStream", () => {
     ]);
   });
 
+  it("parses a citations event arriving between message_start and the first text_delta", async () => {
+    const citation = {
+      chunk_id: "c1",
+      document_id: "doc1",
+      document_title: "Pricing sheet.pdf",
+      rank: 1,
+      score: 0.87,
+      excerpt: "Our starter plan is $19/mo.",
+    };
+    const events = await collect(
+      chunksOf(
+        frame({ type: "message_start", conversation_id: "c1", message_id: "m1" }) +
+          frame({ type: "citations", citations: [citation] }) +
+          frame({ type: "text_delta", text: "Our" }),
+      ),
+    );
+    expect(events).toEqual([
+      { type: "message_start", conversation_id: "c1", message_id: "m1" },
+      { type: "citations", citations: [citation] },
+      { type: "text_delta", text: "Our" },
+    ]);
+  });
+
+  it("parses a citations event with an empty list (an ungrounded answer)", async () => {
+    const events = await collect(chunksOf(frame({ type: "citations", citations: [] })));
+    expect(events).toEqual([{ type: "citations", citations: [] }]);
+  });
+
+  it("drops a citations event where one entry is missing a required field", async () => {
+    // A partial list would misnumber the rest, since the UI displays `rank`
+    // as-is -- dropping the whole event is safer than rendering it wrong.
+    const events = await collect(
+      chunksOf(
+        frame({
+          type: "citations",
+          citations: [{ chunk_id: "c1", document_id: "doc1", rank: 1, score: 0.5, excerpt: "x" }],
+        }) + frame({ type: "text_delta", text: "ok" }),
+      ),
+    );
+    expect(events).toEqual([{ type: "text_delta", text: "ok" }]);
+  });
+
   it("parses an error event and preserves its code and message", async () => {
     const events = await collect(
       chunksOf(frame({ type: "error", code: "llm_rate_limited", message: "Too many requests" })),

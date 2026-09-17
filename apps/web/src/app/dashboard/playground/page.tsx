@@ -135,6 +135,29 @@ function PlaygroundContent() {
             case "message_start":
               seenConversationId = event.conversation_id;
               break;
+            case "citations":
+              // Arrives after message_start and before the first
+              // text_delta (see docs/PHASE-3.md and `ChatCitations`'s
+              // docstring), so sources are on screen while the answer is
+              // still streaming in rather than only once it ends.
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId
+                    ? {
+                        ...m,
+                        citations: event.citations.map((citation) => ({
+                          chunkId: citation.chunk_id,
+                          documentId: citation.document_id,
+                          documentTitle: citation.document_title,
+                          rank: citation.rank,
+                          score: citation.score,
+                          excerpt: citation.excerpt,
+                        })),
+                      }
+                    : m,
+                ),
+              );
+              break;
             case "text_delta":
               setMessages((prev) =>
                 prev.map((m) =>

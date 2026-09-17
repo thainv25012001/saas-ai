@@ -38,3 +38,13 @@ query ProviderModels($provider: String!) {
 query ConfiguredProviders {
   configuredProviders { id configured }
 }
+
+query Documents($status: DocumentStatus, $limit: Int, $offset: Int) {
+  documents(status: $status, limit: $limit, offset: $offset) {
+    id title status mimeType fileSize error createdAt processedAt chunkCount
+  }
+}
+
+mutation DeleteDocument($id: UUID!) {
+  deleteDocument(id: $id)
+}
