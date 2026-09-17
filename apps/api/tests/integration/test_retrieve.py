@@ -28,6 +28,7 @@ from app.db.models import DocumentSourceType
 from app.documents.schemas import ChunkInput, CreateDocumentInput
 from app.documents.service import DocumentService
 from app.embeddings.hashing import HashingEmbedder
+from app.rag.ingest import ingest_document
 from app.rag.retrieve import RetrievalService
 
 pytestmark = pytest.mark.anyio
@@ -129,7 +130,17 @@ async def test_smaller_cosine_distance_ranks_first(tenant_a):
         )
 
     async with tenant_session(tenant_a) as session:
-        results = await RetrievalService(session, tenant_a).retrieve(query, top_k=2)
+        # `max_distance=2.0` disables the vector arm's relevance floor
+        # for this test. The corpus here is built from negated query
+        # vectors (cosine distance exactly 2), which is how it makes
+        # "near" and "far" deterministic -- a deliberately synthetic
+        # distance no real text produces, and one the default floor of
+        # 0.8 would simply filter out, leaving nothing to order. What
+        # the floor itself does is asserted on a real corpus further
+        # down this file.
+        results = await RetrievalService(session, tenant_a).retrieve(
+            query, top_k=2, max_distance=2.0
+        )
 
     assert len(results) == 2
     assert results[0].content.endswith("too.")
@@ -176,7 +187,17 @@ async def test_chunk_found_by_both_retrievers_outranks_the_single_best_vector_ma
         )
 
     async with tenant_session(tenant_a) as session:
-        results = await RetrievalService(session, tenant_a).retrieve(query, top_k=2)
+        # `max_distance=2.0` disables the vector arm's relevance floor
+        # for this test. The corpus here is built from negated query
+        # vectors (cosine distance exactly 2), which is how it makes
+        # "near" and "far" deterministic -- a deliberately synthetic
+        # distance no real text produces, and one the default floor of
+        # 0.8 would simply filter out, leaving nothing to order. What
+        # the floor itself does is asserted on a real corpus further
+        # down this file.
+        results = await RetrievalService(session, tenant_a).retrieve(
+            query, top_k=2, max_distance=2.0
+        )
 
     assert len(results) == 2
     assert "premium warranty" in results[0].content
@@ -258,11 +279,23 @@ async def test_top_k_is_respected_and_min_score_filters(tenant_a):
         await _seed(session, tenant_a, document.id, entries)
 
     async with tenant_session(tenant_a) as session:
-        top_limited = await RetrievalService(session, tenant_a).retrieve(query, top_k=2)
+        # `max_distance=2.0` disables the vector arm's relevance floor
+        # for this test. The corpus here is built from negated query
+        # vectors (cosine distance exactly 2), which is how it makes
+        # "near" and "far" deterministic -- a deliberately synthetic
+        # distance no real text produces, and one the default floor of
+        # 0.8 would simply filter out, leaving nothing to order. What
+        # the floor itself does is asserted on a real corpus further
+        # down this file.
+        top_limited = await RetrievalService(session, tenant_a).retrieve(
+            query, top_k=2, max_distance=2.0
+        )
     assert len(top_limited) == 2
 
     async with tenant_session(tenant_a) as session:
-        unfiltered = await RetrievalService(session, tenant_a).retrieve(query, top_k=5)
+        unfiltered = await RetrievalService(session, tenant_a).retrieve(
+            query, top_k=5, max_distance=2.0
+        )
     assert len(unfiltered) == 5
     weakest_score = min(r.score for r in unfiltered)
     strongest_score = max(r.score for r in unfiltered)
@@ -270,7 +303,7 @@ async def test_top_k_is_respected_and_min_score_filters(tenant_a):
 
     async with tenant_session(tenant_a) as session:
         filtered = await RetrievalService(session, tenant_a).retrieve(
-            query, top_k=5, min_score=weakest_score + 1e-9
+            query, top_k=5, min_score=weakest_score + 1e-9, max_distance=2.0
         )
     assert len(filtered) == len(unfiltered) - 1
     assert all(r.score >= weakest_score + 1e-9 for r in filtered)
@@ -419,7 +452,17 @@ async def test_rrf_score_matches_the_literal_1_based_formula(tenant_a):
         )
 
     async with tenant_session(tenant_a) as session:
-        results = await RetrievalService(session, tenant_a).retrieve(query, top_k=2)
+        # `max_distance=2.0` disables the vector arm's relevance floor
+        # for this test. The corpus here is built from negated query
+        # vectors (cosine distance exactly 2), which is how it makes
+        # "near" and "far" deterministic -- a deliberately synthetic
+        # distance no real text produces, and one the default floor of
+        # 0.8 would simply filter out, leaving nothing to order. What
+        # the floor itself does is asserted on a real corpus further
+        # down this file.
+        results = await RetrievalService(session, tenant_a).retrieve(
+            query, top_k=2, max_distance=2.0
+        )
 
     target = next(r for r in results if "roadside" in r.content)
     expected_score = 1.0 / (60 + 2) + 1.0 / (60 + 1)
@@ -431,3 +474,233 @@ async def test_empty_corpus_returns_empty_list_rather_than_raising(tenant_a):
         results = await RetrievalService(session, tenant_a).retrieve("anything at all")
 
     assert results == []
+
+
+# A small, real, multi-topic corpus. Unlike the seeded (content, vector)
+# pairs above, every chunk here is embedded from its *own* text, so the
+# distances between a query and these chunks are the distances the shipped
+# embedder actually produces -- which is the only way to say anything
+# meaningful about a relevance threshold.
+_HANDBOOK = [
+    "The powertrain warranty covers the engine, transmission and drive axles for "
+    "five years or sixty thousand miles, whichever comes first.",
+    "Qualified buyers may finance a new vehicle at rates starting from 3.9 percent "
+    "APR over sixty months. A trade-in appraisal is free.",
+    "The cabin air filter is replaced every fifteen thousand miles. Engine oil and "
+    "the oil filter are changed every ten thousand miles.",
+    "You have thirty days to file a return on any accessory purchase. Returns filed "
+    "after that window are handled case by case.",
+]
+
+
+async def _seed_handbook(session, tenant) -> uuid.UUID:  # type: ignore[no-untyped-def]
+    document = await _document(session, tenant, title="Owner's handbook")
+    entries = [(content, await _embed(content)) for content in _HANDBOOK]
+    await _seed(session, tenant, document.id, entries)
+    return document.id
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["hi", "thanks!", "what is the weather in tokyo tomorrow", "does it come in red?"],
+)
+async def test_an_unrelated_query_retrieves_nothing_at_all(tenant_a, query):
+    """The relevance floor, from the side that had none at all.
+
+    Fused RRF scores are derived from rank position: the top hit is exactly
+    `1/61` whatever it contains, so no threshold applied *after* fusion can
+    express relevance. With the vector retriever returning its nearest
+    `candidates` rows unconditionally, every single turn -- `hi` included --
+    put up to `top_k` chunks into the system prompt, onto the user's
+    "Sources" list, and into `message_citations` as having grounded the
+    answer.
+
+    Measured against this corpus with the shipped `HashingEmbedder`, these
+    four queries sit at cosine distance 0.82-1.00 from their nearest chunk,
+    while every question the handbook actually answers sits at 0.60-0.71
+    (see the test below). `does it come in red?` is the interesting one: it
+    shares the stemmed lexeme `come` with the warranty chunk's "comes
+    first", so it is the case a keyword arm alone would still cite.
+    """
+    async with tenant_session(tenant_a) as session:
+        await _seed_handbook(session, tenant_a)
+
+    async with tenant_session(tenant_a) as session:
+        results = await RetrievalService(session, tenant_a).retrieve(query)
+
+    assert results == []
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_fragment"),
+    [
+        ("how long is the powertrain warranty", "powertrain warranty"),
+        ("when is the cabin air filter replaced", "cabin air filter"),
+        ("How long do I have to file a return?", "file a return"),
+        ("what interest rate can I get on financing", "finance a new vehicle"),
+    ],
+)
+async def test_a_relevant_question_still_retrieves_its_own_section(
+    tenant_a, query, expected_fragment
+):
+    """The other half of the floor: it must not silence real questions.
+
+    Each of these is a whole natural-language question, the shape a chat
+    product actually receives, and each must still rank its own section
+    first. `what interest rate can I get on financing` is deliberately in
+    the list: it is the one whose *vector* distance (0.94) is above the
+    ceiling, so it survives only through the keyword arm -- which is the
+    hybrid earning its keep, and would break if the floor were applied
+    after fusion instead of per arm.
+    """
+    async with tenant_session(tenant_a) as session:
+        await _seed_handbook(session, tenant_a)
+
+    async with tenant_session(tenant_a) as session:
+        results = await RetrievalService(session, tenant_a).retrieve(query)
+
+    assert results, f"{query!r} retrieved nothing"
+    assert expected_fragment in results[0].content
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_fragment"),
+    [
+        # The strict `websearch_to_tsquery` AND form matches nothing for
+        # these two -- 'long' & 'file' & 'return' and 'powertrain' &
+        # 'warranti' & 'cover' & 'exact' both carry a word the corpus does
+        # not have -- so only the OR fallback can answer them.
+        ("How long do I have to file a return?", "file a return"),
+        ("What does the powertrain warranty cover exactly?", "powertrain warranty"),
+        # These two the strict form already matched, and must keep matching:
+        # the fallback runs only when the strict form found nothing.
+        ("file a return", "file a return"),
+        ("returns filed", "file a return"),
+    ],
+)
+async def test_the_keyword_arm_answers_a_conversational_question(
+    tenant_a, query, expected_fragment
+):
+    """`max_distance=-1.0` switches the vector arm off entirely (cosine
+    distance is never negative), so what this asserts is the keyword arm
+    alone -- otherwise the vector arm would answer and hide the fact that
+    the lexical half had gone silent, which is exactly how this survived
+    eight task reviews.
+
+    The keyword arm is the only one that stems: `HashingEmbedder` hashes
+    raw tokens, so "return" and "returns" are unrelated to it. A silent
+    keyword arm therefore does not merely cost a second opinion, it costs
+    the stemming that `docs/PHASE-3.md` §4's argument for hybrid search
+    depends on.
+    """
+    async with tenant_session(tenant_a) as session:
+        await _seed_handbook(session, tenant_a)
+
+    async with tenant_session(tenant_a) as session:
+        results = await RetrievalService(session, tenant_a).retrieve(query, max_distance=-1.0)
+
+    assert results, f"{query!r} retrieved nothing from the keyword arm"
+    assert expected_fragment in results[0].content
+
+
+# A document as bytes, not as pre-built chunks: this one goes through
+# `extract` -> `chunk_document` -> the real embedder -> `replace_chunks`,
+# which is the only path in this suite where the *corpus* is embedded by
+# the shipped embedder rather than seeded from the query's own vector.
+# Higher than any `ts_rank_cd` a real match produces, so passing it as
+# `min_keyword_rank` suppresses the keyword arm's OR fallback entirely --
+# which, combined with a query whose strict AND form matches nothing, is how
+# a test isolates the vector arm.
+_KEYWORD_ARM_OFF = 1e9
+
+_HANDBOOK_MARKDOWN = (
+    b"# Warranty\n\n"
+    b"The powertrain warranty covers the engine, transmission and drive axles "
+    b"for five years or sixty thousand miles, whichever comes first. Corrosion "
+    b"perforation is covered separately for seven years with no mileage limit.\n\n"
+    b"# Financing\n\n"
+    b"Qualified buyers may finance a new vehicle at rates starting from 3.9 "
+    b"percent APR over sixty months. A trade-in appraisal is free and takes "
+    b"about twenty minutes at any dealership.\n\n"
+    b"# Service intervals\n\n"
+    b"The cabin air filter is replaced every fifteen thousand miles. Engine oil "
+    b"and the oil filter are changed every ten thousand miles under normal "
+    b"driving conditions, or every five thousand under severe use.\n"
+)
+
+
+async def test_a_document_ingested_through_the_real_embedder_retrieves_its_own_section(tenant_a):
+    """The one test that pins `docs/PHASE-3.md` §2.2's load-bearing claim at
+    system level: that the default embedder is real, rather than a fake that
+    hashes each input to a random vector, *because* a fake would make every
+    downstream retrieval test pass without testing anything.
+
+    Every other retrieval test in this file embeds the query for real and
+    then seeds each chunk's vector as a copy or a negation of it, so the
+    corpus never passes through the embedder at all. Replacing
+    `HashingEmbedder._embed_one` with seeded Gaussian noise left all of them
+    green -- the prophecy in §2.2, true of the suite that was supposed to
+    prevent it.
+
+    Two halves, and the second is the one that does the pinning:
+
+    1. the whole pipeline, everything on: a real document ingested through
+       `ingest_document` (real `extract`, real chunking, real embeddings),
+       queried with ordinary English questions that share no exact phrasing
+       with the sections answering them, each ranking its own section first.
+    2. the *vector arm alone*. Half 1 on its own is not enough, and finding
+       that out is worth recording: under a noise embedder the vector arm
+       returns nothing at all (random unit vectors sit at cosine distance
+       ~1.0, past the relevance floor), and the keyword arm then answers all
+       three queries correctly by itself -- green suite, dead embedder,
+       exactly the vacuity this test exists to prevent. So each query below
+       is first shown to find *nothing* with the vector arm switched off
+       (`max_distance=-1.0`) and the keyword fallback suppressed
+       (`min_keyword_rank`), which proves the strict keyword form does not
+       match it; whatever the same query then returns with the vector arm
+       switched back on can only have come from the embedding.
+    """
+    async with tenant_session(tenant_a) as session:
+        document = await _document(session, tenant_a, title="Owner's handbook")
+
+    async with tenant_session(tenant_a) as session:
+        result = await ingest_document(
+            session, tenant_a, document.id, _HANDBOOK_MARKDOWN, "text/markdown"
+        )
+
+    # One chunk per heading section -- if chunking ever merges them, the
+    # ranking assertions below stop meaning what they say.
+    assert result.chunk_count == 3
+    assert result.embedding_model == "hashing"
+
+    for query, expected_fragment in [
+        ("how long is the powertrain warranty", "powertrain warranty"),
+        ("how often should the cabin air filter be changed", "cabin air filter"),
+        ("what interest rate can I get on financing", "finance a new vehicle"),
+    ]:
+        async with tenant_session(tenant_a) as session:
+            results = await RetrievalService(session, tenant_a).retrieve(query)
+        assert results, f"{query!r} retrieved nothing"
+        assert expected_fragment in results[0].content, (
+            f"{query!r} ranked {results[0].content[:60]!r} first"
+        )
+
+    # `interest rate ... financing` is deliberately absent here: its section
+    # sits at cosine distance 0.94, past the floor, so the keyword arm is
+    # what finds it (see the conversational-query test above). The other two
+    # sit at 0.62 and 0.65, and their strict keyword form matches nothing --
+    # asserted, not assumed, by the first call in each pair.
+    for query, expected_fragment in [
+        ("how long is the powertrain warranty", "powertrain warranty"),
+        ("how often should the cabin air filter be changed", "cabin air filter"),
+    ]:
+        async with tenant_session(tenant_a) as session:
+            service = RetrievalService(session, tenant_a)
+            keyword_only = await service.retrieve(
+                query, max_distance=-1.0, min_keyword_rank=_KEYWORD_ARM_OFF
+            )
+            vector_only = await service.retrieve(query, min_keyword_rank=_KEYWORD_ARM_OFF)
+
+        assert keyword_only == [], f"{query!r} was answerable without the embedder"
+        assert vector_only, f"{query!r} retrieved nothing from the vector arm"
+        assert expected_fragment in vector_only[0].content

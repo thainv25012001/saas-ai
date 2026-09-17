@@ -23,16 +23,37 @@ Two independent candidate lists are pulled per query:
 - vector: nearest neighbours by `embedding <=> :query_vector` (pgvector's
   cosine *distance* operator -- smaller is more similar), ascending.
 - keyword: `content_tsv @@ websearch_to_tsquery('english', :query_text)`,
-  ordered by `ts_rank_cd` descending. `websearch_to_tsquery` specifically,
-  not `to_tsquery`: the latter raises on bare `&`/`|`/`:`/unbalanced quotes
-  in the input, which for a query built from a customer's own words is a
-  matter of when, not if.
+  ordered by `ts_rank_cd` descending, with an OR-joined fallback when that
+  strict form matches nothing (see `_AND_TSQUERY`/`_OR_TSQUERY` below).
+  `websearch_to_tsquery` specifically, not `to_tsquery`: the latter raises
+  on bare `&`/`|`/`:`/unbalanced quotes in the input, which for a query
+  built from a customer's own words is a matter of when, not if.
 
 The two lists are combined with Reciprocal Rank Fusion rather than trying
 to make cosine distance and `ts_rank_cd` commensurable -- they are on
 unrelated scales and neither is a probability, so there is no principled
 way to add them directly. RRF sidesteps that by fusing on rank position
 alone.
+
+That last property is exactly why the relevance floor lives on each arm
+rather than on the fused score. An RRF score carries no information about
+*how good* a match is -- the top hit is `1/61` whether it answers the
+question or is the least-bad row in an unrelated corpus -- so a
+`min_score` applied after fusion can only ever mean "appeared in one list"
+versus "appeared in both". Before this floor existed the vector arm
+returned its nearest `candidates` rows unconditionally, and a corpus with
+any documents in it therefore cited up to `top_k` chunks on *every* turn,
+`hi` included: into the system prompt, onto the user's "Sources" list, and
+into `message_citations` as having grounded an answer they had nothing to
+do with. The two arms carry their own, differently-shaped floors:
+
+- vector: `embedding <=> :query_vector <= :max_distance`, defaulting to
+  `settings.retrieval_max_cosine_distance` (see that setting for how the
+  default was measured and why it is embedder-specific).
+- keyword: the `@@` match itself for the strict (AND) form -- a lexical
+  match on *every* content word is already a relevance predicate, which is
+  what the vector arm was missing. The OR fallback, which requires only one
+  of them, additionally needs `ts_rank_cd >= :min_rank`.
 """
 
 import uuid
@@ -41,6 +62,7 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.tenancy import TenantContext
 from app.embeddings.base import EmbeddingProvider
 from app.embeddings.registry import get_embedding_provider
@@ -94,19 +116,58 @@ _VECTOR_SQL = text(
     "FROM document_chunks dc "
     "JOIN documents d ON d.id = dc.document_id AND d.organization_id = :organization_id "
     "WHERE dc.organization_id = :organization_id "
+    "AND dc.embedding <=> CAST(:query_vector AS vector) <= :max_distance "
     "ORDER BY dc.embedding <=> CAST(:query_vector AS vector) ASC "
     "LIMIT :candidates"
 )
 
-_KEYWORD_SQL = text(
+# `websearch_to_tsquery` ANDs every content word of the input, which is the
+# right default and the wrong one for a chat product. A natural question
+# always carries a word the corpus does not have, so the whole keyword arm
+# returns nothing while the vector arm keeps answering and the feature still
+# looks like it works. Measured against a real ingested handbook:
+#
+#   "How long do I have to file a return?"  -> long & file & return  -> 0 rows
+#   "file a return"                         -> file & return         -> 1 row
+#   "What does the powertrain warranty cover exactly?"
+#       -> powertrain & warranti & cover & exact                     -> 0 rows
+#
+# That matters more than a missing arm usually would, because this is the
+# only arm that stems: `HashingEmbedder` is an unstemmed bag of words, so
+# "return" and "returns" are different buckets to the vector side.
+#
+# The OR form is derived from `websearch_to_tsquery`'s own *parsed output*,
+# not from the user's raw text. `websearch_to_tsquery` stays on the
+# user-input path -- it is what stops a stray `&` or `:` from becoming a
+# syntax error and a 500 -- and its `::text` rendering is a normalized
+# tsquery literal with every lexeme single-quoted, so swapping the `&`
+# operators for `|` cannot produce anything that fails to parse. (A lexeme
+# that itself contains `&`, e.g. a URL token, comes back as a slightly
+# different lexeme; still valid, still no injection.)
+_AND_TSQUERY = "websearch_to_tsquery('english', :query_text)"
+_OR_TSQUERY = "replace(websearch_to_tsquery('english', :query_text)::text, '&', '|')::tsquery"
+
+_KEYWORD_SQL_TEMPLATE = (
     "SELECT dc.id AS id, dc.document_id AS document_id, d.title AS title, "
     "dc.content AS content, dc.metadata AS metadata "
     "FROM document_chunks dc "
     "JOIN documents d ON d.id = dc.document_id AND d.organization_id = :organization_id "
     "WHERE dc.organization_id = :organization_id "
-    "AND dc.content_tsv @@ websearch_to_tsquery('english', :query_text) "
-    "ORDER BY ts_rank_cd(dc.content_tsv, websearch_to_tsquery('english', :query_text)) DESC "
+    "AND dc.content_tsv @@ {tsquery} "
+    "{rank_floor}"
+    "ORDER BY ts_rank_cd(dc.content_tsv, {tsquery}) DESC "
     "LIMIT :candidates"
+)
+
+_KEYWORD_ALL_TERMS_SQL = text(_KEYWORD_SQL_TEMPLATE.format(tsquery=_AND_TSQUERY, rank_floor=""))
+# The OR form carries a `ts_rank_cd` floor the AND form does not need: "every
+# content word is present" is already a relevance predicate, "at least one
+# is" is not. See `settings.retrieval_min_keyword_rank`.
+_KEYWORD_ANY_TERM_SQL = text(
+    _KEYWORD_SQL_TEMPLATE.format(
+        tsquery=_OR_TSQUERY,
+        rank_floor=f"AND ts_rank_cd(dc.content_tsv, {_OR_TSQUERY}) >= :min_rank ",
+    )
 )
 
 
@@ -140,6 +201,8 @@ class RetrievalService:
         top_k: int = 5,
         candidates: int = 20,
         min_score: float = 0.0,
+        max_distance: float | None = None,
+        min_keyword_rank: float | None = None,
     ) -> list[RetrievedChunk]:
         """Return up to `top_k` chunks for `query`, fused across vector and
         keyword search and filtered to `score >= min_score`.
@@ -149,7 +212,21 @@ class RetrievalService:
         wider candidate pool than the final result size is what lets a
         chunk that is merely decent on both signals outrank one that is
         merely great on one, per RRF's whole premise.
+
+        `max_distance` is the vector arm's relevance floor (cosine
+        distance, defaulting to `settings.retrieval_max_cosine_distance`)
+        and `min_keyword_rank` is the floor on the keyword arm's fallback
+        form (`settings.retrieval_min_keyword_rank`). Both are applied
+        *before* fusion, for the reason set out in this module's docstring.
+        `min_score` still filters the fused score afterwards, but it answers
+        a different question -- "how many lists did this appear in, and how
+        high" -- and cannot substitute for either.
         """
+        settings = get_settings()
+        if max_distance is None:
+            max_distance = settings.retrieval_max_cosine_distance
+        if min_keyword_rank is None:
+            min_keyword_rank = settings.retrieval_min_keyword_rank
         [query_vector] = await self.embedder.embed([query])
         organization_id = self.tenant.organization_id
 
@@ -160,19 +237,29 @@ class RetrievalService:
                     "query_vector": _vector_literal(query_vector),
                     "candidates": candidates,
                     "organization_id": organization_id,
+                    "max_distance": max_distance,
                 },
             )
         ).all()
-        keyword_rows = (
-            await self.session.execute(
-                _KEYWORD_SQL,
-                {
-                    "query_text": query,
-                    "candidates": candidates,
-                    "organization_id": organization_id,
-                },
-            )
-        ).all()
+        keyword_params = {
+            "query_text": query,
+            "candidates": candidates,
+            "organization_id": organization_id,
+        }
+        keyword_rows = (await self.session.execute(_KEYWORD_ALL_TERMS_SQL, keyword_params)).all()
+        if not keyword_rows:
+            # Only on a miss, so an exact-ish query keeps the strict form's
+            # precision and pays for one extra statement only when the strict
+            # form had nothing to give. RRF supplies the precision back on
+            # this path: a chunk matching several query terms ranks above one
+            # matching a single term, `ts_rank_cd` orders them that way, and
+            # fusion with the vector arm settles the rest.
+            keyword_rows = (
+                await self.session.execute(
+                    _KEYWORD_ANY_TERM_SQL,
+                    {**keyword_params, "min_rank": min_keyword_rank},
+                )
+            ).all()
 
         scores: dict[uuid.UUID, float] = {}
         info: dict[uuid.UUID, _CandidateInfo] = {}

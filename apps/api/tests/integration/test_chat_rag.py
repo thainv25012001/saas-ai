@@ -284,14 +284,19 @@ async def test_message_citations_are_persisted_even_when_the_stream_fails_mid_tu
     success-path test above. Without this, a failed-but-grounded turn is
     indistinguishable from one that was never grounded at all.
     """
+    # Chunk and question have to be genuinely about the same thing: since
+    # the relevance floor landed (see `settings.retrieval_max_cosine_distance`)
+    # an unrelated pair retrieves nothing, and a turn with no citations
+    # cannot say anything about whether citations survive a failed stream.
+    chunk_text = "Our refund policy allows a full refund within thirty days of purchase."
     async with tenant_session(tenant_a) as session:
         await _ready_document_with_chunks(
-            session, tenant_a, [("Some ready content.", await _embed("Some ready content."))]
+            session, tenant_a, [(chunk_text, await _embed(chunk_text))]
         )
         agent = await _agent(session, tenant_a)
         provider = FakeProvider(script=["partial ", "more"], fail_with=LLMUnavailableError("gone"))
         service = ChatService(session, tenant_a, provider_override=provider)
-        events = [event async for event in service.send(agent.id, "Hello")]
+        events = [event async for event in service.send(agent.id, "What is the refund policy?")]
 
     assert any(isinstance(e, ChatError) for e in events)
     citation_event = next(e for e in events if isinstance(e, ChatCitations))
@@ -445,7 +450,14 @@ async def test_sse_stream_emits_citations_event_before_the_first_text_delta(
 
     response = await api_client.post(
         CHAT_URL,
-        json={"agent_id": str(agent_id), "message": "warranty coverage duration"},
+        # A real question about the seeded chunk rather than a keyword
+        # soup: "warranty coverage duration" shares only one stemmed word
+        # with it, which the relevance floor now (correctly) declines to
+        # treat as grounding -- and this test needs a grounded turn.
+        json={
+            "agent_id": str(agent_id),
+            "message": "How long does the standard warranty cover parts and labor?",
+        },
         headers=_auth(token),
     )
 

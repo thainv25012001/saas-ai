@@ -131,6 +131,44 @@ class Settings(BaseSettings):
     # headroom rather than running right up against 7 (the exact floor).
     # Change this alongside `pool_size`/`max_overflow` if either moves.
     worker_max_jobs: int = 5
+    # The relevance floor on the *vector* arm of hybrid retrieval, as a
+    # pgvector cosine distance (`<=>`, 0 = identical, 1 = orthogonal). A
+    # candidate further away than this is dropped before fusion, because
+    # Reciprocal Rank Fusion cannot express relevance at all -- its scores
+    # come from rank position, so the top hit is exactly `1/61` whatever it
+    # contains. Without a floor here, the vector retriever returned its
+    # nearest rows unconditionally and *every* turn, `hi` included, cited up
+    # to `top_k` chunks as having grounded the answer.
+    #
+    # 0.8 is measured against the default `HashingEmbedder` on a real
+    # multi-topic corpus (see tests/integration/test_retrieve.py): questions
+    # the corpus answers land at 0.60-0.71 from their own section, while
+    # conversational filler ("hi", "thanks!", an off-topic question) lands at
+    # 0.82-1.00. The gap is what it is because that embedder is a hashed
+    # bag-of-words including stopwords, so shared function words alone put an
+    # unrelated query around 0.82.
+    #
+    # This number is a property of the embedding model, not of the app: a
+    # real semantic embedder puts *unrelated* text around 0.2-0.3, where 0.8
+    # admits nearly everything and this degrades to the old behaviour rather
+    # than to a silent corpus -- the safe direction to be wrong in, but still
+    # a number to re-measure whenever `EMBEDDING_PROVIDER` changes, which is
+    # why it is a setting and not a constant.
+    retrieval_max_cosine_distance: float = 0.8
+    # The relevance floor on the keyword arm's *fallback* form only -- see
+    # `app/rag/retrieve.py` for why that arm has two forms. The strict form
+    # requires every content word of the query to be present, which is a
+    # relevance predicate in itself and needs no threshold. The fallback
+    # requires only one, so without a floor a question that happens to share
+    # a single stemmed word with the corpus ("does it come in red?" against a
+    # warranty chunk that says "whichever comes first") would cite it.
+    #
+    # `ts_rank_cd` with the default normalization returns roughly 0.1 per
+    # matched lexeme occurrence in the cover, so 0.15 reads as "more than one
+    # incidental word matched". Measured on the same corpus as
+    # `retrieval_max_cosine_distance`: real questions score 0.2-0.5 against
+    # the section that answers them, single-word coincidences score 0.1.
+    retrieval_min_keyword_rank: float = 0.15
 
     @field_validator("database_url", "migration_database_url", mode="after")
     @classmethod
