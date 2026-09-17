@@ -26,6 +26,51 @@ SUPPORTED_MIME_TYPES: frozenset[str] = frozenset(
     }
 )
 
+# The browser is the only thing that says what type an upload is, and for
+# several of the types above it says nothing at all: `.md` has no registry
+# association on Windows or on most Linux desktops, so `File.type` is `""`
+# and the multipart part arrives with no usable content type. Some clients
+# send `application/octet-stream` instead, which is the same non-answer in a
+# different shape. Either way a `.md` file -- advertised in the dropzone's
+# own help text -- was rejected as `"unknown" is not a supported file type`.
+#
+# The filename's extension is the fallback, and only the fallback: a client
+# that reports a supported type is believed even when the extension
+# disagrees, because the reported type is the better evidence (HTML saved as
+# `.txt` should still extract as HTML).
+_GENERIC_MIME_TYPES: frozenset[str] = frozenset(
+    {"", "application/octet-stream", "binary/octet-stream"}
+)
+
+EXTENSION_MIME_TYPES: dict[str, str] = {
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
+
+def resolve_mime_type(reported: str | None, filename: str | None) -> str:
+    """The type to treat an upload as: what the client said, or what the
+    filename implies when the client said nothing useful.
+
+    Returns the reported value unchanged when it is anything other than
+    empty/`octet-stream`, and when no extension matches -- so a genuinely
+    unsupported file still fails the `SUPPORTED_MIME_TYPES` check with the
+    type it actually claimed, rather than being quietly relabelled.
+    """
+    reported = reported or ""
+    if reported.lower() not in _GENERIC_MIME_TYPES:
+        return reported
+    if not filename:
+        return reported
+    _, _, suffix = filename.rpartition(".")
+    return EXTENSION_MIME_TYPES.get(f".{suffix.lower()}", reported)
+
+
 # The separator `extract()` uses to join per-page text into `.text`, and the
 # one `chunk.py` re-walks to map a chunk's absolute offset back to a page
 # number. Shared as a constant rather than duplicated so the two modules
@@ -115,6 +160,10 @@ def extract(data: bytes, mime_type: str, filename: str | None = None) -> Extract
     control flow, but it is still raised here so a mime type that slips
     through fails loudly instead of producing garbage text.
     """
+    # `filename` is not only for the error message below: it is also what
+    # `resolve_mime_type` uses when the caller has nothing better than `""`
+    # or `application/octet-stream` to offer.
+    mime_type = resolve_mime_type(mime_type, filename)
     if mime_type not in SUPPORTED_MIME_TYPES:
         suffix = f" ({filename})" if filename else ""
         raise UnsupportedDocumentType(f"unsupported document type '{mime_type}'{suffix}")

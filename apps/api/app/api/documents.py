@@ -35,7 +35,7 @@ from app.db.models import Document as DocumentModel
 from app.db.models import DocumentSourceType, DocumentStatus
 from app.documents.schemas import CreateDocumentInput
 from app.documents.service import DocumentService
-from app.rag.extract import SUPPORTED_MIME_TYPES, UnsupportedDocumentType
+from app.rag.extract import SUPPORTED_MIME_TYPES, UnsupportedDocumentType, resolve_mime_type
 from app.rag.queue import enqueue_ingest
 from app.rag.storage import store_document_bytes
 
@@ -171,7 +171,13 @@ async def upload_document(
         # `UnsupportedDocumentType` from, is what keeps a file that uploads
         # cleanly from ever failing later for a type this module was never
         # taught to handle.
-        mime_type = upload.content_type or ""
+        # Resolved, not taken at face value: the browser reports `""` for
+        # `.md` on any OS without that registry association, and the
+        # resolved value is what gets *stored* on the row -- the worker
+        # reads `documents.mime_type` back to decide how to extract, so
+        # admitting a file here and storing `""` would only move the failure
+        # into the worker. See `resolve_mime_type`.
+        mime_type = resolve_mime_type(upload.content_type, upload.filename)
         if mime_type not in SUPPORTED_MIME_TYPES:
             # Logged, not just raised: a rejection the user sees as "not a
             # supported file type" is the one case where the operator needs

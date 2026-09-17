@@ -45,6 +45,37 @@ export function isAcceptedDocumentType(mimeType: string): boolean {
   return mimeType in ACCEPTED_DOCUMENT_TYPES;
 }
 
+/**
+ * `resolve_mime_type` in `apps/api/app/rag/extract.py`, mirrored -- and
+ * mirrored because it has to be: both sides used to key solely off
+ * `File.type`, which the browser leaves empty for `.md` on any OS without
+ * that registry association. They were therefore wrong *together*, so a
+ * `.md` file the dropzone advertises was rejected here before the request
+ * was even made, and would have been rejected by the server too.
+ *
+ * Only a non-answer (`""`, `application/octet-stream`) is overridden: a
+ * reported type this list knows is believed even if the extension
+ * disagrees.
+ */
+const GENERIC_MIME_TYPES = new Set(["", "application/octet-stream", "binary/octet-stream"]);
+
+const EXTENSION_MIME_TYPES: Record<string, string> = {
+  txt: "text/plain",
+  md: "text/markdown",
+  markdown: "text/markdown",
+  html: "text/html",
+  htm: "text/html",
+  pdf: "application/pdf",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+};
+
+export function resolveDocumentType(reported: string, filename?: string): string {
+  if (!GENERIC_MIME_TYPES.has(reported.toLowerCase())) return reported;
+  if (!filename) return reported;
+  const suffix = filename.slice(filename.lastIndexOf(".") + 1).toLowerCase();
+  return EXTENSION_MIME_TYPES[suffix] ?? reported;
+}
+
 /** `1536` -> `"1.5 KB"`, `20971520` -> `"20 MB"`. Whole numbers past 10 units
  * skip the decimal -- "20 MB" reads better than "20.0 MB" for describing an
  * arbitrary file's actual size, where rounding either way is harmless. NOT
@@ -94,11 +125,16 @@ export function formatByteLimit(bytes: number): string {
  * checks -- a client can always be bypassed -- just what keeps the honest
  * path from ever needing them.
  */
-export function validateDocumentFile(file: { type: string; size: number }): ApiError | null {
-  if (!isAcceptedDocumentType(file.type)) {
+export function validateDocumentFile(file: {
+  type: string;
+  size: number;
+  name?: string;
+}): ApiError | null {
+  const mimeType = resolveDocumentType(file.type, file.name);
+  if (!isAcceptedDocumentType(mimeType)) {
     return {
       code: "unsupported_document_type",
-      message: `"${file.type || "unknown"}" is not a supported file type. Accepts ${ACCEPTED_DOCUMENT_EXTENSIONS.join(", ")}.`,
+      message: `"${mimeType || "unknown"}" is not a supported file type. Accepts ${ACCEPTED_DOCUMENT_EXTENSIONS.join(", ")}.`,
     };
   }
   if (file.size > MAX_UPLOAD_BYTES) {

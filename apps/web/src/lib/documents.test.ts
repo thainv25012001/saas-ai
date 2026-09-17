@@ -73,6 +73,23 @@ describe("validateDocumentFile", () => {
     expect(error?.code).toBe("payload_too_large");
   });
 
+  it("falls back to the filename when the browser reports no type for a .md file", () => {
+    // Windows and most Linux desktops have no registry association for
+    // `.md`, so `File.type` is `""` -- and both this check and the server's
+    // keyed off that same empty string, which made a file type the dropzone
+    // advertises impossible to upload from those machines.
+    expect(validateDocumentFile({ type: "", size: 1024, name: "policy.md" })).toBeNull();
+    expect(
+      validateDocumentFile({ type: "application/octet-stream", size: 1024, name: "policy.md" }),
+    ).toBeNull();
+    expect(validateDocumentFile({ type: "", size: 1024, name: "POLICY.MD" })).toBeNull();
+  });
+
+  it("still rejects an unknown extension when the browser reports no type", () => {
+    const error = validateDocumentFile({ type: "", size: 1024, name: "archive.zip" });
+    expect(error?.code).toBe("unsupported_document_type");
+  });
+
   it("accepts a file exactly at the usable upload budget", () => {
     expect(validateDocumentFile({ type: "text/plain", size: MAX_UPLOAD_BYTES })).toBeNull();
   });

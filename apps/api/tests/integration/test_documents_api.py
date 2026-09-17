@@ -179,6 +179,75 @@ async def test_reuploading_different_bytes_creates_a_second_document_and_enqueue
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("filename", "reported_type", "expected_mime"),
+    [
+        # The case that started this: Windows and most Linux desktops have no
+        # registry association for `.md`, so browsers report an empty string
+        # and the dropzone's own help text advertises a file type the server
+        # then rejects as `"unknown" is not a supported file type`.
+        ("policy.md", "", "text/markdown"),
+        # Some clients say `application/octet-stream` instead of nothing.
+        ("policy.md", "application/octet-stream", "text/markdown"),
+        ("page.html", "", "text/html"),
+        ("notes.txt", "", "text/plain"),
+        ("manual.pdf", "", "application/pdf"),
+        # Case in the extension must not matter.
+        ("POLICY.MD", "", "text/markdown"),
+    ],
+)
+async def test_a_missing_or_generic_mime_type_falls_back_to_the_filename(
+    api_client, clean_users, queue, filename, reported_type, expected_mime
+):
+    """Both the client and the server keyed solely off the browser-reported
+    content type, which for `.md` is `""` on any OS without that association
+    -- so they were wrong together, not one stricter than the other, and a
+    file type the UI advertises was effectively unuploadable.
+
+    The resolved type is what gets *stored*, not just what passes the check:
+    the worker reads `documents.mime_type` back off the row to decide how to
+    extract, so a document admitted as Markdown and stored as `""` would
+    fail in the worker instead of at the door.
+    """
+    token = await _register(api_client, f"{filename.lower()}@example.com", f"Ada Motors {filename}")
+    response = await _upload(
+        api_client,
+        token,
+        content=b"# Heading\n\nSome text.",
+        content_type=reported_type,
+        filename=filename,
+    )
+    assert response.status_code == 202, response.text
+    assert response.json()["mime_type"] == expected_mime
+
+
+async def test_an_unknown_extension_with_no_mime_type_is_still_rejected(
+    api_client, clean_users, queue
+):
+    """The fallback resolves an extension this app knows; it does not make
+    every unlabelled file acceptable."""
+    token = await _register(api_client, "unknownext@example.com", "Ada Motors Unknown Ext")
+    response = await _upload(
+        api_client, token, content=b"data", content_type="", filename="archive.zip"
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "unsupported_document_type"
+    assert queue.calls == []
+
+
+async def test_a_declared_mime_type_wins_over_the_extension(api_client, clean_users, queue):
+    """The fallback only applies when the client said nothing useful. A
+    client that reports a real, supported type is believed, even if the
+    filename disagrees -- the reported type is the better evidence, and
+    second-guessing it would make `.txt`-named HTML extract as plain text."""
+    token = await _register(api_client, "declared@example.com", "Ada Motors Declared")
+    response = await _upload(
+        api_client, token, content=b"<p>hi</p>", content_type="text/html", filename="page.txt"
+    )
+    assert response.status_code == 202, response.text
+    assert response.json()["mime_type"] == "text/html"
+
+
 async def test_unsupported_mime_type_is_422(api_client, clean_users, queue):
     token = await _register(api_client, "mime@example.com", "Ada Motors Documents Mime")
     response = await _upload(
