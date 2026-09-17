@@ -5,23 +5,37 @@ so the same function drives both a direct test (against a `tenant_session`
 fixture already holding a transaction) and the arq worker's own
 `tenant_session` (`app.workers.tasks.ingest_document_task`) identically.
 
-Commit discipline is the crux of this module, not a detail:
+Commit discipline is the crux of this module, not a detail, and it is split
+three ways across three separate transactions -- not the two it might look
+like at first:
 
+- `status=processing` is committed through its own independent
+  `tenant_session`, before this function touches `session` (the caller's
+  own transaction) at all. This is what makes `processing` an actually
+  observable state rather than one that only ever exists inside a
+  transaction nobody outside this call can see until it finally commits or
+  rolls back -- Task 8's Knowledge page polls this column for a status
+  badge while a large document is mid-pipeline.
 - On success, the new chunks and `status=ready` are committed together on
-  `session`, the caller's own transaction, before this function returns.
+  `session` -- but by the *caller's* own `tenant_session`, not by this
+  function. `ingest_document` never calls `session.commit()` itself on the
+  success path: whatever opened `session` is the only thing that knows
+  whether committing it now is safe (a caller that does more work on
+  `session` afterward needs that transaction to still be open).
 - On any failure, `status=failed` (with the error) is committed
-  unconditionally through a *second*, independent transaction, then the
+  unconditionally through a *third*, independent transaction, then the
   original exception is re-raised. It cannot simply commit `session` the
-  way the success path does: the failure may itself be a database error
-  (e.g. a constraint violation inside `replace_chunks`), which leaves
-  `session` unable to do anything further while still nested inside the
-  caller's own transaction (see the comment in the `except` block below for
-  why). Writing the failure through its own transaction sidesteps that
-  entirely and guarantees the commit happens regardless -- the same
-  commit-vs-rollback distinction Phase 2's SSE endpoint got wrong once,
-  leaving a row silently unwritten. Without it, a failed ingest would roll
-  all the way back to the row's previous status and the document would sit
-  in `processing` forever with nothing to retry it and no record of why.
+  way a caller's own success commit does: the failure may itself be a
+  database error (e.g. a constraint violation inside `replace_chunks`),
+  which leaves `session` unable to do anything further while still nested
+  inside the caller's own transaction (see the comment in the `except`
+  block below for why). Writing the failure through its own transaction
+  sidesteps that entirely and guarantees the commit happens regardless --
+  the same commit-vs-rollback distinction Phase 2's SSE endpoint got wrong
+  once, leaving a row silently unwritten. Without it, a failed ingest would
+  roll all the way back to the row's previous status and the document
+  would sit in `processing` forever with nothing to retry it and no record
+  of why.
 
 Embedding failure is deliberately all-or-nothing: `_embed_all` only returns
 once every chunk in the document has a vector, and any batch that exhausts
@@ -83,15 +97,13 @@ async def _embed_all(texts: list[str]) -> tuple[list[list[float]], str]:
     """Embed every chunk, batched and retried, all-or-nothing.
 
     Returns `([], provider.name)` for a document with no chunks (an empty
-    input) without ever calling the provider -- there is nothing to embed,
-    and calling a provider with an empty batch is not a case any of them
-    are obliged to handle sensibly.
+    input) without ever calling the provider -- `range(0, 0, batch_size)`
+    is empty, so the loop below simply does not execute; there is nothing
+    to embed, and calling a provider with an empty batch is not a case any
+    of them are obliged to handle sensibly.
     """
     settings = get_settings()
     provider = get_embedding_provider()
-    if not texts:
-        return [], provider.name
-
     batch_size = settings.embedding_batch_size
     max_retries = settings.embedding_max_retries
     backoff_seconds = settings.embedding_retry_backoff_seconds
@@ -111,15 +123,18 @@ async def ingest_document(
 ) -> IngestResult:
     """Run the whole pipeline for one document, inside the caller's session.
 
-    Sets `status=processing` on entry; on success, replaces the document's
-    chunks and sets `status=ready` + `processed_at`; on any exception, sets
-    `status=failed` with a truncated message in `error`, commits that, and
-    re-raises. See the module docstring for why the commit on the failure
-    path cannot wait for the caller.
+    Sets `status=processing` on entry, committed through its own
+    transaction; on success, replaces the document's chunks and sets
+    `status=ready` + `processed_at` on `session`, left for the *caller* to
+    commit; on any exception, sets `status=failed` with a truncated message
+    in `error` through yet another independent transaction, and re-raises.
+    See the module docstring for why each of those three writes needs its
+    own transaction rather than sharing one.
     """
-    service = DocumentService(session, tenant)
-    await service.mark_processing(document_id)
+    async with tenant_session(tenant) as processing_session:
+        await DocumentService(processing_session, tenant).mark_processing(document_id)
 
+    service = DocumentService(session, tenant)
     try:
         extracted = extract(data, mime_type)
         chunks = chunk_document(extracted)
@@ -160,19 +175,25 @@ async def ingest_document(
         # cooperating -- the same commit-not-rollback distinction Phase 2's
         # SSE endpoint got wrong once.
         #
-        # `session` is rolled back first -- not left for the caller's own
-        # `tenant_session` to clean up later -- because `mark_processing`'s
-        # UPDATE at the top of this function is still holding this row's
-        # lock as long as that transaction is open. Without releasing it
-        # here, `failure_session`'s own UPDATE below would block on it
-        # forever: this function waiting on its own earlier, still-open
-        # write.
+        # `session` is rolled back first rather than left for the caller's
+        # own `tenant_session` to clean up once this exception reaches it.
+        # `mark_processing` no longer writes through `session` (it commits
+        # through its own independent transaction above, before the `try`
+        # even starts), so as this pipeline stands today `session` reaching
+        # this point never holds a lock that conflicts with
+        # `failure_session`'s own `UPDATE` -- removing this rollback does
+        # not currently reproduce the deadlock that first motivated it
+        # (verified by removing it and re-running the full suite, including
+        # the genuine-database-error test below, with no hang). It stays
+        # anyway: it is a correct, cheap thing to do with a session this
+        # function is about to stop using regardless, and it is what
+        # prevents a *future* change that adds another `documents`-row
+        # write to `session` before this point from silently reintroducing
+        # exactly that deadlock.
         await session.rollback()
         async with tenant_session(tenant) as failure_session:
             await DocumentService(failure_session, tenant).mark_failed(document_id, message)
         raise
-    else:
-        await session.commit()
 
     return IngestResult(
         chunk_count=len(chunk_inputs),

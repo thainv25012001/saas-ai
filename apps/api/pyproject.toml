@@ -27,9 +27,21 @@ dependencies = [
     # rather than relying on a transitive dependency staying put.
     "httpx2>=2.13",
     "openai>=1.50",
-    # Pins `redis<6` itself (see uv.lock), which downgrades this project's own
-    # redis-py from the 8.x line -- app/core/redis.py only uses `from_url`,
-    # `ping`, `scan_iter` and `delete`, all stable across that range.
+    # Pins `redis<6` itself (see uv.lock), which downgrades this project's
+    # own redis-py from the 8.x line. This app's actual surface against
+    # redis-py is small and stable across that range: `from_url`/`ping`
+    # (app/core/redis.py), `eval` (app/core/rate_limit.py -- the one method
+    # the downgrade actually changed the type stub for, fixed there), and
+    # `exists`/`set(ex=...)` (the refresh-token denylist, app/auth/service.py).
+    #
+    # Accepting the pin rather than isolating arq into its own image: this
+    # project already declares `redis>=5.2`, so nothing committed to here is
+    # violated, and the compose design (worker reuses the api image and the
+    # same app/ code -- see docker-compose.yml) is exactly what isolating
+    # arq into a separate image would give up. The real cost is deferred
+    # CVE exposure on redis-py 5.x; what would unblock 6.x is either an arq
+    # release that relaxes its `redis<6` pin, or switching to a queue with
+    # no such pin.
     "arq>=0.28",
 ]
 

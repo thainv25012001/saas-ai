@@ -11,6 +11,7 @@ from arq import create_pool
 from arq.connections import RedisSettings
 
 from app.core.config import get_settings
+from app.workers.tasks import ingest_document_task
 
 
 async def enqueue_ingest(document_id: uuid.UUID, organization_id: uuid.UUID) -> None:
@@ -23,7 +24,13 @@ async def enqueue_ingest(document_id: uuid.UUID, organization_id: uuid.UUID) -> 
     pool = await create_pool(RedisSettings.from_dsn(get_settings().redis_url))
     try:
         await pool.enqueue_job(
-            "ingest_document_task",
+            # arq derives a job's registered name from the function object's
+            # own `__name__` (see `WorkerSettings.functions`), so this must
+            # be that same name, not a copy of it -- a bare string literal
+            # here would silently drift the moment the function is renamed,
+            # and the failure is invisible: the job just piles up in Redis
+            # with no worker listening for it.
+            ingest_document_task.__name__,
             organization_id=str(organization_id),
             document_id=str(document_id),
         )
