@@ -19,6 +19,9 @@ dependencies = [
     "strawberry-graphql[fastapi]>=0.248",
     "anthropic>=0.40",
     "pgvector>=0.3",
+    "pypdf>=5.1",
+    "python-docx>=1.1",
+    "selectolax>=0.3",
     # Already in the closure via the OpenAI and Anthropic SDKs; declared
     # explicitly because `app/llm/openrouter_models.py` imports it directly
     # rather than relying on a transitive dependency staying put.
