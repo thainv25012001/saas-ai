@@ -34,6 +34,32 @@ DEFAULT_MODELS: dict[str, str] = {
 }
 
 
+# Which `Settings` field holds each provider's API key. `fake` is absent
+# because it needs none. Defined once, and read by both `provider_is_configured`
+# and `_build` below: the dashboard greys out a provider on exactly the
+# condition that makes `_build` raise `LLMConfigurationError`, and two copies
+# of that mapping would let the two answers drift apart.
+_API_KEY_FIELDS: dict[str, str] = {
+    "openai": "openai_api_key",
+    "anthropic": "anthropic_api_key",
+    "openrouter": "openrouter_api_key",
+}
+
+
+def provider_is_configured(name: str) -> bool:
+    """Whether this provider has the API key it needs to answer.
+
+    Public because the dashboard asks it before offering a provider: picking
+    one with no key produces an agent that cannot answer, and the failure
+    surfaces at chat time rather than at the dropdown where it was caused.
+    """
+    require_known_provider(name)
+    field = _API_KEY_FIELDS.get(name)
+    if field is None:
+        return True  # `fake` answers offline; there is no key to be missing.
+    return bool(getattr(get_settings(), field))
+
+
 def require_known_provider(name: str) -> None:
     """Reject a provider name nothing here can serve.
 

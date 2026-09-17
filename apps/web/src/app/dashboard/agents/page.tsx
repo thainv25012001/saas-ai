@@ -1,21 +1,26 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "urql";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { Field } from "@/components/ui/Field";
 import { Icon } from "@/components/ui/icons";
-import { Input } from "@/components/ui/Input";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { LoadingState } from "@/components/ui/Spinner";
-import { AgentsDocument, CreateAgentDocument } from "@/graphql/generated";
+import { CreateAgentForm, type CreateAgentValues } from "@/components/agents/CreateAgentForm";
+import {
+  AgentsDocument,
+  ConfiguredProvidersDocument,
+  CreateAgentDocument,
+  ProviderModelsDocument,
+} from "@/graphql/generated";
 import { agentStatusLabel, agentStatusTone } from "@/lib/agent-status";
 import { useAuth } from "@/lib/auth";
+import { creatableProviders } from "@/lib/providers";
 import { firstGraphQLError } from "@/lib/graphql-errors";
 
 export default function AgentsPage() {
@@ -24,15 +29,42 @@ export default function AgentsPage() {
     query: AgentsDocument,
     pause: loading || !user,
   });
+  const [providersResult] = useQuery({
+    query: ConfiguredProvidersDocument,
+    pause: loading || !user,
+  });
   const [createResult, createAgent] = useMutation(CreateAgentDocument);
-  const [name, setName] = useState("");
   // The list is what you came for, so the create form is disclosed rather
   // than parked above it permanently.
   const [creating, setCreating] = useState(false);
+  // Owned here rather than inside the form, because the model query keys on it.
+  const [provider, setProvider] = useState("");
   // urql's mutation result has no reset: a failed create otherwise leaves
   // `createResult.error` set, so cancelling and reopening the form would
   // show a fresh, empty field already flagged with the stale message.
   const [errorDismissed, setErrorDismissed] = useState(false);
+
+  // Memoised because the effect below depends on it: `?? []` is a new array
+  // on every render, which would re-run the effect every render.
+  const providers = useMemo(
+    () => providersResult.data?.configuredProviders ?? [],
+    [providersResult.data],
+  );
+
+  // Seeded from the API's answer rather than hardcoded: which providers are
+  // offerable depends on which API keys the server holds, so there is nothing
+  // sensible to guess before the query resolves.
+  useEffect(() => {
+    if (provider !== "") return;
+    const first = creatableProviders(providers)[0];
+    if (first) setProvider(first.id);
+  }, [providers, provider]);
+
+  const [modelsResult] = useQuery({
+    query: ProviderModelsDocument,
+    variables: { provider },
+    pause: loading || !user || !provider,
+  });
 
   const agents = data?.agents ?? [];
   const createError = errorDismissed ? null : firstGraphQLError(createResult.error);
@@ -46,15 +78,12 @@ export default function AgentsPage() {
   function cancelCreateForm() {
     setErrorDismissed(true);
     setCreating(false);
-    setName("");
   }
 
-  async function onCreate(event: React.FormEvent) {
-    event.preventDefault();
+  async function onCreate(values: CreateAgentValues) {
     setErrorDismissed(false);
-    const result = await createAgent({ name });
+    const result = await createAgent(values);
     if (!result.error) {
-      setName("");
       setCreating(false);
       refetchAgents({ requestPolicy: "network-only" });
     }
@@ -77,32 +106,21 @@ export default function AgentsPage() {
 
       {creating ? (
         <Card>
-          <form onSubmit={onCreate} className="space-y-4 p-5">
-            <Field
-              label="Agent name"
-              description="Used to generate the agent's slug. You can change the name later."
-              error={createError}
-              required
-            >
-              {(control) => (
-                <Input
-                  {...control}
-                  type="text"
-                  autoFocus
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                />
-              )}
-            </Field>
-            <div className="flex items-center gap-2">
-              <Button type="submit" loading={createResult.fetching} loadingLabel="Creating…">
-                Create agent
-              </Button>
-              <Button type="button" variant="secondary" onClick={cancelCreateForm}>
-                Cancel
-              </Button>
-            </div>
-          </form>
+          {/* The form holds the name and model in its own state. It unmounts
+            * when `creating` goes false, so cancel-and-reopen gives a fresh
+            * one with nothing left over. */}
+          <CreateAgentForm
+            providers={providers}
+            provider={provider}
+            onProviderChange={setProvider}
+            models={modelsResult.data?.providerModels ?? []}
+            modelsFetching={modelsResult.fetching}
+            modelsFailed={modelsResult.error !== undefined}
+            submitting={createResult.fetching}
+            error={createError}
+            onSubmit={onCreate}
+            onCancel={cancelCreateForm}
+          />
         </Card>
       ) : null}
 

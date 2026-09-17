@@ -2,7 +2,6 @@ from decimal import Decimal
 
 import pytest
 
-from app.agents.schemas import CreateAgentInput
 from app.agents.service import AgentService
 from app.conversations.schemas import (
     AppendMessageInput,
@@ -14,12 +13,13 @@ from app.core.errors import ConflictError, NotFoundError
 from app.core.ids import uuid7
 from app.core.tenancy import tenant_session
 from app.db.models import ConversationChannel, ConversationMessage, MessageRole, UsageKind
+from tests.factories import agent_input
 
 pytestmark = pytest.mark.anyio
 
 
 async def _agent(session, tenant):
-    return await AgentService(session, tenant).create_agent(CreateAgentInput(name="Sales Bot"))
+    return await AgentService(session, tenant).create_agent(agent_input("Sales Bot"))
 
 
 async def _conversation(session, tenant, agent_id=None):

@@ -15,6 +15,7 @@ from app.db.models import User as UserModel
 from app.graphql import types as gql
 from app.graphql.context import Context
 from app.llm.catalog import models_for
+from app.llm.registry import KNOWN_PROVIDERS, provider_is_configured
 from app.prompts import schemas as prompt_schemas
 from app.prompts.service import PromptService
 
@@ -145,6 +146,24 @@ class Query:
         return [
             gql.ModelOption(id=option.id, label=option.label, context_length=option.context_length)
             for option in await models_for(provider)
+        ]
+
+    @strawberry.field
+    async def configured_providers(self, info: Info) -> list[gql.ProviderInfo]:
+        """Every provider the server knows, and whether its API key is set.
+
+        The dashboard builds its provider dropdown from this rather than from a
+        hardcoded list of its own: a provider added to `KNOWN_PROVIDERS` shows
+        up in the UI without a second edit, and one with no key is greyed out
+        instead of producing an agent that fails at chat time.
+
+        Authenticated like `provider_models` above -- it reads no tenant data,
+        but which integrations an install has configured is not public.
+        """
+        _require_tenant(info)
+        return [
+            gql.ProviderInfo(id=name, configured=provider_is_configured(name))
+            for name in KNOWN_PROVIDERS
         ]
 
     @strawberry.field

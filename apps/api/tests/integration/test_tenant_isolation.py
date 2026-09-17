@@ -44,7 +44,11 @@ async def two_accounts(client, clean_users):
 
     created = await _graphql(
         client,
-        'mutation { createAgent(input: {name: "Secret A Bot"}) { id } }',
+        """
+        mutation {
+          createAgent(input: {name: "Secret A Bot", provider: "fake", model: "fake-1"}) { id }
+        }
+        """,
         headers=headers_a,
     )
     agent_a_id = created.json()["data"]["createAgent"]["id"]

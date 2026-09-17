@@ -28,6 +28,7 @@ from app.db.models import (
     Prompt,
     User,
 )
+from app.llm.registry import DEFAULT_MODELS
 from app.prompts.defaults import DEFAULT_SALES_SYSTEM_PROMPT
 from app.prompts.schemas import CreatePromptInput
 from app.prompts.service import PromptService
@@ -133,6 +134,29 @@ async def _get_or_create_prompt(session: AsyncSession, tenant: TenantContext) ->
     )
 
 
+def demo_agent_input() -> CreateAgentInput:
+    """The demo agent's create input.
+
+    Split out of `_get_or_create_agent` so it can be tested without a database,
+    and because it is the one place `DEFAULT_LLM_PROVIDER` is still read.
+    `CreateAgentInput` requires a provider and a model — deliberately, so a
+    user creating an agent in the dashboard has to choose one instead of
+    silently inheriting this — and the seed is the caller that genuinely wants
+    the configured default: a fresh clone has no API key, so the demo agent has
+    to be one that answers offline.
+
+    The model comes from the chosen provider's own entry in `DEFAULT_MODELS`,
+    never a literal: pairing `fake` with an OpenAI model id would seed a demo
+    agent that cannot answer.
+    """
+    provider = get_settings().default_llm_provider
+    return CreateAgentInput(
+        name=DEMO_AGENT_NAME,
+        provider=provider,
+        model=DEFAULT_MODELS[provider],
+    )
+
+
 async def _get_or_create_agent(session: AsyncSession, tenant: TenantContext) -> Agent:
     result = await session.execute(
         select(Agent).where(
@@ -143,7 +167,7 @@ async def _get_or_create_agent(session: AsyncSession, tenant: TenantContext) -> 
     agent = result.scalar_one_or_none()
     if agent is not None:
         return agent
-    return await AgentService(session, tenant).create_agent(CreateAgentInput(name=DEMO_AGENT_NAME))
+    return await AgentService(session, tenant).create_agent(demo_agent_input())
 
 
 async def seed() -> None:

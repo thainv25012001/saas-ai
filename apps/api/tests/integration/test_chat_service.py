@@ -1,7 +1,6 @@
 import pytest
 from sqlalchemy import select
 
-from app.agents.schemas import CreateAgentInput
 from app.agents.service import AgentService
 from app.chat.service import (
     ChatError,
@@ -22,15 +21,14 @@ from app.llm.registry import reset_providers
 from app.llm.types import Usage
 from app.prompts.schemas import CreatePromptInput, CreateVersionInput
 from app.prompts.service import PromptService
+from tests.factories import agent_input
 
 pytestmark = pytest.mark.anyio
 
 
 async def _agent(session, tenant, **overrides):
     name = overrides.pop("name", "Sales Bot")
-    return await AgentService(session, tenant).create_agent(
-        CreateAgentInput(name=name, **overrides)
-    )
+    return await AgentService(session, tenant).create_agent(agent_input(name, **overrides))
 
 
 async def test_first_message_creates_a_conversation_and_returns_its_id(tenant_a):

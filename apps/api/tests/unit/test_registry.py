@@ -74,3 +74,55 @@ def test_the_openrouter_default_model_is_a_free_one():
     from app.llm.registry import DEFAULT_MODELS
 
     assert DEFAULT_MODELS["openrouter"].endswith(":free")
+
+
+def _settings_with(**overrides):
+    """Settings the registry will actually read, with every provider key
+    cleared first. Tests that assert on "is this key set" are worthless if
+    the answer depends on the developer's own .env."""
+    base = get_settings()
+    return base.model_copy(
+        update={
+            "openai_api_key": None,
+            "anthropic_api_key": None,
+            "openrouter_api_key": None,
+            **overrides,
+        }
+    )
+
+
+def test_fake_is_always_configured():
+    """It needs no key at all -- that is the entire point of it."""
+    from app.llm.registry import provider_is_configured
+
+    assert provider_is_configured("fake") is True
+
+
+def test_a_provider_without_its_key_is_not_configured(monkeypatch):
+    from app.llm.registry import provider_is_configured
+
+    monkeypatch.setattr("app.llm.registry.get_settings", lambda: _settings_with())
+
+    assert provider_is_configured("openai") is False
+    assert provider_is_configured("anthropic") is False
+    assert provider_is_configured("openrouter") is False
+
+
+def test_a_provider_with_its_key_is_configured(monkeypatch):
+    from app.llm.registry import provider_is_configured
+
+    monkeypatch.setattr(
+        "app.llm.registry.get_settings",
+        lambda: _settings_with(anthropic_api_key="test-key"),
+    )
+
+    assert provider_is_configured("anthropic") is True
+    # Only the one whose key is set -- a single key must not light up the rest.
+    assert provider_is_configured("openai") is False
+
+
+def test_configured_check_rejects_an_unknown_provider():
+    from app.llm.registry import provider_is_configured
+
+    with pytest.raises(ValidationError):
+        provider_is_configured("definitely-not-a-provider")
