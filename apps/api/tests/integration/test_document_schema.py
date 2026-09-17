@@ -46,10 +46,18 @@ async def test_embedding_round_trips_through_the_vector_column(tenant_a):
 async def test_content_tsv_is_populated_by_the_database(tenant_a, owner_connection):
     """Inserts with raw SQL, bypassing DocumentChunk entirely, so this proves
     the generated column -- not any ORM-side default -- populates content_tsv,
-    and that it does so under the 'english' configuration rather than
-    'simple' or the server default. A wrong configuration here would still
-    leave content_tsv non-empty, so the test also runs the exact
-    `websearch_to_tsquery('english', ...)` shape Task 6's retrieval uses.
+    and that it does so specifically under the 'english' configuration.
+
+    The content deliberately uses an inflected word ("running") and queries
+    its stem ("run"), rather than an invariant word like "refund" whose
+    lexeme is identical under 'english' and 'simple'. Under 'english' the
+    column stores the lexeme `run` and the query matches; under 'simple'
+    (no stemming) it would store `running` while
+    `websearch_to_tsquery('english', 'run')` still produces `run`, so the
+    match would fail. A word that stems to itself can't tell these two
+    configurations apart -- this one can, and it is what actually caught a
+    'simple'-vs-'english' regression when deliberately introduced (see the
+    fix report for the red-state run).
     """
     async with tenant_session(tenant_a) as session:
         document = await _document(session, tenant_a)
@@ -68,7 +76,7 @@ async def test_content_tsv_is_populated_by_the_database(tenant_a, owner_connecti
             "id": chunk_id,
             "org_id": tenant_a.organization_id,
             "doc_id": document.id,
-            "content": "Our refund policy covers returns within thirty days",
+            "content": "Our returns process is running smoothly this quarter",
             "embedding": zero_vector,
         },
     )
@@ -82,7 +90,7 @@ async def test_content_tsv_is_populated_by_the_database(tenant_a, owner_connecti
 
     matched = await owner_connection.execute(
         text(
-            "SELECT content_tsv @@ websearch_to_tsquery('english', 'refund') "
+            "SELECT content_tsv @@ websearch_to_tsquery('english', 'run') "
             "FROM document_chunks WHERE id = :id"
         ),
         {"id": chunk_id},

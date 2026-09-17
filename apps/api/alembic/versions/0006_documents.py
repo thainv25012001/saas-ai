@@ -76,7 +76,15 @@ def upgrade() -> None:
         sa.Column("processed_at", sa.DateTime(timezone=True), nullable=True),
         *_TIMESTAMPS,
     )
-    op.create_index("ix_documents_organization_id", "documents", ["organization_id"])
+    # One composite index, not two: organization_id leads (matching this
+    # codebase's convention and serving every organization_id-only filter as
+    # a left prefix), and find_by_checksum -- the dedup check that runs on
+    # every upload -- is the hot lookup that needs checksum in the index at
+    # all. Added now, while the table is empty, because adding it later
+    # means an ALTER TABLE against live data instead of a free line here.
+    op.create_index(
+        "ix_documents_organization_id_checksum", "documents", ["organization_id", "checksum"]
+    )
     enable_rls(op, "documents")
 
     op.create_table(
