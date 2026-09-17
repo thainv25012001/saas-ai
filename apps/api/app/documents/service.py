@@ -92,6 +92,22 @@ class DocumentService:
         )
         return result.scalar_one_or_none()
 
+    async def mark_pending(self, document_id: uuid.UUID) -> Document:
+        """Put an accepted-but-not-started document back to the start.
+
+        Used by the retry endpoint. `processed_at` is cleared alongside
+        `status`/`error` because it records when *this* document finished,
+        and after a retry is accepted nothing has finished: a timestamp
+        left over from the failed attempt would read as though the pending
+        run had already completed.
+        """
+        document = await self.get(document_id)
+        document.status = DocumentStatus.PENDING
+        document.error = None
+        document.processed_at = None
+        await self.session.flush()
+        return document
+
     async def mark_processing(self, document_id: uuid.UUID) -> Document:
         document = await self.get(document_id)
         document.status = DocumentStatus.PROCESSING

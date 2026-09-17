@@ -203,3 +203,87 @@ async def test_metadata_round_trips(tenant_a):
     async with tenant_session(tenant_a) as session:
         document = await _document(session, tenant_a)
     assert document.metadata_ == {}
+
+
+# ---------------------------------------------------------------------------
+# Layer 1 in isolation
+# ---------------------------------------------------------------------------
+
+
+async def _unscoped_session():  # type: ignore[no-untyped-def]
+    """A session that bypasses RLS entirely, for isolating Layer 1.
+
+    Same pattern (and same reasoning) as
+    `test_retrieve.py::test_organization_id_predicate_holds_even_when_rls_is_bypassed`:
+    `app_owner` is the migration role, which owns these tables and therefore
+    bypasses its own RLS policies, and no `app.current_org_id` is ever set on
+    it. A merely *unscoped* session would not serve -- RLS's own
+    `NULLIF(current_setting(...), \'\')::uuid` guard fails closed to zero rows
+    when the setting is missing, so the assertions below would pass with the
+    application-layer predicate deleted. Only a genuinely RLS-bypassing
+    session can tell "Layer 1 filters" apart from "Layer 2 was doing all the
+    work".
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.core.config import get_settings
+
+    engine = create_async_engine(get_settings().migration_database_url)
+    return engine, async_sessionmaker(engine, expire_on_commit=False)
+
+
+async def test_layer_1_predicates_hold_even_when_rls_is_bypassed(tenant_a, tenant_b):
+    """`docs/ARCHITECTURE.md` §2.3's Layer 1, on the three `DocumentService`
+    queries that RLS alone was covering.
+
+    Every other test in this file runs under an RLS-scoped session, where
+    Layer 2 already stops a cross-tenant read -- which cannot distinguish an
+    explicit `organization_id` predicate from no predicate at all. All three
+    of these were mutation-verified deletable with the suite green:
+    `find_by_checksum` (32 passed), `list_documents` (26 passed) and the
+    GraphQL `chunkCount` loader (14 passed).
+
+    `find_by_checksum` is the one worth naming: the pre-flight notes claimed
+    `test_find_by_checksum_scopes_to_the_tenant` pinned it. It does not --
+    that test runs under `tenant_b`'s own RLS-scoped session, where org A's
+    row is invisible whatever the service does.
+    """
+    from app.graphql.context import Context
+
+    checksum = "a" * 64
+    async with tenant_session(tenant_b) as session:
+        other = await _document(session, tenant_b, title="Org B doc", checksum=checksum)
+        await DocumentService(session, tenant_b).replace_chunks(
+            other.id,
+            [
+                ChunkInput(
+                    content="org b chunk",
+                    token_count=3,
+                    embedding=_vector(0.5),
+                    embedding_model="hashing",
+                )
+            ],
+        )
+
+    engine, session_factory = await _unscoped_session()
+    try:
+        async with session_factory() as unscoped:
+            service = DocumentService(unscoped, tenant_a)
+
+            # 1. find_by_checksum: org B's row has this exact checksum, and
+            # without the predicate this returns it -- which would then make
+            # the upload endpoint answer org A with org B's document.
+            assert await service.find_by_checksum(checksum) is None
+
+            # 2. list_documents: org B's document must not appear in org A's
+            # list, with or without a status filter.
+            assert await service.list_documents() == []
+            assert await service.list_documents(status=DocumentStatus.PENDING) == []
+
+            # 3. the GraphQL `chunkCount` loader, asked directly about org
+            # B's document id: it must count zero of org B's chunks for org
+            # A, not one.
+            context = Context(tenant=tenant_a, session=unscoped)
+            assert await context._load_chunk_counts([other.id]) == [0]
+    finally:
+        await engine.dispose()

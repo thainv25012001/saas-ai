@@ -238,7 +238,8 @@ async def retry_document(
         # exactly the way a nonexistent one does (see DocumentService.get),
         # so org B retrying org A's document answers 404, not 403 -- it
         # never learns the id exists at all.
-        document = await DocumentService(session, tenant).get(document_id)
+        service = DocumentService(session, tenant)
+        document = await service.get(document_id)
 
         # `failed` and `pending` may both be retried; `processing` and
         # `ready` are rejected.
@@ -278,6 +279,17 @@ async def retry_document(
                 f"cannot retry a document with status '{document.status.value}'; "
                 "only a failed or pending document may be retried"
             )
+
+        # Accepting a retry has to move the row, not merely enqueue a job.
+        # Left on `failed`, the client's refetch sees `FAILED`,
+        # `shouldPollDocuments` (apps/web/src/lib/document-status.ts) treats
+        # that as terminal and never starts its timer, and the row sits on
+        # "Failed" with the previous attempt's error message while the
+        # worker quietly takes it through `processing` to `ready` -- until
+        # someone reloads the page by hand. `pending` is both the honest
+        # description of "accepted, not started" and a non-terminal status,
+        # so polling resumes on its own.
+        document = await service.mark_pending(document_id)
         response = DocumentResponse.from_model(document)
 
     await enqueue_ingest(document_id, tenant.organization_id)

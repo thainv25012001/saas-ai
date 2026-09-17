@@ -18,7 +18,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.api import documents as documents_api
 from app.core.tenancy import TenantContext, tenant_session
-from app.db.models import MembershipRole
+from app.db.models import DocumentStatus, MembershipRole
 from app.documents.service import DocumentService
 from app.main import create_app
 
@@ -360,7 +360,24 @@ async def test_retry_on_a_ready_document_is_rejected(api_client, clean_users, qu
     assert queue.calls == [(document_id, org_id)]
 
 
-async def test_retry_on_a_failed_document_reenqueues(api_client, clean_users, queue):
+async def test_retry_on_a_failed_document_reenqueues_and_puts_it_back_to_pending(
+    api_client, clean_users, queue
+):
+    """Accepting the retry has to *move* the row, not just enqueue a job.
+
+    Leaving `status=failed` made the retry button look broken end to end:
+    the client refetches, still sees `FAILED`, and `shouldPollDocuments`
+    treats `FAILED` as terminal -- so the poll timer never starts, the
+    worker goes on to `processing` and `ready`, and the row sits on "Failed"
+    with the stale error message until someone reloads the page by hand.
+    `pending` is the honest status for "accepted, not started", it is
+    non-terminal so polling resumes, and it is what makes the
+    retry-on-`pending` ruling coherent rather than a special case.
+
+    The stale `error` goes with it: an error from the previous attempt
+    displayed next to a retry that is already in flight describes nothing
+    that is currently true.
+    """
     token = await _register(api_client, "failed@example.com", "Ada Motors Documents Failed")
     org_id = await _organization_id(api_client, token)
     uploaded = await _upload(api_client, token)
@@ -369,8 +386,18 @@ async def test_retry_on_a_failed_document_reenqueues(api_client, clean_users, qu
 
     response = await api_client.post(f"{DOCUMENTS_URL}/{document_id}/retry", headers=_auth(token))
     assert response.status_code == 202, response.text
-    assert response.json()["status"] == "failed"  # unchanged until the worker picks it up
+    assert response.json()["status"] == "pending"
+    assert response.json()["error"] is None
     assert queue.calls == [(document_id, org_id), (document_id, org_id)]
+
+    # Committed, not just reflected in the response body -- the client's
+    # refetch reads the row, not this response.
+    tenant = _tenant(org_id)
+    async with tenant_session(tenant) as session:
+        fresh = await DocumentService(session, tenant).get(document_id)
+    assert fresh.status == DocumentStatus.PENDING
+    assert fresh.error is None
+    assert fresh.processed_at is None
 
 
 async def test_retry_on_a_pending_document_reenqueues(api_client, clean_users, queue):

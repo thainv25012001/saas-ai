@@ -50,7 +50,18 @@ async def test_identity_tables_do_not_have_rls(owner_connection, table):
 
 @pytest.mark.parametrize(
     "table",
-    ["agents", "agent_configs", "prompts", "prompt_versions", "documents", "document_chunks"],
+    [
+        "agents",
+        "agent_configs",
+        "prompts",
+        "prompt_versions",
+        "conversations",
+        "messages",
+        "usage_events",
+        "documents",
+        "document_chunks",
+        "message_citations",
+    ],
 )
 async def test_tenant_tables_have_rls_enabled_with_a_tenant_isolation_policy(
     owner_connection, table

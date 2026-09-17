@@ -71,4 +71,19 @@ describe("shouldPollDocuments", () => {
   it("does not poll an empty list", () => {
     expect(shouldPollDocuments([], false)).toBe(false);
   });
+
+  it("restarts once an accepted retry puts a failed row back to pending", () => {
+    // The T5 -> T8 seam. `retryDocument` used to leave the row on `FAILED`,
+    // which this predicate calls terminal -- so the timer never started,
+    // and the UI never learned the worker had finished. The API now moves
+    // the row to `PENDING` when it accepts the retry
+    // (`retry_document` in apps/api/app/api/documents.py), and this is the
+    // half of that fix that lives here: `PENDING` has to put the list back
+    // into the polling set.
+    const settled = [{ status: "READY" as const }, { status: "FAILED" as const }];
+    expect(shouldPollDocuments(settled, false)).toBe(false);
+
+    const afterRetry = [{ status: "READY" as const }, { status: "PENDING" as const }];
+    expect(shouldPollDocuments(afterRetry, false)).toBe(true);
+  });
 });
