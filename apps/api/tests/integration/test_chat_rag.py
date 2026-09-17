@@ -492,3 +492,88 @@ async def test_sse_stream_with_no_documents_has_no_citations_event(app, api_clie
 
     events = _parse_events(response.text)
     assert [e["type"] for e in events] == ["message_start", "text_delta", "message_end"]
+
+
+async def test_a_citation_outlives_both_a_re_ingest_and_a_document_delete(tenant_a):
+    """`docs/PHASE-3.md` §5 says this table exists so a later phase can ask
+    "did it answer from the sources?" of a turn that has already happened.
+    A citation that vanishes the moment its chunk does cannot answer it.
+
+    Both destructive paths are exercised, because they are the same DELETE
+    seen from two directions:
+
+    - re-ingest: `DocumentService.replace_chunks` deletes every chunk of the
+      document before inserting the new ones, so with `ON DELETE CASCADE` on
+      `chunk_id` a re-index wiped the history of every answer that document
+      ever grounded, while the assistant messages themselves survived;
+    - `deleteDocument`: cascades to `document_chunks`, and took the
+      citations with it for the same reason. That one is reachable from the
+      dashboard today.
+
+    The row must stay, with `chunk_id`/`document_id` nulled out and the
+    denormalised `document_title`/`excerpt` still saying what was cited.
+    """
+    query = "annual maintenance inspection checklist"
+    query_vector = await _embed(query)
+    entries = [("Annual maintenance inspection checklist, revision four.", query_vector)]
+
+    async with tenant_session(tenant_a) as session:
+        document_id = await _ready_document_with_chunks(
+            session, tenant_a, entries, title="Maintenance Guide"
+        )
+        agent = await _agent(session, tenant_a)
+        service = ChatService(session, tenant_a, provider_override=FakeProvider(script=["ok"]))
+        events = [event async for event in service.send(agent.id, query)]
+
+    message_id = next(e.message_id for e in events if isinstance(e, ChatMessageStart))
+
+    async def _citations() -> list[MessageCitation]:
+        async with tenant_session(tenant_a) as session:
+            result = await session.execute(
+                select(MessageCitation).where(MessageCitation.message_id == message_id)
+            )
+            return list(result.scalars().all())
+
+    before = await _citations()
+    assert len(before) >= 1
+    assert all(row.document_title == "Maintenance Guide" for row in before)
+    assert all("revision four" in row.excerpt for row in before)
+
+    # Re-ingest: same document, fresh chunks, old chunk rows deleted.
+    async with tenant_session(tenant_a) as session:
+        await DocumentService(tenant=tenant_a, session=session).replace_chunks(
+            document_id,
+            [
+                ChunkInput(
+                    content="Annual maintenance inspection checklist, revision five.",
+                    token_count=6,
+                    embedding=query_vector,
+                    embedding_model="hashing",
+                )
+            ],
+        )
+
+    after_reingest = await _citations()
+    assert len(after_reingest) == len(before)
+    assert all(row.chunk_id is None for row in after_reingest)
+    assert all(row.document_id == document_id for row in after_reingest)
+    assert all(row.document_title == "Maintenance Guide" for row in after_reingest)
+    assert all("revision four" in row.excerpt for row in after_reingest)
+
+    async with tenant_session(tenant_a) as session:
+        await DocumentService(session, tenant_a).delete(document_id)
+
+    after_delete = await _citations()
+    assert len(after_delete) == len(before)
+    assert all(row.document_id is None for row in after_delete)
+    # Still legible with nothing left to join to -- the whole point of
+    # denormalising these two columns onto the citation row.
+    assert all(row.document_title == "Maintenance Guide" for row in after_delete)
+    assert all("revision four" in row.excerpt for row in after_delete)
+
+    # The message it cites is untouched by any of this.
+    async with tenant_session(tenant_a) as session:
+        surviving = await session.execute(
+            text("SELECT COUNT(*) FROM messages WHERE id = :id"), {"id": message_id}
+        )
+    assert surviving.scalar_one() == 1

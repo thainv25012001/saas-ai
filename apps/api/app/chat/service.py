@@ -439,6 +439,12 @@ class ChatService:
         two-layer tenant-scoped (see `app/rag/retrieve.py`), so a value
         reaching here has already been proven to belong to this
         organization.
+
+        `document_title` and `excerpt` are written alongside those ids
+        rather than left to a join, because the ids are `ON DELETE SET
+        NULL`: a re-ingest or a document delete nulls them out and the
+        citation has to stay legible on its own. See `MessageCitation`'s
+        own docstring.
         """
         if not chunks:
             return
@@ -460,6 +466,16 @@ class ChatService:
                     message_id=message_id,
                     chunk_id=chunk.chunk_id,
                     document_id=chunk.document_id,
+                    # Denormalised deliberately: both ids above are
+                    # `ON DELETE SET NULL`, so a re-ingest or a
+                    # `deleteDocument` leaves this row with nothing to join
+                    # to. These two columns are what still say *what* was
+                    # cited afterwards. `_excerpt` is the same preview the
+                    # SSE `citations` event carries, for the same reason it
+                    # is a preview there: enough to recognise the passage,
+                    # not a second copy of the corpus.
+                    document_title=chunk.document_title,
+                    excerpt=_excerpt(chunk.content),
                     rank=chunk.rank,
                     score=chunk.score,
                 )

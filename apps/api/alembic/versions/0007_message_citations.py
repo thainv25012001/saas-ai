@@ -32,18 +32,42 @@ def upgrade() -> None:
             sa.ForeignKey("messages.id", ondelete="CASCADE"),
             nullable=False,
         ),
+        # SET NULL, not CASCADE, and therefore nullable. A citation is a
+        # record of what an answer was grounded on at the moment it was
+        # given, and `docs/PHASE-3.md` §5 is explicit that the reason this
+        # table exists is to make "did it answer from the sources?"
+        # answerable about turns that have already happened. Under CASCADE
+        # it was not: `DocumentService.replace_chunks` deletes every chunk
+        # before inserting the new ones, so re-ingesting a document erased
+        # the history of every answer it ever grounded while the assistant
+        # messages themselves survived -- and `deleteDocument`, which is
+        # reachable from the dashboard today, did the same thing through
+        # `document_chunks`' own cascade.
+        #
+        # NULL here therefore means "the passage this cited no longer
+        # exists", which is a true and useful thing for a reader to learn,
+        # where a missing row taught it nothing at all. The two denormalised
+        # columns below are what keep the citation legible once that
+        # happens.
         sa.Column(
             "chunk_id",
             postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("document_chunks.id", ondelete="CASCADE"),
-            nullable=False,
+            sa.ForeignKey("document_chunks.id", ondelete="SET NULL"),
+            nullable=True,
         ),
         sa.Column(
             "document_id",
             postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("documents.id", ondelete="CASCADE"),
-            nullable=False,
+            sa.ForeignKey("documents.id", ondelete="SET NULL"),
+            nullable=True,
         ),
+        # Copied onto the citation rather than joined for, so the row still
+        # says what was cited after the chunk and the document are both
+        # gone. `excerpt` is the same preview the SSE `citations` event
+        # carried (see `ChatService._excerpt`), not the whole chunk: enough
+        # to recognise the passage, not a second copy of the corpus.
+        sa.Column("document_title", sa.String(255), nullable=False),
+        sa.Column("excerpt", sa.Text(), nullable=False),
         sa.Column("rank", sa.Integer(), nullable=False),
         sa.Column("score", sa.Float(), nullable=False),
         sa.Column(

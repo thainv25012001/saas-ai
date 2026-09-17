@@ -60,6 +60,37 @@ def _vector_literal() -> str:
     return "[" + ",".join("0" for _ in range(1536)) + "]"
 
 
+async def _seed_colliding_chunk(
+    owner_connection, organization_id: uuid.UUID, document_id: uuid.UUID
+) -> None:
+    """Plant a chunk at `(document_id, 0)` owned by a *different* org.
+
+    `replace_chunks`' own DELETE is scoped to `document_id AND
+    organization_id`, so it never touches this row -- but its INSERT
+    collides with it anyway, because `uq_chunk_document_index` is
+    `(document_id, chunk_index)` and does not include `organization_id`.
+    That is the cheapest way to make a real, database-level `IntegrityError`
+    happen partway through `replace_chunks`, which several tests below need.
+    Seeded through `owner_connection` so it bypasses both RLS and the
+    ownership check `replace_chunks` itself does.
+    """
+    await owner_connection.execute(
+        text(
+            "INSERT INTO document_chunks "
+            "(id, organization_id, document_id, chunk_index, content, token_count, "
+            " embedding, embedding_model, metadata) "
+            "VALUES (gen_random_uuid(), :organization_id, :document_id, 0, 'stray', 1, "
+            " CAST(:embedding AS vector), 'hashing', '{}')"
+        ),
+        {
+            "organization_id": organization_id,
+            "document_id": document_id,
+            "embedding": _vector_literal(),
+        },
+    )
+    await owner_connection.commit()
+
+
 async def test_happy_path_ingests_to_ready_with_embedded_chunks(tenant_a):
     # Created and committed in its own transaction, ahead of the one
     # `ingest_document` runs in -- it looks the document up through its own
@@ -360,21 +391,7 @@ async def test_a_genuine_database_error_during_replace_chunks_still_lands_failed
     async with tenant_session(tenant_a) as session:
         document = await _document(session, tenant_a)
 
-    await owner_connection.execute(
-        text(
-            "INSERT INTO document_chunks "
-            "(id, organization_id, document_id, chunk_index, content, token_count, "
-            " embedding, embedding_model, metadata) "
-            "VALUES (gen_random_uuid(), :organization_id, :document_id, 0, 'stray', 1, "
-            " CAST(:embedding AS vector), 'hashing', '{}')"
-        ),
-        {
-            "organization_id": tenant_b.organization_id,
-            "document_id": document.id,
-            "embedding": _vector_literal(),
-        },
-    )
-    await owner_connection.commit()
+    await _seed_colliding_chunk(owner_connection, tenant_b.organization_id, document.id)
 
     with pytest.raises(IntegrityError):
         async with tenant_session(tenant_a) as session:
@@ -497,3 +514,51 @@ async def test_a_cancelled_ingest_records_failed_and_re_raises_the_cancellation(
     assert fresh.status == DocumentStatus.FAILED
     assert fresh.error is not None
     assert "cancel" in fresh.error.lower()
+
+
+async def test_a_database_error_records_the_cause_without_the_document_text_or_its_vectors(
+    tenant_a, tenant_b, owner_connection
+):
+    """`documents.error` is rendered verbatim in the Knowledge page's alert,
+    so what goes in it is a product decision, not a debugging convenience.
+
+    `str(exc)` on a SQLAlchemy `DBAPIError` is the statement *and its bound
+    parameters*, which for a failure inside `replace_chunks` means the
+    customer's own chunk text and a 1536-float embedding -- measured at 1187
+    characters on this exact path, with the real cause pushed toward the end
+    and, for a longer chunk, truncated away entirely by the 2000-character
+    cap. The dashboard then shows a wall of vector floats where §3 promised
+    it would show *why*.
+
+    Three assertions, and all three are load-bearing: the message must still
+    name the constraint that actually failed (a message that leaks nothing
+    because it says nothing is not the fix), and it must contain neither the
+    document's own prose nor anything resembling a vector literal.
+    """
+    async with tenant_session(tenant_a) as session:
+        document = await _document(session, tenant_a)
+
+    await _seed_colliding_chunk(owner_connection, tenant_b.organization_id, document.id)
+
+    with pytest.raises(IntegrityError):
+        async with tenant_session(tenant_a) as session:
+            await ingest_document(session, tenant_a, document.id, _MARKDOWN, "text/markdown")
+
+    async with tenant_session(tenant_a) as session:
+        fresh = await DocumentService(session, tenant_a).get(document.id)
+
+    assert fresh.error is not None
+    assert "uq_chunk_document_index" in fresh.error
+    assert "IntegrityError" in fresh.error
+
+    # A distinctive phrase from `_MARKDOWN` -- present in the bound
+    # parameters `str(exc)` used to carry, absent from any legitimate
+    # description of a unique-constraint violation.
+    assert "Customers may request a refund" not in fresh.error
+    assert "refund" not in fresh.error.lower()
+    # The embedding arrives as a pgvector text literal; `0.0,0.0` is the
+    # shape it takes for any chunk at all, whatever the numbers.
+    assert "[SQL:" not in fresh.error
+    assert "parameters:" not in fresh.error
+    assert "0.0,0.0" not in fresh.error
+    assert len(fresh.error) < 500

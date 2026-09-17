@@ -63,6 +63,7 @@ import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -105,6 +106,36 @@ def _truncate(message: str) -> str:
     if len(message) <= _ERROR_MESSAGE_LIMIT:
         return message
     return message[:_ERROR_MESSAGE_LIMIT] + "... (truncated)"
+
+
+def _error_message(exc: Exception) -> str:
+    """A bounded, deliberate description of `exc` for `documents.error`.
+
+    Not `str(exc)`. That column is rendered verbatim in the Knowledge
+    page's alert, and `str()` on a SQLAlchemy `DBAPIError` is the failing
+    statement **and its bound parameters** -- which, for a failure inside
+    `replace_chunks`, means the customer's own chunk text and a 1536-float
+    embedding. Measured at 1187 characters on the duplicate-key path, with
+    the actual cause pushed to the end and, for a longer chunk, truncated
+    away entirely by `_ERROR_MESSAGE_LIMIT`: the dashboard showed a wall of
+    vector floats instead of the "why" docs/PHASE-3.md §3 promised.
+
+    `exc.orig` is the driver's own exception (`asyncpg.exceptions.*`), whose
+    message is the database's -- `duplicate key value violates unique
+    constraint "uq_chunk_document_index"` -- with no statement and no
+    parameters attached. Prefixing the SQLAlchemy exception's class name
+    keeps the category ("IntegrityError", "OperationalError") that tells an
+    operator whether this is their problem or ours.
+
+    Non-DBAPI exceptions (extraction, chunking, an embedding provider's
+    HTTP error) carry no bound parameters, so their own message is exactly
+    what should be shown -- still with the type name in front of it, since
+    several of them are raised with short messages that mean nothing
+    without it.
+    """
+    if isinstance(exc, DBAPIError):
+        return _truncate(f"{type(exc).__name__}: {exc.orig}")
+    return _truncate(f"{type(exc).__name__}: {exc}")
 
 
 async def _embed_batch_with_retry(
@@ -304,7 +335,7 @@ async def ingest_document(
         )
         raise
     except Exception as exc:
-        await _record_failure(session, tenant, document_id, _truncate(str(exc)))
+        await _record_failure(session, tenant, document_id, _error_message(exc))
         raise
 
     return IngestResult(
