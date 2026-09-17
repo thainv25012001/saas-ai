@@ -152,6 +152,7 @@ function PlaygroundContent() {
                           rank: citation.rank,
                           score: citation.score,
                           excerpt: citation.excerpt,
+                          page: citation.page,
                         })),
                       }
                     : m,

@@ -462,6 +462,7 @@ async def test_sse_stream_emits_citations_event_before_the_first_text_delta(
         "rank",
         "score",
         "excerpt",
+        "page",
     }
     # The excerpt is a preview, not the DB row's full content column -- this
     # corpus's only chunk is short enough that equality here would not by
@@ -469,6 +470,11 @@ async def test_sse_stream_emits_citations_event_before_the_first_text_delta(
     # readable text sourced from the chunk rather than an empty/placeholder
     # field.
     assert "warranty" in citation["excerpt"].lower()
+    # This fixture's chunk was inserted directly (`_ready_document_with_chunks`),
+    # not extracted from a PDF, so it carries no page metadata -- `page` must
+    # be `None` (JSON `null`) rather than some placeholder like `1`. See
+    # `test_citation_payload.py` for the PDF-sourced case.
+    assert citation["page"] is None
 
 
 async def test_sse_stream_with_no_documents_has_no_citations_event(app, api_client, clean_users):

@@ -141,6 +141,7 @@ def _event_payload(event: ChatEvent) -> dict[str, object]:
                     "rank": c.rank,
                     "score": c.score,
                     "excerpt": c.excerpt,
+                    "page": c.page,
                 }
                 for c in event.citations
             ],

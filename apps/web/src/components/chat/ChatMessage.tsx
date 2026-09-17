@@ -27,6 +27,11 @@ export type ChatCitation = {
   score: number;
   /** Untrusted for the same reason as `documentTitle`. */
   excerpt: string;
+  /** 1-based page number for a PDF-sourced chunk, `null` for a source with
+   * no page concept (plain text, Markdown, HTML). Most corpora are not
+   * PDFs, so the no-page case must look deliberate, not like a missing
+   * value -- see `Citations` below. */
+  page: number | null;
 };
 
 export type ChatMessageData = {
@@ -98,6 +103,13 @@ function Citations({ citations }: { citations: ChatCitation[] }) {
             <span className="shrink-0 font-medium text-ink-subtle">{citation.rank}.</span>
             <span className="min-w-0">
               <span className="font-medium text-ink">{citation.documentTitle}</span>
+              {/* Most corpora are not PDFs, so a missing page must read as
+                * deliberate (nothing rendered) rather than a blank where a
+                * number was expected -- only ever shown when the source
+                * actually has one. */}
+              {citation.page !== null ? (
+                <span className="text-ink-subtle">, page {citation.page}</span>
+              ) : null}
               <span> — {citation.excerpt}</span>
             </span>
           </li>

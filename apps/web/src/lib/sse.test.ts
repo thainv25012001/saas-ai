@@ -149,6 +149,7 @@ describe("parseSSEStream", () => {
       rank: 1,
       score: 0.87,
       excerpt: "Our starter plan is $19/mo.",
+      page: 3,
     };
     const events = await collect(
       chunksOf(
@@ -177,6 +178,42 @@ describe("parseSSEStream", () => {
         frame({
           type: "citations",
           citations: [{ chunk_id: "c1", document_id: "doc1", rank: 1, score: 0.5, excerpt: "x" }],
+        }) + frame({ type: "text_delta", text: "ok" }),
+      ),
+    );
+    expect(events).toEqual([{ type: "text_delta", text: "ok" }]);
+  });
+
+  it("accepts a citation with page: null, for a non-paginated source", async () => {
+    const citation = {
+      chunk_id: "c1",
+      document_id: "doc1",
+      document_title: "FAQ.md",
+      rank: 1,
+      score: 0.6,
+      excerpt: "x",
+      page: null,
+    };
+    const events = await collect(chunksOf(frame({ type: "citations", citations: [citation] })));
+    expect(events).toEqual([{ type: "citations", citations: [citation] }]);
+  });
+
+  it("drops a citation whose page is neither a number nor null", async () => {
+    const events = await collect(
+      chunksOf(
+        frame({
+          type: "citations",
+          citations: [
+            {
+              chunk_id: "c1",
+              document_id: "doc1",
+              document_title: "FAQ.md",
+              rank: 1,
+              score: 0.6,
+              excerpt: "x",
+              page: "3",
+            },
+          ],
         }) + frame({ type: "text_delta", text: "ok" }),
       ),
     );

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "urql";
 import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
@@ -11,14 +11,9 @@ import { UploadDropzone } from "@/components/knowledge/UploadDropzone";
 import { DeleteDocumentDocument, DocumentsDocument } from "@/graphql/generated";
 import { API_URL, type ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import { shouldPollDocuments } from "@/lib/document-status";
 import { retryDocument, uploadDocument, validateDocumentFile } from "@/lib/documents";
+import { useDocumentPolling } from "@/lib/use-document-polling";
 import { firstGraphQLError } from "@/lib/graphql-errors";
-
-/** A handful of rows, checked every few seconds -- this is exactly the case
- * `docs/PHASE-3.md`'s honesty about "polling, not websockets" describes as
- * the plain solution rather than a shortcut. */
-const POLL_INTERVAL_MS = 3000;
 
 /** Tracks page visibility so the poll effect can stop while no one is
  * looking at this tab -- see `shouldPollDocuments`. Kept as its own hook
@@ -57,19 +52,20 @@ export default function KnowledgePage() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // Memoised for the same reason `documents` is above: `useDocumentPolling`
+  // depends on this by reference, and a fresh closure every render would
+  // tear down and recreate the interval every render instead of only when
+  // `refetchDocuments` itself changes (which urql keeps stable).
+  const pollDocuments = useCallback(() => {
+    refetchDocuments({ requestPolicy: "network-only" });
+  }, [refetchDocuments]);
+
   // Polls the whole list -- not one row at a time -- while anything is
   // still pending/processing, and stops the moment either every row has
-  // settled or the tab goes into the background (`shouldPollDocuments`
-  // covers both). The interval is torn down on every re-run of this effect
-  // and on unmount, so an agent switch or a route change never leaves a
-  // second timer running alongside a fresh one.
-  useEffect(() => {
-    if (!shouldPollDocuments(documents, tabHidden)) return;
-    const interval = setInterval(() => {
-      refetchDocuments({ requestPolicy: "network-only" });
-    }, POLL_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [documents, tabHidden, refetchDocuments]);
+  // settled or the tab goes into the background. The interval-lifecycle
+  // mechanism itself (not just the predicate deciding when to run) has its
+  // own test in `use-document-polling.test.ts`.
+  useDocumentPolling(documents, tabHidden, pollDocuments);
 
   async function handleUpload(file: File) {
     if (!accessToken) return;

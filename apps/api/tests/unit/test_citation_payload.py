@@ -13,7 +13,7 @@ from app.chat.service import _EXCERPT_MAX_CHARS, _citation_payload
 from app.rag.retrieve import RetrievedChunk
 
 
-def _chunk(content: str) -> RetrievedChunk:
+def _chunk(content: str, page: int | None = None) -> RetrievedChunk:
     return RetrievedChunk(
         chunk_id=uuid.uuid4(),
         document_id=uuid.uuid4(),
@@ -21,7 +21,7 @@ def _chunk(content: str) -> RetrievedChunk:
         content=content,
         score=0.5,
         rank=1,
-        page=None,
+        page=page,
     )
 
 
@@ -41,3 +41,20 @@ def test_a_long_chunk_is_truncated_with_a_trailing_ellipsis() -> None:
     # Bounded, not merely shorter -- a version that truncated to some other
     # arbitrary length would still pass a bare "is it shorter" check.
     assert len(payload.excerpt) <= _EXCERPT_MAX_CHARS + len("...")
+
+
+def test_a_pdf_sourced_chunk_carries_its_page() -> None:
+    # `docs/PHASE-3.md` §3 justifies preserving PDF page offsets through
+    # extraction specifically "so citations can name a page" -- this is
+    # that promise reaching the SSE-facing payload.
+    payload = _citation_payload(_chunk("passage from page 3", page=3))
+    assert payload.page == 3
+
+
+def test_a_non_paginated_chunk_carries_no_page() -> None:
+    # Plain text/Markdown/HTML have no page concept -- `RetrievedChunk.page`
+    # is `None` for them (see `_page_for_offset` in `app/rag/chunk.py`), and
+    # that must survive as `None` here rather than being coerced to some
+    # placeholder like `1`.
+    payload = _citation_payload(_chunk("passage with no page", page=None))
+    assert payload.page is None

@@ -13,7 +13,10 @@ describe("UploadDropzone", () => {
     // after a rejected pick.
     render(<UploadDropzone onUpload={vi.fn()} />);
     expect(screen.getByText(/\.pdf/)).toBeInTheDocument();
-    expect(screen.getByText(/20 MB/)).toBeInTheDocument();
+    // Not "20 MB": the true usable budget is `20 MB - 1 KiB`, and the
+    // displayed figure must floor to a number every file at or under it can
+    // actually pass (see `formatByteLimit`) -- "20 MB" would be optimistic.
+    expect(screen.getByText(/19\.9 MB/)).toBeInTheDocument();
   });
 
   it("names the lexical embedder plainly, without alarm", () => {

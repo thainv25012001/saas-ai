@@ -45,6 +45,10 @@ export type Citation = {
   /** Untrusted for the same reason as `document_title` -- a short preview
    * of the chunk's own content. */
   excerpt: string;
+  /** 1-based page number for a PDF-sourced chunk; `null` for a source with
+   * no page concept (plain text, Markdown, HTML) -- see `CitationPayload`
+   * in `apps/api/app/chat/service.py`. */
+  page: number | null;
 };
 
 export type SSEEvent =
@@ -76,18 +80,19 @@ function toChatUsage(value: unknown): ChatUsage | null {
 
 function toCitation(value: unknown): Citation | null {
   if (!isRecord(value)) return null;
-  const { chunk_id, document_id, document_title, rank, score, excerpt } = value;
+  const { chunk_id, document_id, document_title, rank, score, excerpt, page } = value;
   if (
     typeof chunk_id !== "string" ||
     typeof document_id !== "string" ||
     typeof document_title !== "string" ||
     typeof rank !== "number" ||
     typeof score !== "number" ||
-    typeof excerpt !== "string"
+    typeof excerpt !== "string" ||
+    (typeof page !== "number" && page !== null)
   ) {
     return null;
   }
-  return { chunk_id, document_id, document_title, rank, score, excerpt };
+  return { chunk_id, document_id, document_title, rank, score, excerpt, page };
 }
 
 /** `null` if any single citation is malformed -- a partial citations list

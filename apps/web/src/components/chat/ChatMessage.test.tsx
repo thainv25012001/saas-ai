@@ -54,8 +54,24 @@ describe("ChatMessage", () => {
       <ChatMessage
         message={assistant({
           citations: [
-            { chunkId: "c2", documentId: "d2", documentTitle: "FAQ.md", rank: 2, score: 0.5, excerpt: "second" },
-            { chunkId: "c1", documentId: "d1", documentTitle: "Pricing.pdf", rank: 1, score: 0.9, excerpt: "first" },
+            {
+              chunkId: "c2",
+              documentId: "d2",
+              documentTitle: "FAQ.md",
+              rank: 2,
+              score: 0.5,
+              excerpt: "second",
+              page: null,
+            },
+            {
+              chunkId: "c1",
+              documentId: "d1",
+              documentTitle: "Pricing.pdf",
+              rank: 1,
+              score: 0.9,
+              excerpt: "first",
+              page: 4,
+            },
           ],
         })}
       />,
@@ -66,6 +82,40 @@ describe("ChatMessage", () => {
     expect(items[0]).toHaveTextContent("Pricing.pdf");
     expect(items[1]).toHaveTextContent("2.");
     expect(items[1]).toHaveTextContent("FAQ.md");
+  });
+
+  it("shows the page for a paginated source and omits it for a non-paginated one", () => {
+    render(
+      <ChatMessage
+        message={assistant({
+          citations: [
+            {
+              chunkId: "c1",
+              documentId: "d1",
+              documentTitle: "Pricing.pdf",
+              rank: 1,
+              score: 0.9,
+              excerpt: "first",
+              page: 4,
+            },
+            {
+              chunkId: "c2",
+              documentId: "d2",
+              documentTitle: "FAQ.md",
+              rank: 2,
+              score: 0.5,
+              excerpt: "second",
+              page: null,
+            },
+          ],
+        })}
+      />,
+    );
+    const items = screen.getAllByRole("listitem");
+    expect(items[0]).toHaveTextContent("page 4");
+    // Most corpora are not PDFs -- absent must render as nothing, not as a
+    // literal "page null" or an empty "page" label.
+    expect(items[1]).not.toHaveTextContent(/page/i);
   });
 
   it("renders no Sources section when there are no citations yet", () => {
@@ -90,6 +140,7 @@ describe("ChatMessage", () => {
               rank: 1,
               score: 0.9,
               excerpt: "click <b>here</b> to win",
+              page: null,
             },
           ],
         })}

@@ -46,7 +46,9 @@ export function isAcceptedDocumentType(mimeType: string): boolean {
 }
 
 /** `1536` -> `"1.5 KB"`, `20971520` -> `"20 MB"`. Whole numbers past 10 units
- * skip the decimal -- "20 MB" reads better than "20.0 MB" for a stated limit. */
+ * skip the decimal -- "20 MB" reads better than "20.0 MB" for describing an
+ * arbitrary file's actual size, where rounding either way is harmless. NOT
+ * for stating a *limit* -- see `formatByteLimit`. */
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   const units = ["KB", "MB", "GB"];
@@ -58,6 +60,30 @@ export function formatBytes(bytes: number): string {
   }
   const rounded = value >= 10 ? Math.round(value) : Math.round(value * 10) / 10;
   return `${rounded} ${units[unitIndex]}`;
+}
+
+/**
+ * Like `formatBytes`, but always rounds down. `MAX_UPLOAD_BYTES` is
+ * `20 MB - 1 KiB`, and `formatBytes` would round that up to a stated
+ * "20 MB" -- which a file of exactly 20 MB then satisfies by that stated
+ * number while still failing the real, tighter check underneath it. That is
+ * the exact failure requirement 4 exists to prevent: a limit shown to the
+ * user must be one every file at or under it can actually pass. Kept to one
+ * decimal place (not the whole-unit rounding `formatBytes` uses above 10
+ * units) so flooring a value like 19.999984... MB reads as "19.9 MB" rather
+ * than jumping all the way down to a misleadingly-round "19 MB".
+ */
+export function formatByteLimit(bytes: number): string {
+  if (bytes < 1024) return `${Math.floor(bytes)} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const floored = Math.floor(value * 10) / 10;
+  return `${floored} ${units[unitIndex]}`;
 }
 
 /**
@@ -78,7 +104,7 @@ export function validateDocumentFile(file: { type: string; size: number }): ApiE
   if (file.size > MAX_UPLOAD_BYTES) {
     return {
       code: "payload_too_large",
-      message: `This file is ${formatBytes(file.size)}, over the ${formatBytes(MAX_UPLOAD_BYTES)} limit.`,
+      message: `This file is ${formatBytes(file.size)}, over the ${formatByteLimit(MAX_UPLOAD_BYTES)} limit.`,
     };
   }
   return null;

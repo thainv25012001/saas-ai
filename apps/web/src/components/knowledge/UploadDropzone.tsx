@@ -6,7 +6,12 @@ import { focusRing, cn } from "@/components/ui/cn";
 import { Icon } from "@/components/ui/icons";
 import { LoadingState } from "@/components/ui/Spinner";
 import type { ApiError } from "@/lib/api";
-import { ACCEPTED_DOCUMENT_EXTENSIONS, ACCEPTED_DOCUMENT_TYPES, formatBytes, MAX_UPLOAD_BYTES } from "@/lib/documents";
+import {
+  ACCEPTED_DOCUMENT_EXTENSIONS,
+  ACCEPTED_DOCUMENT_TYPES,
+  formatByteLimit,
+  MAX_UPLOAD_BYTES,
+} from "@/lib/documents";
 
 export type UploadDropzoneProps = {
   uploading?: boolean;
@@ -77,7 +82,7 @@ export function UploadDropzone({ uploading = false, error = null, onUpload }: Up
             </p>
             {/* Requirement 4: stated up front, not learned from a rejection. */}
             <p className="text-xs text-ink-subtle">
-              Accepts {ACCEPTED_DOCUMENT_EXTENSIONS.join(", ")} — up to {formatBytes(MAX_UPLOAD_BYTES)}.
+              Accepts {ACCEPTED_DOCUMENT_EXTENSIONS.join(", ")} — up to {formatByteLimit(MAX_UPLOAD_BYTES)}.
             </p>
           </>
         )}

@@ -98,6 +98,11 @@ class CitationPayload:
     rank: int
     score: float
     excerpt: str
+    # `None` for a non-paginated source (plain text, Markdown, HTML) --
+    # `RetrievedChunk.page` is `None` there too, since `_page_for_offset` in
+    # `app/rag/chunk.py` only ever gets a page list from `extract()` for a
+    # PDF. Absent is the honest state, not a value to fake as `1`.
+    page: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +152,7 @@ def _citation_payload(chunk: RetrievedChunk) -> CitationPayload:
         rank=chunk.rank,
         score=chunk.score,
         excerpt=_excerpt(chunk.content),
+        page=chunk.page,
     )
 
 

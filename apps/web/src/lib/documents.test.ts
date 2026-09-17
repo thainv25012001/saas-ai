@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ACCEPTED_DOCUMENT_EXTENSIONS,
+  formatByteLimit,
   formatBytes,
   MAX_UPLOAD_BYTES,
   retryDocument,
@@ -19,6 +20,36 @@ describe("formatBytes", () => {
 
   it("renders sub-kilobyte sizes in bytes", () => {
     expect(formatBytes(512)).toBe("512 B");
+  });
+});
+
+describe("formatByteLimit", () => {
+  it("floors the true usable upload budget to a value that is never overstated", () => {
+    // MAX_UPLOAD_BYTES is 20 MB - 1 KiB, i.e. ~19.999984... MB.
+    // `formatBytes`'s nearest-unit rounding would round this UP to a
+    // misleading "20 MB" -- a file of exactly 20 MB would then read as
+    // satisfying the stated limit while still failing the real check this
+    // same function backs (see the UploadDropzone note and the
+    // validateDocumentFile message). This is the exact scenario requirement
+    // 4 exists to prevent.
+    expect(formatByteLimit(MAX_UPLOAD_BYTES)).toBe("19.9 MB");
+  });
+
+  it("never states a figure whose byte equivalent exceeds the real ceiling", () => {
+    // A general invariant, not just a hardcoded string: whatever this
+    // renders, converting it back to bytes must not exceed the true limit.
+    const label = formatByteLimit(MAX_UPLOAD_BYTES);
+    const [numberPart, unit] = label.split(" ");
+    const multiplier: Record<string, number> = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 };
+    expect(Number(numberPart) * multiplier[unit]).toBeLessThanOrEqual(MAX_UPLOAD_BYTES);
+  });
+
+  it("renders an exact whole-unit value plainly, with no false precision", () => {
+    expect(formatByteLimit(20 * 1024 * 1024)).toBe("20 MB");
+  });
+
+  it("floors sub-kilobyte sizes too, for consistency with the byte-scale behaviour above", () => {
+    expect(formatByteLimit(512.9)).toBe("512 B");
   });
 });
 
