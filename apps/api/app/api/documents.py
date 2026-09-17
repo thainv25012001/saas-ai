@@ -7,17 +7,24 @@ convention is a client-side hack, not something graphql-core or strawberry
 speak natively), and a single-file form post is exactly what plain HTTP
 multipart already does well. GraphQL keeps the read side (`documents`,
 `document`, `deleteDocument` -- see `app/graphql/resolvers.py`).
+
+Because this hand-rolls `Request.form()` instead of using FastAPI's
+`File()`/`Form()` parameters (required for the streaming size cap below --
+see `_capped_receive`), this route has no generated request schema and does
+not appear in `/docs` at all. The dashboard team integrating against it
+gets nothing from the OpenAPI page for this one endpoint; this module's
+docstrings and the Task 5 report are the only spec.
 """
 
 import hashlib
 import uuid
-from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel
 from starlette.datastructures import UploadFile
+from starlette.types import Message, Receive
 
 from app.auth.dependencies import get_current_tenant
 from app.core.config import get_settings
@@ -32,21 +39,6 @@ from app.rag.queue import enqueue_ingest
 from app.rag.storage import store_document_bytes
 
 router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
-
-# The type both routes below depend on, and the seam their tests
-# monkeypatch (`monkeypatch.setattr(documents_api, "enqueue_ingest", fake)`)
-# to keep this module off Redis entirely -- matching
-# `app.api.chat.get_chat_provider`'s own pattern for keeping a route's tests
-# off the network. A thin `Depends` wrapper rather than calling
-# `enqueue_ingest` as a bare module global directly: FastAPI resolves the
-# dependency fresh on every request, so a test that patches this module's
-# `enqueue_ingest` name is picked up immediately, with no app rebuild and no
-# `dependency_overrides` bookkeeping required.
-EnqueueIngest = Callable[[uuid.UUID, uuid.UUID], Awaitable[None]]
-
-
-def get_enqueue_ingest() -> EnqueueIngest:
-    return enqueue_ingest
 
 
 class DocumentResponse(BaseModel):
@@ -75,44 +67,76 @@ class DocumentResponse(BaseModel):
         )
 
 
+def _capped_receive(receive: Receive, limit: int) -> Receive:
+    """Wrap an ASGI `receive` callable so the request body is capped
+    mid-stream, before Starlette's multipart parser ever sees a byte past
+    the limit.
+
+    This is what actually closes the gap a post-read `len(data)` check and
+    a `Content-Length` pre-check both leave open: a client that sends no
+    `Content-Length` (chunked transfer) or lies about it. Starlette's own
+    `MultiPartParser` cannot be asked to enforce this instead -- reading
+    `on_part_data` in `starlette/formparsers.py`, its `max_part_size`
+    ceiling is only ever checked for a part with no `.file` set (a plain
+    form field like `title`); once a part has a filename, that branch
+    never runs, and the file is written to its `SpooledTemporaryFile` with
+    no size limit at all. Counting bytes as ASGI actually delivers them,
+    here, is the one place still inside this process that sees every byte
+    before anything downstream (the parser, `SpooledTemporaryFile`, this
+    endpoint's own `await upload.read()`) gets to keep any of them.
+    """
+    total = 0
+
+    async def wrapper() -> Message:
+        nonlocal total
+        message = await receive()
+        if message["type"] == "http.request":
+            total += len(message.get("body", b""))
+            if total > limit:
+                raise PayloadTooLargeError(f"upload exceeds the {limit} byte limit")
+        return message
+
+    return wrapper
+
+
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
 async def upload_document(
     request: Request,
     tenant: Annotated[TenantContext, Depends(get_current_tenant)],
-    enqueue: Annotated[EnqueueIngest, Depends(get_enqueue_ingest)],
 ) -> DocumentResponse:
     settings = get_settings()
 
-    # Reject a declared-oversized upload from its Content-Length header
-    # alone, before `request.form()` is ever awaited. This is the only
-    # enforcement point that costs nothing: no body byte is read, so
-    # nothing is copied into a Python object and nothing is written to the
-    # multipart parser's own spooled temp file either.
-    #
-    # It does not close every path to a 2GB upload, though, and that gap is
-    # deliberately not hidden: a client that sends no Content-Length
-    # (chunked transfer) or lies about it defeats this check entirely, and
-    # is only caught by the `len(data)` check below -- by which point
-    # Starlette's `MultiPartParser` has already received and written the
-    # whole file part to a `SpooledTemporaryFile` (disk beyond 1MB, not
-    # this process's RAM, but not free either; see
-    # `starlette.formparsers.MultiPartParser`). That parser's own
-    # `max_part_size` cannot be pointed at this instead -- reading its
-    # `on_part_data`, that ceiling is only ever checked for a part with no
-    # `file` set, i.e. a plain form field like `title`, never a part that
-    # already has a filename and therefore a `SpooledTemporaryFile`
-    # target. Closing the gap for real needs a parser that enforces a byte
-    # ceiling on the file part itself, mid-stream; nothing in this
-    # dependency stack currently offers that. See the Task 5 report for the
-    # full reasoning.
+    # Layer 1: reject a declared-oversized upload from its Content-Length
+    # header alone, before `request.form()` is ever awaited. This is the
+    # cheapest rejection -- no receive() call happens at all -- and covers
+    # every well-behaved client, which is to say nearly all of them: a
+    # multipart body built from bytes/a file already on disk has a known
+    # length, and every HTTP client I'm aware of sends it.
     content_length = request.headers.get("content-length")
     if content_length is not None:
         try:
             declared_size = int(content_length)
         except ValueError:
             declared_size = None
-        if declared_size is not None and declared_size > settings.max_upload_bytes:
-            raise PayloadTooLargeError(f"upload exceeds the {settings.max_upload_bytes} byte limit")
+        if declared_size is not None and declared_size > settings.max_request_bytes:
+            raise PayloadTooLargeError(
+                f"upload exceeds the {settings.max_request_bytes} byte limit"
+            )
+
+    # Layer 2: cap the actual byte stream, regardless of what
+    # Content-Length claimed (or omitted). A fresh `Request` bound to the
+    # same ASGI `scope` but a wrapped `receive` -- `request.form()` reads
+    # through `self._receive`, set from the `receive` passed to
+    # `Request.__init__`, so this is the whole mechanism; nothing about
+    # the scope, headers, or client changes. `PayloadTooLargeError` raised
+    # from inside `wrapper()` propagates straight out of the multipart
+    # parser's `async for chunk in self.stream` loop (it closes any
+    # partially-written files on the way out; see `MultiPartParser.parse`'s
+    # `except BaseException` in `starlette/formparsers.py`) and out of
+    # `request.form()` itself, before this line ever returns.
+    capped_request = Request(
+        request.scope, _capped_receive(request.receive, settings.max_request_bytes)
+    )
 
     # `async with`, not a bare `await`: `Request.form()` returns an
     # `AwaitableOrContextManagerWrapper`, and only the context-manager form
@@ -125,14 +149,18 @@ async def upload_document(
     # `SpooledTemporaryFile` unclosed until GC got around to it -- a real
     # file-descriptor leak under load, and loud as a `ResourceWarning` in
     # this test suite once warnings are treated as errors.
-    async with request.form() as form:
+    async with capped_request.form() as form:
         upload = form.get("file")
         if not isinstance(upload, UploadFile):
             raise ValidationError("a 'file' part is required")
 
+        # No separate post-read `len(data)` check here: Layer 2 above
+        # already guarantees the whole request body -- and therefore this
+        # file part -- never exceeded `max_request_bytes` by the time
+        # `.read()` can return at all. A third check computing the same
+        # fact `wrapper()` already enforced mid-stream would be dead code,
+        # not defense in depth.
         data = await upload.read()
-        if len(data) > settings.max_upload_bytes:
-            raise PayloadTooLargeError(f"upload exceeds the {settings.max_upload_bytes} byte limit")
 
         # `extract.SUPPORTED_MIME_TYPES` is the single definition of "can we
         # ingest this" -- see that module's docstring. Checking it here,
@@ -179,16 +207,24 @@ async def upload_document(
         store_document_bytes(tenant.organization_id, document.id, data)
         response = DocumentResponse.from_model(document)
 
-    # `enqueue` runs only once the block above has actually exited -- the
-    # point at which `tenant_session` commits. `ingest_document` (run by the
-    # worker this enqueues) looks the document up through its own,
-    # independent session/connection; that lookup cannot see a row this
-    # request has only flushed, not committed. Enqueueing any earlier risks
-    # the worker's `mark_processing` racing ahead of this commit and raising
-    # NotFoundError from outside its own try block -- which the pipeline has
-    # no way to turn into a recorded `failed` status. See the module
+    # Runs only once the block above has actually exited -- the point at
+    # which `tenant_session` commits. `ingest_document` (run by the worker
+    # this enqueues) looks the document up through its own, independent
+    # session/connection; that lookup cannot see a row this request has
+    # only flushed, not committed. Enqueueing any earlier risks the
+    # worker's `mark_processing` racing ahead of this commit and raising
+    # NotFoundError from outside its own try block -- which the pipeline
+    # has no way to turn into a recorded `failed` status. See the module
     # docstring on `app/rag/ingest.py`.
-    await enqueue(response.id, tenant.organization_id)
+    #
+    # Called as the bare module global, not through a `Depends` seam: a
+    # test that wants this off the network monkeypatches
+    # `documents_api.enqueue_ingest` directly
+    # (`monkeypatch.setattr(documents_api, "enqueue_ingest", fake)`), which
+    # Python's name resolution honours here with no indirection required --
+    # this reference is looked up in the module's globals afresh on every
+    # call, exactly like any other module-level function call.
+    await enqueue_ingest(response.id, tenant.organization_id)
     return response
 
 
@@ -196,7 +232,6 @@ async def upload_document(
 async def retry_document(
     document_id: uuid.UUID,
     tenant: Annotated[TenantContext, Depends(get_current_tenant)],
-    enqueue: Annotated[EnqueueIngest, Depends(get_enqueue_ingest)],
 ) -> DocumentResponse:
     async with tenant_session(tenant) as session:
         # Tenant-scoped: a cross-org document_id raises NotFoundError here
@@ -205,25 +240,45 @@ async def retry_document(
         # never learns the id exists at all.
         document = await DocumentService(session, tenant).get(document_id)
 
-        # Only `failed` may be retried. `ready` is rejected because
-        # re-running a succeeded ingest is pointless and doubles the
-        # embedding bill for nothing. `pending` and `processing` are
-        # rejected on the same logic as the dedup check in
-        # `upload_document` above: both already have exactly one job in
-        # flight for this document (the one the original upload enqueued,
-        # or an earlier retry), and enqueueing a second one risks two
-        # workers running `replace_chunks` for the same document
-        # concurrently -- last writer wins on the chunks, and the loser's
-        # embedding call was still a real charge for nothing kept. `failed`
-        # is the only status where a second job is safe to add: the first
-        # one is unambiguously finished (loudly, with an error already on
-        # the row) and there is nothing in flight left to race with.
-        if document.status != DocumentStatus.FAILED:
+        # `failed` and `pending` may both be retried; `processing` and
+        # `ready` are rejected.
+        #
+        # `ready` is rejected because re-running a succeeded ingest is
+        # pointless and doubles the embedding bill for nothing.
+        #
+        # `pending` is retryable -- and this is not the original reasoning
+        # here, which claimed it already has a job in flight and was wrong:
+        # `pending` means "the row was committed; a job may or may not have
+        # been enqueued for it," not "a job exists." `enqueue_ingest` runs
+        # *after* the upload's own commit (see `upload_document` above), so
+        # any failure in that call -- Redis down, a network blip, the
+        # process dying between the commit and the enqueue -- strands the
+        # document in `pending` forever with no job anywhere and no way
+        # back: retrying it was rejected by this exact check, and
+        # re-uploading identical bytes hits the checksum dedup and enqueues
+        # nothing either. Both of this document's only two ways out were
+        # closed. Allowing retry on `pending` reopens one. Re-enqueueing a
+        # document that in fact already has a job in flight is safe
+        # because ingestion is idempotent at the point that matters:
+        # `replace_chunks` deletes the document's existing chunks before
+        # inserting the new ones (see `DocumentService.replace_chunks`), so
+        # two jobs racing on the same document produce one duplicate
+        # (wasted) embedding call, not a doubled corpus -- annoying, never
+        # corrupting.
+        #
+        # `processing` is still rejected: unlike `pending`, it is only ever
+        # set by `ingest_document` itself, from inside the worker that is
+        # actively running it (see `mark_processing` in
+        # `app/rag/ingest.py`) -- so, unlike `pending`, this status is
+        # genuine proof a worker currently holds the document, not merely a
+        # maybe. Retrying it would race that worker on purpose instead of
+        # recovering from a job that may never have existed.
+        if document.status not in (DocumentStatus.FAILED, DocumentStatus.PENDING):
             raise ConflictError(
                 f"cannot retry a document with status '{document.status.value}'; "
-                "only a failed document may be retried"
+                "only a failed or pending document may be retried"
             )
         response = DocumentResponse.from_model(document)
 
-    await enqueue(document_id, tenant.organization_id)
+    await enqueue_ingest(document_id, tenant.organization_id)
     return response

@@ -165,6 +165,12 @@ async def test_documents_status_filter(api_client):
 
 
 async def test_documents_limit_and_offset(api_client):
+    """Asserting only a count here would pass even if `offset` were
+    silently ignored -- a `limit: 1` query always returns exactly one row
+    regardless. Pinning the actual title (the second-newest, since
+    `list_documents` orders by `created_at` descending) is what a broken
+    `offset` -- or one that a future refactor drops -- would actually flip.
+    """
     token = await _register(api_client, "gqlpage@example.com", "Ada Motors GQL Page")
     for i in range(3):
         await _upload(api_client, token, content=f"paged {i}".encode(), title=f"Doc {i}")
@@ -172,12 +178,41 @@ async def test_documents_limit_and_offset(api_client):
     response = await graphql(
         api_client, "{ documents(limit: 1, offset: 1) { title } }", headers=_auth(token)
     )
-    assert len(response.json()["data"]["documents"]) == 1
+    docs = response.json()["data"]["documents"]
+    assert [d["title"] for d in docs] == ["Doc 1"]
+
+
+async def test_documents_clamps_a_negative_offset_and_an_oversized_limit(api_client):
+    """A negative `offset` reaches Postgres as a literal `OFFSET -1`, which
+    Postgres rejects outright -- without clamping, this is an unhandled
+    500, not a graceful empty/first-page result. An unclamped `limit` is a
+    full-table read one query away. Both must be clamped in
+    `DocumentService.list_documents` before the query ever runs."""
+    token = await _register(api_client, "gqlclamp@example.com", "Ada Motors GQL Clamp")
+    await _upload(api_client, token, content=b"clamp content", title="Clamped Doc")
+
+    response = await graphql(
+        api_client,
+        "{ documents(limit: 1000000, offset: -5) { title } }",
+        headers=_auth(token),
+    )
+    body = response.json()
+    assert body.get("errors") is None, body
+    assert [d["title"] for d in body["data"]["documents"]] == ["Clamped Doc"]
 
 
 # ---------------------------------------------------------------------------
 # document(id): nullable, cross-tenant returns null
 # ---------------------------------------------------------------------------
+
+
+async def test_document_requires_authentication(api_client):
+    response = await graphql(
+        api_client,
+        "query Q($id: UUID!) { document(id: $id) { title } }",
+        {"id": str(uuid.uuid4())},
+    )
+    assert response.json()["errors"][0]["extensions"]["code"] == "unauthenticated"
 
 
 async def test_document_returns_the_callers_own_document(api_client):
@@ -229,6 +264,15 @@ async def test_org_b_cannot_fetch_org_as_document(api_client):
 # ---------------------------------------------------------------------------
 
 
+async def test_delete_document_requires_authentication(api_client):
+    response = await graphql(
+        api_client,
+        "mutation M($id: UUID!) { deleteDocument(id: $id) }",
+        {"id": str(uuid.uuid4())},
+    )
+    assert response.json()["errors"][0]["extensions"]["code"] == "unauthenticated"
+
+
 async def test_delete_document_removes_the_callers_own_document(api_client):
     token = await _register(api_client, "gqldel@example.com", "Ada Motors GQL Del")
     document_id = await _upload(api_client, token, content=b"deleteme", title="Delete Me")
@@ -248,6 +292,35 @@ async def test_delete_document_removes_the_callers_own_document(api_client):
         headers=_auth(token),
     )
     assert after.json()["data"]["document"] is None
+
+
+async def test_delete_document_removes_the_stored_file(api_client):
+    """`DocumentService.delete` used to remove only the row -- chunks
+    cascade via the FK, but the uploaded plaintext at
+    `{upload_dir}/{org_id}/{document_id}` had nothing pointed at it and
+    was never cleaned up. Checks the real filesystem path
+    `store_document_bytes`/`delete_document_bytes` actually use, not just
+    that the GraphQL/DB side looks deleted.
+    """
+    from pathlib import Path
+
+    from app.core.config import get_settings
+
+    token = await _register(api_client, "gqlfile@example.com", "Ada Motors GQL File")
+    org_id = await _organization_id(api_client, token)
+    document_id = await _upload(api_client, token, content=b"bytes on disk", title="On Disk Doc")
+
+    path = Path(get_settings().upload_dir) / str(org_id) / str(document_id)
+    assert path.is_file(), "the upload should have written real bytes, not just a DB row"
+
+    response = await graphql(
+        api_client,
+        "mutation M($id: UUID!) { deleteDocument(id: $id) }",
+        {"id": str(document_id)},
+        headers=_auth(token),
+    )
+    assert response.json()["data"]["deleteDocument"] is True
+    assert not path.exists()
 
 
 async def test_org_b_cannot_delete_org_as_document(api_client):

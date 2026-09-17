@@ -5,11 +5,11 @@ Every test here overrides `documents_api.enqueue_ingest` with a recorder
 before making any request through it -- the production function opens a
 real Redis connection pool (`app/rag/queue.py`), and no test in this suite
 may touch the network. Patching the module-level name (rather than FastAPI's
-`dependency_overrides`) works with any client fixture, since
-`get_enqueue_ingest()` reads that name out of this module's own globals
-fresh on every call.
+`dependency_overrides`) works with any client fixture, since the endpoint
+calls `enqueue_ingest` as a bare module global, resolved fresh on every call.
 """
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 
@@ -194,23 +194,29 @@ async def test_unsupported_mime_type_is_422(api_client, clean_users, queue):
 
 
 # ---------------------------------------------------------------------------
-# 4. Size limit
+# 4. Size limit -- both layers, pinned separately
 # ---------------------------------------------------------------------------
+#
+# `test_upload_over_the_limit_is_413` below (kept from round 1) proves only
+# that *a* 413 happens somewhere -- it sets a tiny ceiling and posts a body
+# over it with an accurate Content-Length, which trips whichever of the two
+# layers in `upload_document` survives; deleting either one in isolation
+# still leaves that test green. The two tests after it each isolate one
+# layer instead: `test_content_length_precheck_fires_without_reading_the_body`
+# proves the header-only rejection specifically (a tiny real body, declared
+# huge), and `test_stream_cap_fires_for_a_chunked_request_with_no_content_length`
+# proves the mid-stream cap specifically (no Content-Length header at all,
+# so the precheck cannot fire, and Starlette's own multipart parser has no
+# size ceiling for a file part -- see `_capped_receive`'s docstring).
 
 
 @pytest.fixture
 def set_upload_limit(monkeypatch):
-    """A factory so each test picks its own ceiling. `max_upload_bytes`
-    bounds the *file's* bytes, but the pre-parse check below it looks at
-    the whole multipart request's Content-Length -- boundary markers, part
-    headers, the `title` field -- so a limit has to leave enough headroom
-    over the actual file content for that overhead, or a same-request test
-    for "under the limit" would trip the 413 it is trying to prove absent.
-    """
+    """A factory so each test picks its own ceiling."""
     from app.core.config import get_settings
 
-    def _set(max_upload_bytes: int):
-        settings = get_settings().model_copy(update={"max_upload_bytes": max_upload_bytes})
+    def _set(max_request_bytes: int):
+        settings = get_settings().model_copy(update={"max_request_bytes": max_request_bytes})
         monkeypatch.setattr(documents_api, "get_settings", lambda: settings)
         return settings
 
@@ -235,6 +241,72 @@ async def test_upload_at_or_under_the_limit_still_succeeds(
     token = await _register(api_client, "small@example.com", "Ada Motors Documents Small")
     response = await _upload(api_client, token, content=b"tiny")
     assert response.status_code == 202, response.text
+
+
+async def test_content_length_precheck_fires_without_reading_the_body(
+    api_client, clean_users, queue, set_upload_limit
+):
+    """Declares a 1 GB Content-Length against an actually-tiny body. Only
+    the header-based precheck can catch this: the real body is 4 bytes, so
+    if the precheck did not run at all, `request.form()` would parse the
+    (tiny) body just fine and the request would succeed as 202. httpx
+    honours an explicit `content-length` override even when it doesn't
+    match the real body -- confirmed separately -- which is what lets this
+    test lie about size the same way an adversarial client would."""
+    set_upload_limit(20 * 1024 * 1024)
+    token = await _register(api_client, "preclen@example.com", "Ada Motors Documents PreCLen")
+    files = {"file": ("doc.txt", b"tiny", "text/plain")}
+    response = await api_client.post(
+        DOCUMENTS_URL,
+        headers={**_auth(token), "content-length": str(1024**3)},
+        files=files,
+    )
+    assert response.status_code == 413, response.text
+    assert queue.calls == []
+
+
+def _multipart_body(boundary: str, file_content: bytes) -> bytes:
+    return (
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="big.txt"\r\n'
+            f"Content-Type: text/plain\r\n\r\n"
+        ).encode()
+        + file_content
+        + f"\r\n--{boundary}--\r\n".encode()
+    )
+
+
+async def _chunked(body: bytes, chunk_size: int = 256):
+    """An async generator body forces httpx to send chunked transfer
+    encoding with no `Content-Length` header at all -- confirmed
+    separately against a probe ASGI app. That is the one shape the
+    Content-Length precheck cannot see, which is exactly what this needs
+    to isolate the stream cap from it.
+    """
+    for start in range(0, len(body), chunk_size):
+        yield body[start : start + chunk_size]
+        await asyncio.sleep(0)
+
+
+async def test_stream_cap_fires_for_a_chunked_request_with_no_content_length(
+    api_client, clean_users, queue, set_upload_limit
+):
+    set_upload_limit(200)
+    token = await _register(api_client, "chunked@example.com", "Ada Motors Documents Chunked")
+    boundary = "task5streamcapboundary"
+    body = _multipart_body(boundary, b"x" * 5000)
+
+    # No `content-length` header at all -- `content=<async generator>`
+    # is what forces httpx into chunked transfer encoding in the first
+    # place (confirmed separately against a probe ASGI app).
+    response = await api_client.post(
+        DOCUMENTS_URL,
+        headers={**_auth(token), "content-type": f"multipart/form-data; boundary={boundary}"},
+        content=_chunked(body),
+    )
+    assert response.status_code == 413, response.text
+    assert queue.calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -301,19 +373,27 @@ async def test_retry_on_a_failed_document_reenqueues(api_client, clean_users, qu
     assert queue.calls == [(document_id, org_id), (document_id, org_id)]
 
 
-async def test_retry_on_a_pending_document_is_rejected(api_client, clean_users, queue):
-    """Not dictated by the brief -- decided here: `pending` already has the
-    original upload's job in flight, so a second enqueue risks two workers
-    racing on the same document. Only `failed` is safe to retry (see the
-    comment on `retry_document`)."""
+async def test_retry_on_a_pending_document_reenqueues(api_client, clean_users, queue):
+    """Round 1 rejected `pending` on the theory that it already has a job
+    in flight. That premise doesn't hold: `enqueue_ingest` runs *after*
+    the upload's own commit, so any failure in that call (Redis down, the
+    process dying between commit and enqueue) leaves a `pending` row with
+    no job anywhere -- and, before this test, no way back either: retry
+    was rejected and re-uploading identical bytes hits checksum dedup and
+    enqueues nothing. `pending` is retryable now; see the comment on
+    `retry_document` for why re-enqueueing a document that in fact already
+    has a job in flight is still safe (`replace_chunks` deletes before
+    inserting, so a duplicate job replaces rather than doubles the
+    corpus)."""
     token = await _register(api_client, "pending@example.com", "Ada Motors Documents Pending")
     org_id = await _organization_id(api_client, token)
     uploaded = await _upload(api_client, token)
     document_id = uuid.UUID(uploaded.json()["id"])
 
     response = await api_client.post(f"{DOCUMENTS_URL}/{document_id}/retry", headers=_auth(token))
-    assert response.status_code == 409, response.text
-    assert queue.calls == [(document_id, org_id)]
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "pending"
+    assert queue.calls == [(document_id, org_id), (document_id, org_id)]
 
 
 async def test_retry_on_a_processing_document_is_rejected(api_client, clean_users, queue):
@@ -332,3 +412,33 @@ async def test_retry_on_a_nonexistent_document_is_404(api_client, clean_users, q
     token = await _register(api_client, "none@example.com", "Ada Motors Documents None")
     response = await api_client.post(f"{DOCUMENTS_URL}/{uuid.uuid4()}/retry", headers=_auth(token))
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 7. Validation edge cases: no file part, title fallback, title truncation
+# ---------------------------------------------------------------------------
+
+
+async def test_upload_without_a_file_part_is_422(api_client, clean_users, queue):
+    token = await _register(api_client, "nofile@example.com", "Ada Motors Documents NoFile")
+    response = await api_client.post(
+        DOCUMENTS_URL, headers=_auth(token), data={"title": "No file here"}
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "invalid_input"
+    assert queue.calls == []
+
+
+async def test_upload_without_a_title_falls_back_to_the_filename(api_client, clean_users, queue):
+    token = await _register(api_client, "notitle@example.com", "Ada Motors Documents NoTitle")
+    response = await _upload(api_client, token, filename="quarterly-report.txt", title=None)
+    assert response.status_code == 202, response.text
+    assert response.json()["title"] == "quarterly-report.txt"
+
+
+async def test_upload_title_longer_than_255_chars_is_truncated(api_client, clean_users, queue):
+    token = await _register(api_client, "longtitle@example.com", "Ada Motors Documents LongTitle")
+    long_title = "x" * 400
+    response = await _upload(api_client, token, title=long_title)
+    assert response.status_code == 202, response.text
+    assert response.json()["title"] == "x" * 255

@@ -35,4 +35,13 @@ async def enqueue_ingest(document_id: uuid.UUID, organization_id: uuid.UUID) -> 
             document_id=str(document_id),
         )
     finally:
-        await pool.close()
+        # `aclose()`, not the deprecated `close()`: redis-py 5.0.1+ emits a
+        # `DeprecationWarning` from `close()` (see `redis/utils.py`'s
+        # `deprecated_function` wrapper), invisible until something
+        # actually calls this function for real -- which nothing did until
+        # `tests/integration/test_enqueue_ingest_live.py`, and this
+        # suite's `filterwarnings = ["error"]` (pyproject.toml) turns any
+        # warning into a hard failure. Found by that live test, not by
+        # `tests/unit/test_queue.py`'s monkeypatched pool, which was never
+        # going to call a real close() method either way.
+        await pool.aclose()

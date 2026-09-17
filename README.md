@@ -265,7 +265,7 @@ outage or a slow database never blocks a frontend-only PR.
 |---|---|---|
 | **1 — Foundation** | Repo structure, FastAPI, GraphQL, Postgres + RLS, migrations, auth, organizations, users, agents, basic Next.js dashboard. | **Complete** (this repository) |
 | **2 — Basic LLM chat** | Next.js → chat API → LLM provider → streaming response. OpenAI first, then an Anthropic adapter behind the same interface. | **Complete** (this repository) — see [`docs/PHASE-2.md`](docs/PHASE-2.md) |
-| 3 — RAG | Document upload → extraction → chunking → embedding → pgvector → retrieval → LLM. | In progress: storage, extraction/chunking, and the ingest pipeline + arq worker are in this repository; upload endpoint and retrieval are not yet built. |
+| 3 — RAG | Document upload → extraction → chunking → embedding → pgvector → retrieval → LLM. | In progress: storage, extraction/chunking, the ingest pipeline + arq worker, and the upload/retry/document GraphQL surface are in this repository; retrieval is not yet built. |
 | 4 — Agent + tools | The agent decides when to call `retrieve_knowledge`, `search_products`, `get_product`, `create_lead`. | Not started |
 | 5 — Evaluation | Test datasets, evaluation runs, retrieval and answer scoring. | Not started |
 | 6 — MCP | Expose selected business capabilities through MCP, once the built-in tool system is stable. | Not started |
@@ -295,6 +295,17 @@ the moment this leaves your laptop:
   uvicorn with `--proxy-headers --forwarded-allow-ips=<the proxy's real address>`) so only
   a header set by that trusted hop is honored.
 
+- **`POST /api/v1/documents` caps request size itself, in two layers, but a
+  proxy-level cap is still worth having.** `settings.max_request_bytes` (20 MB
+  default) is enforced both from `Content-Length` before the body is read and,
+  for a client that omits or lies about that header, by counting bytes as the
+  ASGI server actually delivers them -- see `_capped_receive` in
+  `apps/api/app/api/documents.py`. That closes the gap this app can close on
+  its own. It does not replace a reverse proxy's own body-size limit (nginx's
+  `client_max_body_size`, or the equivalent on whatever sits in front of this
+  in production) as a second, independent layer: this app's cap protects one
+  worker process's memory and disk, not the connection-handling capacity of
+  whatever terminates TLS before traffic reaches it.
 - **The SSE route must not be buffered or compressed by anything in front of it.**
   `POST /api/v1/chat/stream` sets `Cache-Control: no-cache` and `X-Accel-Buffering: no`,
   and sends no `Content-Encoding` (see `docs/PHASE-2.md` §4). Those headers only work if

@@ -28,7 +28,7 @@ class _FakePool:
     async def enqueue_job(self, name: str, **kwargs: Any) -> None:
         self.enqueued = {"name": name, "kwargs": kwargs}
 
-    async def close(self) -> None:
+    async def aclose(self) -> None:
         self.closed = True
 
 

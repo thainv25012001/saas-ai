@@ -38,3 +38,22 @@ def load_document_bytes(organization_id: uuid.UUID, document_id: uuid.UUID) -> b
     a blank document.
     """
     return _path_for(organization_id, document_id).read_bytes()
+
+
+def delete_document_bytes(organization_id: uuid.UUID, document_id: uuid.UUID) -> None:
+    """Remove the bytes `store_document_bytes` wrote for this key, if any.
+
+    Called from `DocumentService.delete` so deleting a document actually
+    deletes the uploaded plaintext, not just the row -- without this, the
+    file at `{upload_dir}/{organization_id}/{document_id}` outlives the
+    document that named it, indefinitely.
+
+    `missing_ok=True`: unlike `load_document_bytes`, a missing file here is
+    not a bug to surface loudly. It is the ordinary case for a document
+    whose upload never got as far as writing bytes (a row created directly
+    by a test, or a future creation path that fails between `create()` and
+    `store_document_bytes()`), and it must stay ordinary for a second
+    delete of the same document, too -- the deletion this function does is
+    what should be authoritative, not the file's prior existence.
+    """
+    _path_for(organization_id, document_id).unlink(missing_ok=True)

@@ -68,6 +68,13 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Without this, a regression like the unclosed-`UploadFile` bug Task 5's
+# review caught (fixed in app/api/documents.py) is only visible to whoever
+# happens to run pytest with `-W error` by hand -- plain `uv run pytest -v`,
+# which is what CI actually runs, stays green while silently leaking file
+# descriptors. Promoting every warning to a failure here is what makes that
+# the same command, not an opt-in extra step nobody remembers.
+filterwarnings = ["error"]
 
 [tool.ruff]
 line-length = 100

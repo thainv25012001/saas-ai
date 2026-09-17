@@ -9,6 +9,14 @@ from app.core.ids import uuid7
 from app.core.tenancy import TenantContext
 from app.db.models import Document, DocumentChunk, DocumentStatus
 from app.documents.schemas import ChunkInput, CreateDocumentInput
+from app.rag.storage import delete_document_bytes
+
+# Ceiling on `list_documents`'s `limit`, independent of whatever a caller
+# asks for. GraphQL's `documents(limit: Int)` (app/graphql/resolvers.py)
+# takes this straight from an authenticated but otherwise untrusted caller,
+# with no upper bound of its own -- an unclamped limit is one query away
+# from a full-table scan-and-serialize for a caller that passes 1_000_000.
+_MAX_LIST_LIMIT = 100
 
 
 class DocumentService:
@@ -58,7 +66,16 @@ class DocumentService:
         """`status`/`limit`/`offset` are optional and keyword-only so the
         existing no-argument call (every caller before Task 5's GraphQL
         `documents` query) keeps working unchanged.
+
+        `limit` and `offset` are clamped, not trusted: an unbounded `limit`
+        is a full-table read one query away (see `_MAX_LIST_LIMIT`), and a
+        negative `offset` is not merely meaningless -- Postgres rejects
+        `OFFSET -1` outright, which without this clamp reaches the database
+        as a query error and surfaces as an unhandled 500, not a clean
+        empty or first-page result.
         """
+        limit = max(1, min(limit, _MAX_LIST_LIMIT))
+        offset = max(0, offset)
         query = select(Document).where(Document.organization_id == self.tenant.organization_id)
         if status is not None:
             query = query.where(Document.status == status)
@@ -143,3 +160,12 @@ class DocumentService:
         document = await self.get(document_id)
         await self.session.delete(document)
         await self.session.flush()
+        # Makes the delete authoritative for the uploaded bytes too, not
+        # just the row -- without this, `{upload_dir}/{organization_id}
+        # /{document_id}` outlives the document that named it, forever.
+        # Runs after the row delete is flushed but still inside the
+        # caller's open transaction: a failure here (a permissions error,
+        # a locked file) rolls the row delete back with it via the
+        # caller's own `tenant_session`, rather than leaving a database
+        # that says "gone" while the file says otherwise.
+        delete_document_bytes(self.tenant.organization_id, document_id)
