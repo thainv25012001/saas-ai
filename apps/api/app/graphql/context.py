@@ -2,7 +2,7 @@ import uuid
 from collections.abc import AsyncIterator, Sequence
 
 from fastapi import Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from strawberry.dataloader import DataLoader
 from strawberry.fastapi import BaseContext
@@ -10,7 +10,7 @@ from strawberry.fastapi import BaseContext
 from app.auth.dependencies import tenant_from_bearer
 from app.core.errors import AuthenticationError
 from app.core.tenancy import TenantContext, tenant_session
-from app.db.models import AgentConfig
+from app.db.models import AgentConfig, DocumentChunk
 
 
 class Context(BaseContext):
@@ -35,6 +35,9 @@ class Context(BaseContext):
         self.config_loader: DataLoader[uuid.UUID, AgentConfig | None] | None = (
             DataLoader(load_fn=self._load_configs) if session is not None else None
         )
+        self.chunk_count_loader: DataLoader[uuid.UUID, int] | None = (
+            DataLoader(load_fn=self._load_chunk_counts) if session is not None else None
+        )
 
     async def _load_configs(self, agent_ids: Sequence[uuid.UUID]) -> list[AgentConfig | None]:
         """Batches `agents { config { ... } }` into one query instead of one
@@ -57,6 +60,31 @@ class Context(BaseContext):
         )
         by_agent = {config.agent_id: config for config in result.scalars().all()}
         return [by_agent.get(agent_id) for agent_id in agent_ids]
+
+    async def _load_chunk_counts(self, document_ids: Sequence[uuid.UUID]) -> list[int]:
+        """Batches `documents { chunkCount }` into one query instead of one
+        per document, the same reasoning as `_load_configs` above.
+
+        `organization_id` is scoped explicitly for the same reason as
+        `_load_configs`'s own predicate: Layer 1 tenant filtering admits no
+        exceptions, RLS or not. A document id with genuinely zero chunks
+        (nothing ingested yet, or ingestion failed before writing any) has
+        no row to `GROUP BY`, so it is missing from `by_document` entirely
+        -- the trailing `.get(document_id, 0)` is what turns that absence
+        into `0` rather than `None`.
+        """
+        assert self.session is not None
+        assert self.tenant is not None
+        result = await self.session.execute(
+            select(DocumentChunk.document_id, func.count())
+            .where(
+                DocumentChunk.document_id.in_(list(document_ids)),
+                DocumentChunk.organization_id == self.tenant.organization_id,
+            )
+            .group_by(DocumentChunk.document_id)
+        )
+        by_document = {document_id: count for document_id, count in result.all()}
+        return [by_document.get(document_id, 0) for document_id in document_ids]
 
 
 async def build_context(request: Request) -> AsyncIterator[Context]:

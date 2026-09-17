@@ -55,6 +55,26 @@ input CreatePromptVersionInput {
 """Date with time (isoformat)"""
 scalar DateTime
 
+type Document {
+  id: UUID!
+  title: String!
+  status: DocumentStatus!
+  mimeType: String
+  fileSize: Int
+  checksum: String
+  error: String
+  createdAt: DateTime!
+  processedAt: DateTime
+  chunkCount: Int!
+}
+
+enum DocumentStatus {
+  PENDING
+  PROCESSING
+  READY
+  FAILED
+}
+
 type Me {
   userId: UUID!
   email: String!
@@ -78,6 +98,7 @@ type Mutation {
   createPrompt(input: CreatePromptInput!): Prompt!
   createPromptVersion(promptId: UUID!, input: CreatePromptVersionInput!): PromptVersion!
   activatePromptVersion(versionId: UUID!): PromptVersion!
+  deleteDocument(id: UUID!): Boolean!
 }
 
 type Organization {
@@ -119,6 +140,8 @@ type Query {
   configuredProviders: [ProviderInfo!]!
   prompts: [Prompt!]!
   prompt(id: UUID!): Prompt!
+  documents(status: DocumentStatus = null, limit: Int! = 50, offset: Int! = 0): [Document!]!
+  document(id: UUID!): Document
 }
 
 scalar UUID

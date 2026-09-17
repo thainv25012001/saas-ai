@@ -22,6 +22,14 @@ dependencies = [
     "pypdf>=5.1",
     "python-docx>=1.1",
     "selectolax>=0.3",
+    # Starlette's multipart form parsing (Request.form(), which Task 5's
+    # upload endpoint calls directly) needs this at runtime. It was already
+    # in the resolved environment transitively -- via strawberry-graphql's
+    # dev-only `cli` extra -- which is exactly the kind of accident that
+    # stops being true the day that extra's dependency graph changes.
+    # Declaring it directly means the production image still has it once
+    # that dev-only extra drops out of a prod build.
+    "python-multipart>=0.0.9",
     # Already in the closure via the OpenAI and Anthropic SDKs; declared
     # explicitly because `app/llm/openrouter_models.py` imports it directly
     # rather than relying on a transitive dependency staying put.

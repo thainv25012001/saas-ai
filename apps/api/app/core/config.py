@@ -96,6 +96,12 @@ class Settings(BaseSettings):
     # the module docstring on `app/rag/storage.py` for why that is fine for
     # a single instance and wrong for production.
     upload_dir: str = "./var/uploads"
+    # Ceiling on one uploaded document's size, enforced by
+    # app/api/documents.py before it ever writes the bytes anywhere. 20 MB
+    # comfortably covers a policy PDF or a product manual while keeping a
+    # single upload's embedding cost -- and how long a worker holds a job --
+    # bounded.
+    max_upload_bytes: int = 20 * 1024 * 1024
     # Chunks per embedding API call. Higher batches ingest faster but put
     # more chunks at risk of a single request failing; 64 is comfortably
     # under every provider's per-request item limit we target.

@@ -48,12 +48,22 @@ class DocumentService:
             raise NotFoundError("document not found")
         return document
 
-    async def list_documents(self) -> list[Document]:
-        result = await self.session.execute(
-            select(Document)
-            .where(Document.organization_id == self.tenant.organization_id)
-            .order_by(Document.created_at.desc())
-        )
+    async def list_documents(
+        self,
+        *,
+        status: DocumentStatus | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Document]:
+        """`status`/`limit`/`offset` are optional and keyword-only so the
+        existing no-argument call (every caller before Task 5's GraphQL
+        `documents` query) keeps working unchanged.
+        """
+        query = select(Document).where(Document.organization_id == self.tenant.organization_id)
+        if status is not None:
+            query = query.where(Document.status == status)
+        query = query.order_by(Document.created_at.desc()).limit(limit).offset(offset)
+        result = await self.session.execute(query)
         return list(result.scalars().all())
 
     async def find_by_checksum(self, checksum: str) -> Document | None:

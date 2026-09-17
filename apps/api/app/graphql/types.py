@@ -7,6 +7,7 @@ import strawberry
 from app.core.errors import AuthenticationError
 from app.db.models import Agent as AgentModel
 from app.db.models import AgentConfig as AgentConfigModel
+from app.db.models import Document as DocumentModel
 from app.db.models import Organization as OrganizationModel
 from app.db.models import Prompt as PromptModel
 from app.db.models import PromptVersion as PromptVersionModel
@@ -187,6 +188,52 @@ class Prompt:
             description=model.description,
             created_at=model.created_at,
         )
+
+
+@strawberry.enum
+class DocumentStatus(enum.Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    READY = "ready"
+    FAILED = "failed"
+
+
+@strawberry.type
+class Document:
+    id: uuid.UUID
+    title: str
+    status: DocumentStatus
+    mime_type: str | None
+    file_size: int | None
+    checksum: str | None
+    error: str | None
+    created_at: datetime
+    processed_at: datetime | None
+
+    @classmethod
+    def from_model(cls, model: DocumentModel) -> "Document":
+        return cls(
+            id=model.id,
+            title=model.title,
+            status=DocumentStatus(model.status.value),
+            mime_type=model.mime_type,
+            file_size=model.file_size,
+            checksum=model.checksum,
+            error=model.error,
+            created_at=model.created_at,
+            processed_at=model.processed_at,
+        )
+
+    @strawberry.field
+    async def chunk_count(self, info: strawberry.Info[Context, None]) -> int:
+        # Same reasoning as Agent.config above: an unauthenticated request
+        # builds a Context with no loader at all, and that must fail as a
+        # clean `unauthenticated` error from the `documents`/`document`
+        # resolver itself, before this field ever runs -- not an
+        # AttributeError here.
+        if info.context.chunk_count_loader is None:
+            raise AuthenticationError("authentication required")
+        return await info.context.chunk_count_loader.load(self.id)
 
 
 @strawberry.input
