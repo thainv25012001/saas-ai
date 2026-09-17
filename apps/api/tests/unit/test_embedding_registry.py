@@ -18,10 +18,21 @@ def test_hashing_resolves_without_any_api_key():
     assert get_embedding_provider("hashing").name == "hashing"
 
 
-def test_no_name_resolves_to_the_configured_default():
-    """`settings.embedding_provider` defaults to `hashing`, so calling with no
-    argument must behave exactly like asking for it explicitly."""
-    assert get_embedding_provider().name == get_settings().embedding_provider
+def test_no_name_resolves_to_the_configured_default(monkeypatch):
+    """`settings.embedding_provider` decides which provider `name=None`
+    resolves to. Asserting this against the setting's own default value
+    (`"hashing"`) would pass even if the production code ignored the setting
+    and hardcoded `"hashing"` -- both sides of the assertion would
+    independently land on the same string with the read never exercised.
+    Pointing the setting at `"openai"` instead -- the only other known
+    provider -- means the assertion can only pass by actually reading
+    `settings.embedding_provider`."""
+    base = get_settings()
+    keyed = base.model_copy(update={"embedding_provider": "openai", "openai_api_key": "test-key"})
+    monkeypatch.setattr("app.embeddings.registry.get_settings", lambda: keyed)
+    reset_embedding_providers()
+
+    assert get_embedding_provider().name == "openai"
 
 
 def test_unknown_provider_name_is_a_validation_error():
