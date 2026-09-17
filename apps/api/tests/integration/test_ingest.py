@@ -562,3 +562,61 @@ async def test_a_database_error_records_the_cause_without_the_document_text_or_i
     assert "parameters:" not in fresh.error
     assert "0.0,0.0" not in fresh.error
     assert len(fresh.error) < 500
+
+
+async def test_the_worker_logs_an_ingest_without_the_document_text_or_its_vectors(
+    tenant_a, tenant_b, owner_connection, tmp_path, monkeypatch
+):
+    """Nothing in the RAG pipeline logged anything at all -- `IngestResult`
+    was constructed by `ingest_document` and dropped on the floor by the
+    task -- so a production ingest failure produced no signal beyond the
+    one `documents.error` column. These lines are that signal.
+
+    The assertion that matters is the negative one. A log line is the
+    easiest place to undo the bounded `documents.error` message by
+    accident: `exc_info=True` renders a traceback ending in the exception's
+    own `str()`, which for a SQLAlchemy DBAPIError is the statement and its
+    bound parameters -- the customer's text and a 1536-float vector, now in
+    the log aggregator instead of (or as well as) the dashboard.
+    """
+    from structlog.testing import capture_logs
+
+    isolated_settings = get_settings().model_copy(update={"upload_dir": str(tmp_path)})
+    monkeypatch.setattr(storage_module, "get_settings", lambda: isolated_settings)
+
+    async with tenant_session(tenant_a) as session:
+        good = await _document(session, tenant_a, mime_type="text/markdown")
+        bad = await _document(session, tenant_a, mime_type="text/markdown")
+    storage_module.store_document_bytes(tenant_a.organization_id, good.id, _MARKDOWN)
+    storage_module.store_document_bytes(tenant_a.organization_id, bad.id, _MARKDOWN)
+    await _seed_colliding_chunk(owner_connection, tenant_b.organization_id, bad.id)
+
+    with capture_logs() as entries:
+        await ingest_document_task(
+            {}, organization_id=str(tenant_a.organization_id), document_id=str(good.id)
+        )
+        with pytest.raises(IntegrityError):
+            await ingest_document_task(
+                {}, organization_id=str(tenant_a.organization_id), document_id=str(bad.id)
+            )
+
+    events = [entry["event"] for entry in entries]
+    assert "ingest_started" in events
+    assert "ingest_completed" in events
+    assert "ingest_failed" in events
+
+    completed = next(e for e in entries if e["event"] == "ingest_completed")
+    assert completed["document_id"] == str(good.id)
+    assert completed["organization_id"] == str(tenant_a.organization_id)
+    assert completed["chunk_count"] > 0
+    assert completed["token_count"] > 0
+    assert completed["embedding_model"] == "hashing"
+    assert completed["duration_ms"] >= 0
+
+    failed = next(e for e in entries if e["event"] == "ingest_failed")
+    assert "uq_chunk_document_index" in failed["error"]
+    assert failed.get("exc_info") in (None, False)
+
+    rendered = repr(entries)
+    assert "Customers may request a refund" not in rendered
+    assert "0.0,0.0" not in rendered

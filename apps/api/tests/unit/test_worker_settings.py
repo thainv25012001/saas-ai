@@ -54,3 +54,33 @@ def test_max_jobs_is_bounded_so_every_concurrent_job_can_hold_two_connections() 
     assert WorkerSettings.max_jobs == get_settings().worker_max_jobs
     pool_capacity = 10 + 5  # app/db/session.py's pool_size + max_overflow
     assert WorkerSettings.max_jobs * 2 <= pool_capacity
+
+
+def test_on_startup_configures_logging_in_the_worker_process() -> None:
+    """`configure_logging` is called from `app/main.py`, which the worker
+    process never imports. Without an `on_startup` hook the worker ran on
+    structlog's defaults: `LOG_LEVEL` ignored, and output in a different
+    shape from every other process in the deployment.
+    """
+    import asyncio
+
+    import structlog
+
+    from app.core.config import get_settings
+
+    assert callable(WorkerSettings.on_startup)
+
+    structlog.reset_defaults()
+    asyncio.run(WorkerSettings.on_startup({}))
+
+    # `configure_logging` installs a JSON renderer and a level filter built
+    # from `settings.log_level`; structlog's defaults have neither.
+    config = structlog.get_config()
+    assert any(
+        isinstance(processor, structlog.processors.JSONRenderer)
+        for processor in config["processors"]
+    )
+    expected_level = structlog.make_filtering_bound_logger(
+        getattr(__import__("logging"), get_settings().log_level.upper())
+    )
+    assert config["wrapper_class"] is expected_level

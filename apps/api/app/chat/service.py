@@ -412,10 +412,24 @@ class ChatService:
                 )
                 if not ready_documents:
                     return []
-                return await RetrievalService(self.session, self.tenant).retrieve(query)
+                chunks = await RetrievalService(self.session, self.tenant).retrieve(query)
         except Exception:
             logger.warning("rag_retrieval_failed", exc_info=True)
             return []
+
+        if not chunks:
+            # An organization with a ready corpus whose every turn retrieves
+            # nothing is the shape a misconfigured relevance floor takes --
+            # or an embedding model swapped without re-embedding, where the
+            # stored vectors and the query vector no longer share a space.
+            # Neither raises, and without this line neither leaves a trace.
+            # The query text is not logged: it is the customer's own words.
+            logger.info(
+                "rag_retrieval_empty",
+                organization_id=str(self.tenant.organization_id),
+                query_chars=len(query),
+            )
+        return chunks
 
     async def _record_citations(self, message_id: uuid.UUID, chunks: list[RetrievedChunk]) -> None:
         """Writes one `MessageCitation` row per retrieved chunk, in the

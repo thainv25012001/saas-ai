@@ -4,13 +4,17 @@ enqueues them by the matching string, so renaming a function here is a
 breaking change to anything already queued under the old name.
 """
 
+import time
 import uuid
 from typing import Any
 
+from app.core.logging import get_logger
 from app.core.tenancy import TenantContext, tenant_session
 from app.documents.service import DocumentService
-from app.rag.ingest import ingest_document
+from app.rag.ingest import bounded_error_message, ingest_document
 from app.rag.storage import load_document_bytes
+
+logger = get_logger(__name__)
 
 
 async def ingest_document_task(
@@ -40,11 +44,52 @@ async def ingest_document_task(
         request_id=f"ingest:{document_id}",
     )
     document_uuid = uuid.UUID(document_id)
-    async with tenant_session(tenant) as session:
-        document = await DocumentService(session, tenant).get(document_uuid)
-        # `mime_type` is nullable on the row (see app/db/models/document.py);
-        # falling back to "" rather than raising here lets `extract()` reject
-        # it the same way it rejects any other unsupported type, going
-        # through the ordinary failed-status path instead of a second one.
-        data = load_document_bytes(tenant.organization_id, document_uuid)
-        await ingest_document(session, tenant, document_uuid, data, document.mime_type or "")
+    # `IngestResult` used to be constructed and dropped on the floor here.
+    # These three log lines are the only signal an operator gets that a
+    # document was ever processed at all -- `documents.error` says what went
+    # wrong for the one document that failed, and nothing anywhere said how
+    # long a queue of them took or how much corpus came out.
+    #
+    # Deliberately absent: the document's text, its title and its
+    # embeddings. The whole point of the bounded `documents.error` message
+    # (see `_error_message` in app/rag/ingest.py) is undone if the same
+    # content goes to the log instead.
+    logger.info("ingest_started", document_id=document_id, organization_id=organization_id)
+    started_at = time.monotonic()
+    try:
+        async with tenant_session(tenant) as session:
+            document = await DocumentService(session, tenant).get(document_uuid)
+            # `mime_type` is nullable on the row (see
+            # app/db/models/document.py); falling back to "" rather than
+            # raising here lets `extract()` reject it the same way it
+            # rejects any other unsupported type, going through the
+            # ordinary failed-status path instead of a second one.
+            data = load_document_bytes(tenant.organization_id, document_uuid)
+            result = await ingest_document(
+                session, tenant, document_uuid, data, document.mime_type or ""
+            )
+    except Exception as exc:
+        logger.error(
+            "ingest_failed",
+            document_id=document_id,
+            organization_id=organization_id,
+            duration_ms=int((time.monotonic() - started_at) * 1000),
+            # `bounded_error_message`, and deliberately no `exc_info`: a
+            # rendered traceback ends with the exception's own `str()`, and
+            # for a SQLAlchemy DBAPIError that is the statement *and its
+            # bound parameters* -- the document's text and its embedding
+            # floats, straight into the log. Exactly what recording a
+            # bounded message in `documents.error` exists to prevent (see
+            # `bounded_error_message`), undone by logging it instead.
+            error=bounded_error_message(exc),
+        )
+        raise
+    logger.info(
+        "ingest_completed",
+        document_id=document_id,
+        organization_id=organization_id,
+        chunk_count=result.chunk_count,
+        token_count=result.token_count,
+        embedding_model=result.embedding_model,
+        duration_ms=int((time.monotonic() - started_at) * 1000),
+    )

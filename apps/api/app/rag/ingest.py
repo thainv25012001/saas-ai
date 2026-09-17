@@ -108,7 +108,7 @@ def _truncate(message: str) -> str:
     return message[:_ERROR_MESSAGE_LIMIT] + "... (truncated)"
 
 
-def _error_message(exc: Exception) -> str:
+def bounded_error_message(exc: Exception) -> str:
     """A bounded, deliberate description of `exc` for `documents.error`.
 
     Not `str(exc)`. That column is rendered verbatim in the Knowledge
@@ -335,7 +335,7 @@ async def ingest_document(
         )
         raise
     except Exception as exc:
-        await _record_failure(session, tenant, document_id, _error_message(exc))
+        await _record_failure(session, tenant, document_id, bounded_error_message(exc))
         raise
 
     return IngestResult(

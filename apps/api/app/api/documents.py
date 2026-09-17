@@ -29,6 +29,7 @@ from starlette.types import Message, Receive
 from app.auth.dependencies import get_current_tenant
 from app.core.config import get_settings
 from app.core.errors import ConflictError, PayloadTooLargeError, ValidationError
+from app.core.logging import get_logger
 from app.core.tenancy import TenantContext, tenant_session
 from app.db.models import Document as DocumentModel
 from app.db.models import DocumentSourceType, DocumentStatus
@@ -37,6 +38,8 @@ from app.documents.service import DocumentService
 from app.rag.extract import SUPPORTED_MIME_TYPES, UnsupportedDocumentType
 from app.rag.queue import enqueue_ingest
 from app.rag.storage import store_document_bytes
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
 
@@ -170,6 +173,17 @@ async def upload_document(
         # taught to handle.
         mime_type = upload.content_type or ""
         if mime_type not in SUPPORTED_MIME_TYPES:
+            # Logged, not just raised: a rejection the user sees as "not a
+            # supported file type" is the one case where the operator needs
+            # to know *what* was offered, because the usual cause is a
+            # browser reporting a type this list has not been taught.
+            logger.info(
+                "document_upload_rejected",
+                organization_id=str(tenant.organization_id),
+                reason="unsupported_mime_type",
+                mime_type=mime_type,
+                file_size=len(data),
+            )
             raise UnsupportedDocumentType(f"unsupported document type '{mime_type}'")
 
         title_field = form.get("title")
@@ -188,6 +202,12 @@ async def upload_document(
             # file). Returning that row -- and doing nothing else -- is the
             # whole point: enqueueing again would be a second embedding
             # bill for content this org already paid to embed once.
+            logger.info(
+                "document_upload_deduplicated",
+                organization_id=str(tenant.organization_id),
+                document_id=str(existing.id),
+                file_size=len(data),
+            )
             return DocumentResponse.from_model(existing)
 
         document = await service.create(
@@ -225,6 +245,16 @@ async def upload_document(
     # this reference is looked up in the module's globals afresh on every
     # call, exactly like any other module-level function call.
     await enqueue_ingest(response.id, tenant.organization_id)
+    # Nothing here carries the title or any of the bytes: the operator needs
+    # to know a document of this size and type was accepted for this
+    # organization, not what is in it.
+    logger.info(
+        "document_upload_accepted",
+        organization_id=str(tenant.organization_id),
+        document_id=str(response.id),
+        mime_type=mime_type,
+        file_size=len(data),
+    )
     return response
 
 
@@ -240,6 +270,7 @@ async def retry_document(
         # never learns the id exists at all.
         service = DocumentService(session, tenant)
         document = await service.get(document_id)
+        previous_status = document.status
 
         # `failed` and `pending` may both be retried; `processing` and
         # `ready` are rejected.
@@ -291,6 +322,12 @@ async def retry_document(
         # so polling resumes on its own.
         document = await service.mark_pending(document_id)
         response = DocumentResponse.from_model(document)
+        logger.info(
+            "document_retry_accepted",
+            organization_id=str(tenant.organization_id),
+            document_id=str(document_id),
+            previous_status=previous_status.value,
+        )
 
     await enqueue_ingest(document_id, tenant.organization_id)
     return response

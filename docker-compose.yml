@@ -86,6 +86,25 @@ services:
       # volume below is what makes that path actually the same *disk*, not
       # just the same string.
       UPLOAD_DIR: ${UPLOAD_DIR:-/data/uploads}
+      # ---- Phase 3 (RAG) -------------------------------------------------
+      # Passed through explicitly, like every other setting here: the
+      # repo-root `.env` is NOT inside the `./apps/api` mount, so
+      # `Settings`' env-file walk finds nothing in this container and a
+      # variable not named below simply does not exist for the app. That is
+      # what made `docs/PHASE-3.md` §2.3's claim -- that swapping in
+      # `OpenAIEmbeddingProvider` is "a config change" -- false under
+      # compose: setting `OPENAI_API_KEY` alone did nothing, because
+      # `EMBEDDING_PROVIDER` never reached the process.
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-hashing}
+      MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-20971520}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-64}
+      EMBEDDING_MAX_RETRIES: ${EMBEDDING_MAX_RETRIES:-3}
+      EMBEDDING_RETRY_BACKOFF_SECONDS: ${EMBEDDING_RETRY_BACKOFF_SECONDS:-0.1}
+      WORKER_MAX_JOBS: ${WORKER_MAX_JOBS:-5}
+      # Both floors are properties of the embedding model and the corpus,
+      # not of the app -- re-measure them if EMBEDDING_PROVIDER changes.
+      RETRIEVAL_MAX_COSINE_DISTANCE: ${RETRIEVAL_MAX_COSINE_DISTANCE:-0.8}
+      RETRIEVAL_MIN_KEYWORD_RANK: ${RETRIEVAL_MIN_KEYWORD_RANK:-0.15}
     ports:
       - "8000:8000"
     volumes:
@@ -145,6 +164,25 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-fake}
       UPLOAD_DIR: ${UPLOAD_DIR:-/data/uploads}
+      # ---- Phase 3 (RAG) -------------------------------------------------
+      # Passed through explicitly, like every other setting here: the
+      # repo-root `.env` is NOT inside the `./apps/api` mount, so
+      # `Settings`' env-file walk finds nothing in this container and a
+      # variable not named below simply does not exist for the app. That is
+      # what made `docs/PHASE-3.md` §2.3's claim -- that swapping in
+      # `OpenAIEmbeddingProvider` is "a config change" -- false under
+      # compose: setting `OPENAI_API_KEY` alone did nothing, because
+      # `EMBEDDING_PROVIDER` never reached the process.
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-hashing}
+      MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-20971520}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-64}
+      EMBEDDING_MAX_RETRIES: ${EMBEDDING_MAX_RETRIES:-3}
+      EMBEDDING_RETRY_BACKOFF_SECONDS: ${EMBEDDING_RETRY_BACKOFF_SECONDS:-0.1}
+      WORKER_MAX_JOBS: ${WORKER_MAX_JOBS:-5}
+      # Both floors are properties of the embedding model and the corpus,
+      # not of the app -- re-measure them if EMBEDDING_PROVIDER changes.
+      RETRIEVAL_MAX_COSINE_DISTANCE: ${RETRIEVAL_MAX_COSINE_DISTANCE:-0.8}
+      RETRIEVAL_MIN_KEYWORD_RANK: ${RETRIEVAL_MIN_KEYWORD_RANK:-0.15}
     volumes:
       - ./apps/api:/app
       - /app/.venv
