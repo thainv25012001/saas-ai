@@ -287,3 +287,41 @@ async def test_layer_1_predicates_hold_even_when_rls_is_bypassed(tenant_a, tenan
             assert await context._load_chunk_counts([other.id]) == [0]
     finally:
         await engine.dispose()
+
+
+async def test_two_documents_in_one_org_cannot_share_a_checksum(tenant_a, tenant_b):
+    """`find_by_checksum` is the upload endpoint's idempotence check, and a
+    check-then-insert is not idempotent on its own: two concurrent uploads
+    of identical bytes both find nothing, both create a row, both enqueue a
+    job and both get billed for embedding the same content -- against §3's
+    idempotence claim. The UI gates a double-click, so this needs two tabs
+    or an API client, which is to say it needs a constraint rather than a
+    convention.
+
+    Partial, on `checksum IS NOT NULL`: a document created by any path that
+    records no checksum (`source_type` of `text`/`url`, every fixture in
+    this suite) must not collide with every other such document.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    checksum = "b" * 64
+
+    async with tenant_session(tenant_a) as session:
+        await _document(session, tenant_a, checksum=checksum)
+
+    with pytest.raises(IntegrityError):
+        async with tenant_session(tenant_a) as session:
+            await _document(session, tenant_a, checksum=checksum)
+
+    # Scoped to the organization: the same bytes uploaded by a different
+    # tenant are a different document, and must not be refused.
+    async with tenant_session(tenant_b) as session:
+        other = await _document(session, tenant_b, checksum=checksum)
+    assert other.organization_id == tenant_b.organization_id
+
+
+async def test_documents_with_no_checksum_are_not_constrained(tenant_a):
+    async with tenant_session(tenant_a) as session:
+        first = await _document(session, tenant_a)
+        second = await _document(session, tenant_a)
+    assert first.checksum is None and second.checksum is None

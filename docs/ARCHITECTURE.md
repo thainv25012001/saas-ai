@@ -1,6 +1,10 @@
 # AI Sales Agent — Architecture Proposal
 
-> Status: **proposal, awaiting approval.** No implementation has started.
+> Status: **approved, and partly built.** Phases 1, 2 and 3 are implemented in this
+> repository — see §9 for Phase 1 as delivered, §9.6 for Phase 3, and
+> [`docs/PHASE-2.md`](PHASE-2.md) / [`docs/PHASE-3.md`](PHASE-3.md) for the design notes
+> of each. Everything from §4 (tools), §5 (evaluation) and §8 (MCP) onward remains a
+> proposal.
 > Scope: items 1–10 of the "First Task" in `init.md`.
 
 ---
@@ -769,6 +773,24 @@ Phase 2, and the tables are cheap. Flagged as a deliberate, small scope addition
 3. `make test` green; `ruff`, `mypy --strict` on `app/`, and `tsc` all clean.
 4. The tenant isolation suite passes.
 5. `README.md` documents setup, architecture, and commands.
+
+---
+
+### 9.6 Phase 3 in detail, as delivered
+
+The design argument is in [`docs/PHASE-3.md`](PHASE-3.md); this is what exists in the
+repository.
+
+| Area | Deliverable |
+|---|---|
+| Schema | `documents`, `document_chunks` (`0006`) and `message_citations` (`0007`), all three RLS-enabled. `document_chunks.embedding` is `vector(1536)` behind an HNSW index on `vector_cosine_ops`; `content_tsv` is a **generated** `tsvector` column (`to_tsvector('english', content)`) behind a GIN index, so it can never drift from the text it indexes. `(organization_id, checksum)` is unique where `checksum IS NOT NULL`, which is what makes upload dedup a constraint rather than a convention. |
+| Storage | `app/rag/storage.py` — uploaded bytes under `{UPLOAD_DIR}/{organization_id}/{document_id}`, shared between `api` and `worker` by a named volume. A single-host placeholder; object storage is what this needs once either service runs as more than one replica. |
+| Extraction / chunking | `app/rag/extract.py` (plain text, Markdown, HTML, PDF, DOCX; per-page text for PDF) and `app/rag/chunk.py` (split on Markdown headings, then pack sentences to a token target with overlap, never cutting mid-sentence). No OCR, no layout analysis. |
+| Embeddings | `app/embeddings/` — an `EmbeddingProvider` interface with `HashingEmbedder` (real, lexical, no key, no network) as the default and `OpenAIEmbeddingProvider` as the swap. Both emit 1536 dimensions, so swapping is a re-ingest rather than a migration. `EMBEDDING_PROVIDER` selects it, and reaches both compose services. |
+| Ingestion | `POST /api/v1/documents` (multipart, size-capped mid-stream) writes the row and the bytes, then enqueues; `app/workers/` runs the arq worker; `app/rag/ingest.py` runs the pipeline across three deliberate transactions (`processing` committed independently so the dashboard can see it, chunks + `ready` on the caller's, `failed` through its own), serialised per document by a `pg_advisory_xact_lock`. |
+| Retrieval | `app/rag/retrieve.py` — two candidate lists (pgvector cosine distance; `websearch_to_tsquery` + `ts_rank_cd`, with an OR-joined fallback when the strict form matches nothing), each with its own relevance floor applied *before* Reciprocal Rank Fusion, because an RRF score is rank-derived and carries no relevance information. Both queries bind `organization_id` on the chunk table and again on the `documents` join. |
+| Grounding | `ChatService` retrieves only for an organization with a ready document, wraps the passages in a per-turn `secrets.token_hex(8)` fence (so a document cannot forge a closing tag or a passage header), emits a `citations` SSE event before the first token, and writes `message_citations` on both the success and the failed-stream paths. Citations outlive their chunks (`ON DELETE SET NULL`, with the title and excerpt denormalised onto the row). |
+| Frontend | `/dashboard/knowledge` — upload dropzone with client-side type/size checks, a documents table with status badges and chunk counts, retry and delete, and polling that stops when every row has settled or the tab is hidden. |
 
 ---
 

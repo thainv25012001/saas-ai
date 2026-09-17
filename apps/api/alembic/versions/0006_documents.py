@@ -82,8 +82,23 @@ def upgrade() -> None:
     # every upload -- is the hot lookup that needs checksum in the index at
     # all. Added now, while the table is empty, because adding it later
     # means an ALTER TABLE against live data instead of a free line here.
+    #
+    # UNIQUE, and partial on `checksum IS NOT NULL`. The upload endpoint's
+    # idempotence is a `find_by_checksum` check followed by an INSERT, which
+    # is not idempotent by itself: two concurrent uploads of identical bytes
+    # both find nothing, both create a document, both enqueue a job and both
+    # pay to embed the same content. A convention cannot close that window;
+    # a constraint can. Partial because a document created by a path that
+    # records no checksum (`source_type` of `text` or `url`) must not
+    # collide with every other such document -- and because a plain unique
+    # index would treat NULLs as distinct anyway, the `WHERE` clause is what
+    # states the intent rather than relying on that.
     op.create_index(
-        "ix_documents_organization_id_checksum", "documents", ["organization_id", "checksum"]
+        "ix_documents_organization_id_checksum",
+        "documents",
+        ["organization_id", "checksum"],
+        unique=True,
+        postgresql_where=sa.text("checksum IS NOT NULL"),
     )
     enable_rls(op, "documents")
 

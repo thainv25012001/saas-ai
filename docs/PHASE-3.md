@@ -134,17 +134,58 @@ forever.
 
 ## 4. Retrieval
 
+This is what ships (the original sketch had a query-rewriting stage and a post-fusion
+`min_score` filter; §7 records why the first was dropped and the paragraph after this
+diagram records why the second could never have worked):
+
 ```text
-query → rewrite (resolve pronouns against recent turns)
-   ├── vector:  embed → pgvector cosine, top 20
+query
+   ├── vector:  embed → pgvector cosine distance, ascending, top 20
+   │            WHERE distance <= RETRIEVAL_MAX_COSINE_DISTANCE
    └── keyword: websearch_to_tsquery → ts_rank_cd, top 20
+                if that matched nothing: the same tsquery OR-joined,
+                WHERE ts_rank_cd >= RETRIEVAL_MIN_KEYWORD_RANK
    ↓
 fuse: Reciprocal Rank Fusion, score = Σ 1 / (60 + rank_i)
    ↓
-filter below min_score → take top_k (default 5)
+take top_k (default 5)
    ↓
 assemble context with chunk ids for citation
 ```
+
+**The relevance floor is per arm, before fusion, and it has to be.** An RRF score is
+derived from rank position alone: the top hit scores exactly `1/61` whether it answers the
+question or is merely the least-bad row in an unrelated corpus. So a threshold applied to
+the fused score cannot express relevance -- it can only distinguish "appeared in one list"
+from "appeared in both". Without a floor on the arms themselves, the vector retriever
+returned its nearest rows unconditionally and every turn cited up to five chunks: `q='hi'`
+returned three, scoring `1/61, 1/62, 1/63`. Those chunks reached the system prompt, the
+user's "Sources" list, and `message_citations` as having grounded an answer they had
+nothing to do with. `retrieve()` still takes a `min_score`, which now means what its name
+says -- a cutoff on the fused score -- rather than standing in for a relevance check it
+could not perform.
+
+Both thresholds are settings because both are properties of the embedding model and the
+corpus, not of the application. `RETRIEVAL_MAX_COSINE_DISTANCE` defaults to 0.8, measured
+against `HashingEmbedder` on a real multi-topic corpus: questions the corpus answers land
+at 0.60-0.71 from their own section, conversational filler ("hi", "thanks!", an off-topic
+question) at 0.82-1.00. A semantic embedder puts unrelated text far closer than that, so
+0.8 would admit almost everything there -- degrading to the old behaviour rather than to a
+silent corpus, which is the safe direction, but still a number to re-measure whenever
+`EMBEDDING_PROVIDER` changes.
+
+**The keyword arm needs two forms.** `websearch_to_tsquery` ANDs every content word, which
+is right for a search box and wrong for a chat product: a natural question almost always
+carries a word the corpus does not have, so the whole arm goes silent while the vector arm
+keeps answering and the feature still looks like it works. Measured against a real
+ingested handbook, `'How long do I have to file a return?'` -> `'long' & 'file' &
+'return'` -> 0 rows, while `'file a return'` -> 1 row. That matters more than a missing
+second opinion, because this is the only arm that stems: `HashingEmbedder` hashes raw
+tokens, so "return" and "returns" are unrelated to the vector side. The fallback OR-joins
+the terms -- derived from `websearch_to_tsquery`'s own parsed output, never from raw user
+text, so a stray `&` or `:` still cannot reach the parser -- and carries a `ts_rank_cd`
+floor, because "every content word is present" is a relevance predicate on its own and
+"at least one is" is not.
 
 **Why hybrid rather than vector alone.** Pure vector search fails on exact identifiers —
 part numbers, trim levels, "Camry LE vs Camry SE" — because those distinctions are a few
@@ -187,4 +228,33 @@ answer.
 | pgvector's fixed dimension | Pinned at 1536 to match the real model; a change means re-embedding, which is expected |
 | Ingestion failures leave documents stuck | `status` + `error` on the row, surfaced in the dashboard, with an explicit retry |
 | Prompt injection from uploaded documents | Delimited, labelled untrusted; prices and policies still come from tools, not prose. Partial — no technique is complete |
-| Retrieval on every turn costs tokens even for "hi" | Accepted for Phase 3; Phase 4 makes retrieval a tool the model chooses |
+| Retrieval on every turn costs tokens even for "hi" | Accepted for Phase 3; Phase 4 makes retrieval a tool the model chooses. Note the relevance floor (§4) means such a turn now *cites* nothing, which is a separate problem from the query still being embedded |
+
+---
+
+## 7. Deliberately not delivered
+
+Two things this document describes, or implies, that are not in the repository. Neither is
+an oversight discovered late; both are recorded here so nobody looking for them concludes
+they were forgotten.
+
+**Query rewriting.** §4's original diagram opened with `query → rewrite (resolve pronouns
+against recent turns)`. It was never scoped into the implementation plan -- a planning
+miss, not an implementation one -- and `ChatService._retrieve_context` passes the raw user
+turn straight to `RetrievalService`. The cost is real and specific: in a multi-turn
+conversation, "does it come in red?" is retrieved on those six words alone, with the
+antecedent sitting only in the history the retriever never sees. That is precisely the
+conversational turn RAG exists to serve, and it is silently under-grounded rather than
+visibly broken. Deferred to Phase 4, where the agent loop already has to reason about the
+conversation before deciding to retrieve, and where resolving the reference is a natural
+part of that step rather than a bolted-on pre-pass.
+
+**Embedding cost accounting.** `app/embeddings/pricing.py` defines `EMBEDDING_PRICING` and
+`estimate_embedding_cost`, and `UsageKind.EMBEDDING` exists on the enum, but nothing in
+production calls either: `IngestResult`'s `token_count` and `embedding_model` are logged
+(see `ingest_completed` in `app/workers/tasks.py`) and no `usage_events` row is ever
+written for an ingest. So chat spend is metered and embedding spend is not. The code is
+kept rather than deleted because the numbers are correct and tested, and because metering
+belongs with the thing that will consume it -- Phase 7's billing, which is what decides
+whether an ingest is charged per token, per document, or not at all. Until then, the
+honest statement is that embedding cost is invisible.

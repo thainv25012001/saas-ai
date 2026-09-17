@@ -10,10 +10,12 @@ multipart already does well. GraphQL keeps the read side (`documents`,
 
 Because this hand-rolls `Request.form()` instead of using FastAPI's
 `File()`/`Form()` parameters (required for the streaming size cap below --
-see `_capped_receive`), this route has no generated request schema and does
-not appear in `/docs` at all. The dashboard team integrating against it
-gets nothing from the OpenAPI page for this one endpoint; this module's
-docstrings and the Task 5 report are the only spec.
+see `_capped_receive`), this route has no generated request schema. It does
+still appear in `/docs` -- `openapi()` emits the POST, its 202 response and
+`DocumentResponse` -- with no `requestBody`: the page says the endpoint
+exists and says nothing about the multipart form it expects. For the shape
+of the request (`file`, optional `title`), this module's docstrings are the
+spec.
 """
 
 import hashlib
