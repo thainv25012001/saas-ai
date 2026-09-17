@@ -303,9 +303,13 @@ class ChatService:
                     finish_reason=finish_reason,
                 ),
             )
-            # Same transaction as the assistant message above -- a citation
-            # row naming a message that never actually got committed would
-            # be worse than no citation at all.
+            # Same transaction as the assistant message above. Unlike
+            # `record_usage` (success-only, just below -- there is no
+            # reliable token count for a stream that never reached
+            # `message_end`), citations are recorded on *both* branches of
+            # this split: see the matching call and comment in the `else`
+            # below for why that billing-shaped reasoning does not transfer
+            # here.
             await self._record_citations(message_id, retrieved_chunks)
             await self._conversations.record_usage(
                 RecordUsageInput(
@@ -345,6 +349,16 @@ class ChatService:
                     error=chat_error.message,
                 ),
             )
+            # Recorded here too, not just on the success path above: the
+            # assistant message this turn produced -- partial and marked
+            # `error=`, but persisted -- was still generated from a prompt
+            # that included these chunks, and per docs/PHASE-3.md §5 this
+            # table's whole reason for existing is to make "did it answer
+            # from the sources?" answerable after the fact. A message with
+            # zero citations here would be indistinguishable from one that
+            # was never grounded at all, which is exactly the ambiguity
+            # this table exists to remove.
+            await self._record_citations(message_id, retrieved_chunks)
             yield chat_error
 
     async def _retrieve_context(self, query: str) -> list[RetrievedChunk]:
@@ -364,14 +378,35 @@ class ChatService:
         `docs/ARCHITECTURE.md` §2.3 for why `self._documents` -- not a raw
         query -- is what does that check: it already carries the explicit
         `organization_id` filter this codebase requires alongside RLS.
+
+        The readiness check and `RetrievalService.retrieve` both run raw SQL
+        on *this* session (see `app/rag/retrieve.py`) -- the same session
+        `send()` goes on to use for history, `append_message`, and
+        `record_usage`. Postgres aborts the whole surrounding transaction on
+        any statement error, not just the failing one, so a bare
+        `try/except` around a plain `await` is not enough: catching the
+        exception stops it from propagating, but every later statement on
+        this session would still raise `InFailedSQLTransactionError` against
+        the poisoned transaction, and the user would lose their entire turn
+        -- the opposite of "degrade, not break". `begin_nested()` opens a
+        SAVEPOINT for this block; a failure inside it rolls back only to
+        that savepoint (SQLAlchemy does this automatically when an
+        exception propagates out of the `async with`), leaving the outer
+        transaction -- and every statement `send()` runs after this
+        returns -- perfectly usable. This is not hypothetical: a single
+        chunk embedded at the wrong dimension makes `embedding <=>
+        :query_vector` fail this way for every future query against that
+        row, and a statement timeout or a momentarily-unavailable `vector`
+        extension would too.
         """
         try:
-            ready_documents = await self._documents.list_documents(
-                status=DocumentStatus.READY, limit=1
-            )
-            if not ready_documents:
-                return []
-            return await RetrievalService(self.session, self.tenant).retrieve(query)
+            async with self.session.begin_nested():
+                ready_documents = await self._documents.list_documents(
+                    status=DocumentStatus.READY, limit=1
+                )
+                if not ready_documents:
+                    return []
+                return await RetrievalService(self.session, self.tenant).retrieve(query)
         except Exception:
             logger.warning("rag_retrieval_failed", exc_info=True)
             return []

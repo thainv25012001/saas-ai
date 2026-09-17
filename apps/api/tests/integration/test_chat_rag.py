@@ -15,23 +15,26 @@ from collections.abc import AsyncIterator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 import app.chat.service as chat_service
 from app.agents.service import AgentService
 from app.api import chat as chat_api
 from app.chat.service import (
     ChatCitations,
+    ChatError,
     ChatMessageEnd,
     ChatMessageStart,
     ChatService,
     ChatTextDelta,
 )
+from app.conversations.service import ConversationService
 from app.core.tenancy import TenantContext, tenant_session
 from app.db.models import Document, DocumentSourceType, MembershipRole, MessageCitation
 from app.documents.schemas import ChunkInput, CreateDocumentInput
 from app.documents.service import DocumentService
 from app.embeddings.hashing import HashingEmbedder
+from app.llm.errors import LLMUnavailableError
 from app.llm.fake_provider import FakeProvider
 from app.main import create_app
 from app.rag.retrieve import RetrievalService
@@ -215,8 +218,95 @@ async def test_retrieval_failure_degrades_to_an_ungrounded_answer_with_a_logged_
     assert text == "Still here."
     assert any(isinstance(e, ChatMessageEnd) for e in events)
 
-    assert len(logged) == 1
-    assert logged[0]["event"] == "rag_retrieval_failed"
+    # `any(...)`, not a count: this pins that the warning happened, without
+    # coupling to exactly how many `logger.warning` calls this path makes --
+    # an unrelated warning added elsewhere later must not spuriously redden
+    # this test.
+    assert any(entry["event"] == "rag_retrieval_failed" for entry in logged)
+
+
+async def test_retrieval_sql_level_failure_does_not_poison_the_rest_of_the_turn(
+    tenant_a, monkeypatch
+):
+    """The `RuntimeError` test above proves the "catch and continue" shape
+    works for a failure that never touches the session (an embedding
+    provider outage, say). It does NOT prove the requirement holds for a
+    failure that runs raw SQL on the *same* session `send()` goes on to use
+    for history/`append_message`/`record_usage` -- which is exactly what
+    `RetrievalService.retrieve` itself does (see app/rag/retrieve.py).
+    Postgres aborts the whole surrounding transaction on any statement
+    error, so a bare `try/except` with no savepoint would let every later
+    statement on this session fail with `InFailedSQLTransactionError`,
+    losing the user's entire turn instead of merely their grounding.
+
+    This reproduces that failure mode directly: the patched `retrieve`
+    issues a real, failing SQL statement (division by zero) against
+    `self.session` before ever raising in Python. Without
+    `self.session.begin_nested()` around the retrieval call, this test
+    fails with exactly that `InFailedSQLTransactionError` on the very next
+    statement `send()` runs (`ConversationService.history`'s SELECT).
+    """
+
+    async def _sql_level_failure(self, query, **kwargs):  # type: ignore[no-untyped-def]
+        await self.session.execute(text("SELECT 1/0"))
+        return []  # pragma: no cover - the statement above always raises first
+
+    monkeypatch.setattr(RetrievalService, "retrieve", _sql_level_failure)
+
+    async with tenant_session(tenant_a) as session:
+        await _ready_document_with_chunks(
+            session, tenant_a, [("Some ready content.", await _embed("Some ready content."))]
+        )
+        agent = await _agent(session, tenant_a)
+        service = ChatService(
+            session, tenant_a, provider_override=FakeProvider(script=["Still ", "here."])
+        )
+        events = [event async for event in service.send(agent.id, "Hello")]
+
+    assert not any(isinstance(e, ChatCitations) for e in events)
+    text_out = "".join(e.text for e in events if isinstance(e, ChatTextDelta))
+    assert text_out == "Still here."
+    assert any(isinstance(e, ChatMessageEnd) for e in events)
+
+    # The turn actually committed -- not just "no exception escaped" but a
+    # real, readable conversation with both turns persisted, proving the
+    # outer transaction survived the poisoned savepoint intact.
+    conversation_id = next(e.conversation_id for e in events if isinstance(e, ChatMessageStart))
+    async with tenant_session(tenant_a) as verify_session:
+        history = await ConversationService(verify_session, tenant_a).history(conversation_id)
+    assert [m.content for m in history] == ["Hello", "Still here."]
+
+
+async def test_message_citations_are_persisted_even_when_the_stream_fails_mid_turn(tenant_a):
+    """The assistant message on this branch is still persisted (with
+    `error=` set) and was still generated from a prompt that included these
+    chunks -- so it must still get citation rows, exactly like the
+    success-path test above. Without this, a failed-but-grounded turn is
+    indistinguishable from one that was never grounded at all.
+    """
+    async with tenant_session(tenant_a) as session:
+        await _ready_document_with_chunks(
+            session, tenant_a, [("Some ready content.", await _embed("Some ready content."))]
+        )
+        agent = await _agent(session, tenant_a)
+        provider = FakeProvider(script=["partial ", "more"], fail_with=LLMUnavailableError("gone"))
+        service = ChatService(session, tenant_a, provider_override=provider)
+        events = [event async for event in service.send(agent.id, "Hello")]
+
+    assert any(isinstance(e, ChatError) for e in events)
+    citation_event = next(e for e in events if isinstance(e, ChatCitations))
+    assert citation_event.citations  # grounding was attempted before the stream failed
+    message_id = next(e.message_id for e in events if isinstance(e, ChatMessageStart))
+
+    async with tenant_session(tenant_a) as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(MessageCitation).where(MessageCitation.message_id == message_id)
+                )
+            ).scalars()
+        )
+    assert len(rows) == len(citation_event.citations)
 
 
 async def test_cross_tenant_chat_never_cites_another_orgs_chunk(tenant_a, tenant_b):
