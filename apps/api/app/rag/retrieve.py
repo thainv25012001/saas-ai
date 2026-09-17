@@ -48,8 +48,12 @@ into `message_citations` as having grounded an answer they had nothing to
 do with. The two arms carry their own, differently-shaped floors:
 
 - vector: `embedding <=> :query_vector <= :max_distance`, defaulting to
-  `settings.retrieval_max_cosine_distance` (see that setting for how the
-  default was measured and why it is embedder-specific).
+  `settings.retrieval_max_cosine_distance`. That setting's comment has the
+  measurements; the short version is that relevant and irrelevant queries
+  land *close together and overlapping* under the default embedder
+  (0.556-0.860 against 0.792-1.000 over 33 queries), so this is a useful
+  threshold rather than a clean division, and it needs re-measuring on any
+  embedder change.
 - keyword: the `@@` match itself for the strict (AND) form -- a lexical
   match on *every* content word is already a relevance predicate, which is
   what the vector arm was missing. The OR fallback, which requires only one
@@ -163,6 +167,15 @@ _KEYWORD_ALL_TERMS_SQL = text(_KEYWORD_SQL_TEMPLATE.format(tsquery=_AND_TSQUERY,
 # The OR form carries a `ts_rank_cd` floor the AND form does not need: "every
 # content word is present" is already a relevance predicate, "at least one
 # is" is not. See `settings.retrieval_min_keyword_rank`.
+#
+# That floor is load-bearing for correctness, not only for quality:
+# `websearch_to_tsquery` reads a leading hyphen as negation, so "-cat dog"
+# gives `!'cat' & 'dog'` (no rows, hence the fallback) and then
+# `!'cat' | 'dog'`, which matches every chunk without "cat" -- the whole
+# corpus. `ts_rank_cd` scores a negated match 0.0, so the floor is the only
+# thing that drops it. A *bare* negation ("-cat") is a different case this
+# does not cover: it matches everything through the strict form above, which
+# has no floor.
 _KEYWORD_ANY_TERM_SQL = text(
     _KEYWORD_SQL_TEMPLATE.format(
         tsquery=_OR_TSQUERY,

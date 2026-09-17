@@ -140,20 +140,42 @@ class Settings(BaseSettings):
     # nearest rows unconditionally and *every* turn, `hi` included, cited up
     # to `top_k` chunks as having grounded the answer.
     #
-    # 0.8 is measured against the default `HashingEmbedder` on a real
-    # multi-topic corpus (see tests/integration/test_retrieve.py): questions
-    # the corpus answers land at 0.60-0.71 from their own section, while
-    # conversational filler ("hi", "thanks!", an off-topic question) lands at
-    # 0.82-1.00. The gap is what it is because that embedder is a hashed
-    # bag-of-words including stopwords, so shared function words alone put an
-    # unrelated query around 0.82.
+    # 0.8 was chosen by measuring `HashingEmbedder` against small multi-topic
+    # corpora (see tests/integration/test_retrieve.py). **The two classes it
+    # divides are close together and do overlap** -- this is a useful
+    # threshold, not a clean separation, and anyone tuning it should start
+    # from that. Across 33 queries over two handbooks:
     #
-    # This number is a property of the embedding model, not of the app: a
+    #   questions the corpus answers   0.556 - 0.860
+    #   conversational / off-topic     0.792 - 1.000
+    #
+    # so the band around 0.79-0.86 contains both. Real examples on either
+    # side of the line: "How often do I need an oil change?" measures 0.8595
+    # and is dropped by the vector arm (the keyword arm still answers it),
+    # while "can you write me a poem about the sea" measures 0.7918 and is
+    # kept. An earlier version of this comment claimed 0.60-0.71 against
+    # 0.82-1.00; that range was back-fitted to the eight queries it was
+    # derived from and did not survive a wider sample.
+    #
+    # What makes 0.8 worth keeping anyway is the direction of its mistakes,
+    # measured rather than assumed: of 14 relevant queries 13 still retrieve,
+    # and the one dropped had been citing the *wrong* section, so the floor
+    # turned a wrong citation into no citation; 10 of 11 filler queries now
+    # retrieve nothing where every one of them previously cited up to
+    # `top_k`. The two arms also cover for each other -- a question the
+    # vector arm drops is usually one the keyword arm matches lexically.
+    #
+    # The classes sit this close because `HashingEmbedder` is a hashed
+    # bag-of-words that keeps stopwords, so shared function words alone push
+    # an unrelated query to about 0.79.
+    #
+    # This number is a property of the embedding model and the corpus, not of
+    # the application, which is why it is a setting and not a constant. A
     # real semantic embedder puts *unrelated* text around 0.2-0.3, where 0.8
-    # admits nearly everything and this degrades to the old behaviour rather
-    # than to a silent corpus -- the safe direction to be wrong in, but still
-    # a number to re-measure whenever `EMBEDDING_PROVIDER` changes, which is
-    # why it is a setting and not a constant.
+    # admits nearly everything: the failure mode of a badly-fitted value here
+    # is permissive (back to citing irrelevant chunks), not silent (a corpus
+    # that never answers) -- the safer direction, but not a reason to skip
+    # re-measuring on any `EMBEDDING_PROVIDER` change.
     retrieval_max_cosine_distance: float = 0.8
     # The relevance floor on the keyword arm's *fallback* form only -- see
     # `app/rag/retrieve.py` for why that arm has two forms. The strict form
@@ -165,9 +187,25 @@ class Settings(BaseSettings):
     #
     # `ts_rank_cd` with the default normalization returns roughly 0.1 per
     # matched lexeme occurrence in the cover, so 0.15 reads as "more than one
-    # incidental word matched". Measured on the same corpus as
+    # incidental word matched". Measured on the same corpora as
     # `retrieval_max_cosine_distance`: real questions score 0.2-0.5 against
     # the section that answers them, single-word coincidences score 0.1.
+    #
+    # This one is load-bearing for *correctness*, not just quality, and
+    # setting it to 0 is not merely "less filtering". `websearch_to_tsquery`
+    # turns a leading hyphen into negation, so a query combining a negated
+    # term with a term the corpus lacks -- "-cat dog" -> `!'cat' & 'dog'` --
+    # matches nothing in the strict form, falls back to the OR form
+    # `!'cat' | 'dog'`, and *that* matches every chunk not containing "cat":
+    # the entire corpus. `ts_rank_cd` scores a negated match 0.0, so this
+    # floor is the only thing standing between such a query and citing
+    # everything. Measured, not inferred.
+    #
+    # Known limit, not covered by this floor: a *bare* negation ("-cat",
+    # "-warranty") matches the whole corpus through the **strict** form,
+    # which has no rank floor at all, so it still returns up to `top_k`
+    # arbitrary chunks. The fix belongs on the strict arm, not here.
+    # No test pins either case yet.
     retrieval_min_keyword_rank: float = 0.15
 
     @field_validator("database_url", "migration_database_url", mode="after")

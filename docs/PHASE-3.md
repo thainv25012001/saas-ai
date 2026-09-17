@@ -166,13 +166,38 @@ says -- a cutoff on the fused score -- rather than standing in for a relevance c
 could not perform.
 
 Both thresholds are settings because both are properties of the embedding model and the
-corpus, not of the application. `RETRIEVAL_MAX_COSINE_DISTANCE` defaults to 0.8, measured
-against `HashingEmbedder` on a real multi-topic corpus: questions the corpus answers land
-at 0.60-0.71 from their own section, conversational filler ("hi", "thanks!", an off-topic
-question) at 0.82-1.00. A semantic embedder puts unrelated text far closer than that, so
-0.8 would admit almost everything there -- degrading to the old behaviour rather than to a
-silent corpus, which is the safe direction, but still a number to re-measure whenever
-`EMBEDDING_PROVIDER` changes.
+corpus, not of the application.
+
+**`RETRIEVAL_MAX_COSINE_DISTANCE` (0.8) is a useful threshold, not a clean separation, and
+§2.3's standard requires saying so.** Measured against `HashingEmbedder` over 33 queries on
+two small handbooks, the two classes it divides overlap:
+
+| | observed cosine distance to nearest chunk |
+|---|---|
+| questions the corpus answers | 0.556 – 0.860 |
+| conversational / off-topic | 0.792 – 1.000 |
+
+So the band from roughly 0.79 to 0.86 contains both. `"How often do I need an oil
+change?"` measures 0.8595 and is dropped by the vector arm; `"can you write me a poem
+about the sea"` measures 0.7918 and is kept. An earlier draft of this section quoted
+0.60-0.71 against 0.82-1.00 and called the separation clean — that range was back-fitted to
+the eight queries it came from, and a wider sample did not reproduce it. Anyone tuning this
+should re-measure on their own corpus rather than trusting either range.
+
+The value stays at 0.8 on the balance of its mistakes, which were measured rather than
+assumed: of 14 relevant queries 13 still retrieve, and the single one dropped had
+previously been citing the *wrong* section, so the floor converted a wrong citation into no
+citation. Of 11 filler queries, 10 now retrieve nothing where every one of them previously
+cited up to `top_k`. The arms also cover for each other — the oil-change question above is
+answered by the keyword arm — which is a large part of why a threshold this imprecise is
+still worth having.
+
+The classes sit this close together because `HashingEmbedder` is a hashed bag of words that
+keeps stopwords, so shared function words alone push an unrelated query to about 0.79. A
+semantic embedder puts unrelated text far closer still, where 0.8 would admit almost
+everything: the failure mode of a badly-fitted value here is permissive (back to citing
+irrelevant chunks), not silent (a corpus that stops answering). That is the safer direction
+to be wrong in, and not a reason to skip re-measuring on an `EMBEDDING_PROVIDER` change.
 
 **The keyword arm needs two forms.** `websearch_to_tsquery` ANDs every content word, which
 is right for a search box and wrong for a chat product: a natural question almost always
@@ -186,6 +211,20 @@ the terms -- derived from `websearch_to_tsquery`'s own parsed output, never from
 text, so a stray `&` or `:` still cannot reach the parser -- and carries a `ts_rank_cd`
 floor, because "every content word is present" is a relevance predicate on its own and
 "at least one is" is not.
+
+That floor is load-bearing for **correctness**, not only for result quality, and
+`RETRIEVAL_MIN_KEYWORD_RANK=0` is not simply "less filtering". `websearch_to_tsquery` reads
+a leading hyphen as negation, so `"-cat dog"` parses to `!'cat' & 'dog'`, matches nothing
+in the strict form, falls back to `!'cat' | 'dog'` — and that matches every chunk not
+containing "cat", which is the entire corpus. `ts_rank_cd` scores a negated match 0.0, so
+the 0.15 floor is the only thing that drops it.
+
+One case this does *not* cover, measured and recorded rather than implied: a **bare**
+negation (`"-cat"`, `"-warranty"`) parses to `!'cat'`, which matches the whole corpus
+through the **strict** form — and the strict form has no rank floor, because requiring
+every content word is normally its own relevance predicate. Such a query still returns up
+to `top_k` arbitrary chunks. The fix belongs on the strict arm rather than on this
+threshold, and no test pins either case today.
 
 **Why hybrid rather than vector alone.** Pure vector search fails on exact identifiers —
 part numbers, trim levels, "Camry LE vs Camry SE" — because those distinctions are a few
