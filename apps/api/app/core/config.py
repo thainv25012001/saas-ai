@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     # `fake` keeps the playground working with no key configured. Set to
     # `openai` or `anthropic` once a key is present.
     default_llm_provider: str = "fake"
+    # `hashing` keeps ingestion and retrieval working with no key configured.
+    # Set to `openai` once a key is present.
+    embedding_provider: str = "hashing"
 
     @field_validator("database_url", "migration_database_url", mode="after")
     @classmethod
