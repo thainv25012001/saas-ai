@@ -18,6 +18,30 @@ compiling.
 Everything else here follows from it: if a value can drift between two
 components, it belongs in one place that both read.
 
+## Browser storage
+
+`localStorage` holds **UI preferences only** — is a panel collapsed, which tab
+was open. Never data, never anything the server is the authority on, and never
+a credential: `lib/auth.tsx` keeps the access token in memory precisely because
+any injected script can read storage, and that reasoning does not extend to
+whether a sidebar is open.
+
+Two rules, both in
+[`lib/use-remembered-flag.ts`](../apps/web/src/lib/use-remembered-flag.ts),
+which is the one place that touches it:
+
+- **Every access is wrapped in `try`/`catch`.** In a private window or with
+  site data blocked, reading *throws* rather than returning null — an unguarded
+  read takes the page down.
+- **Apply the stored value in an effect, never as initial state.** The server
+  has no `localStorage`, so reading it during render makes the first client
+  render disagree with the server's and React reports a hydration mismatch. The
+  cost is that a remembered non-default paints once in its default state.
+
+`useRememberedFlag(key, computeDefault)` does both. `computeDefault` runs only
+when nothing has been stored, and runs on the client, so it may read the
+viewport.
+
 ## Tokens
 
 Defined in [`apps/web/src/app/globals.css`](../apps/web/src/app/globals.css)
@@ -122,7 +146,7 @@ for one of these before writing markup.
 | `EmptyState` | a list with nothing in it | Icon, title, description, one action. |
 | `PageHeader` | the top of a page | Title, breadcrumb, meta, actions. |
 | `Spinner` / `LoadingState` | waiting | `LoadingState` is the one way this app says it is waiting. |
-| `Icon` | all iconography | One 24px stroked set in `icons.tsx`, `aria-hidden` by default because every icon here sits beside its own label. |
+| `Icon` | all iconography | One 24px stroked set in `icons.tsx`, `aria-hidden` by default because every icon here sits beside its own label. An icon-only button therefore carries its own `aria-label`. |
 
 Domain components that compose these live beside their feature —
 `components/agents/`, `components/chat/`, `components/shell/` — not in `ui/`.
@@ -156,6 +180,47 @@ Rules for options:
   failed fetch a free-text input so the form stays saveable.
 - **Long labels get a `title`.** The closed control clips; hover is the only way
   back to the full value.
+
+## Full-bleed screens
+
+Most pages sit in the centred content well and scroll as a whole, with
+`PageHeader` at the top. The playground does not: it is in
+`FULL_BLEED_ROUTES` (`app/dashboard/layout.tsx`), fills the frame, and manages
+its own scrolling. `PageHeader` does not apply there — it carries `mb-6` and
+assumes a scrolling page.
+
+What replaces it is a **toolbar**: one wrapping row, `border-b border-line
+bg-surface px-6 py-2.5`, holding only what the screen is configured *by*. Three
+rules, learned by breaking all of them:
+
+- **Group by question.** The playground's toolbar answers what is answering
+  (Agent), what it answers with (Model), and what that costs. Three groups, not
+  seven controls in a row.
+- **The page title is `sr-only`.** The nav already says which page this is;
+  repeating it in the toolbar spends horizontal space to say nothing. The `h1`
+  stays for document structure.
+- **An action belongs beside what it acts on.** "New conversation" acts on the
+  thread, so it lives in the conversation panel, not in a toolbar about models.
+
+A full-bleed screen's own `h1` being `sr-only` is the only place in this app
+where a heading is hidden, and it is deliberate.
+
+## Collapsible panels
+
+[`components/chat/ConversationPanel.tsx`](../apps/web/src/components/chat/ConversationPanel.tsx)
+is the worked example.
+
+- **Collapse to a rail, not to nothing.** A 3rem rail keeps the way back
+  visible and keeps the panel's primary action one click away. A panel that
+  vanishes has to put its toggle somewhere else, which is how a toolbar grows
+  an eighth item.
+- **Both states live in one component.** Expanded and collapsed are two
+  renderings of one thing; separating them is how they drift.
+- **Collapsed by default under `lg`.** Below that the app's own nav is already
+  a drawer, and a 15rem panel beside the content leaves neither usable.
+- **The choice is remembered**, per Browser storage above.
+- **The toggle says what it does.** `aria-expanded`, plus an `aria-label` and a
+  `title` that name the outcome (`Show conversations`), not the icon.
 
 ## Adding a component
 
