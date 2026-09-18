@@ -8,9 +8,23 @@ import time
 import uuid
 from typing import Any
 
+from app.agents.service import AgentService
+from app.conversations.service import ConversationService
+from app.conversations.titles import (
+    TITLE_MAX_TOKENS,
+    TITLE_SYSTEM_PROMPT,
+    build_title_messages,
+    clean_title,
+    fallback_title,
+)
+from app.core.errors import AppError
 from app.core.logging import get_logger
 from app.core.tenancy import TenantContext, tenant_session
+from app.db.models import MessageRole
 from app.documents.service import DocumentService
+from app.llm.errors import LLMError
+from app.llm.registry import get_provider
+from app.llm.types import CompletionRequest
 from app.rag.ingest import bounded_error_message, ingest_document
 from app.rag.storage import load_document_bytes
 
@@ -93,3 +107,84 @@ async def ingest_document_task(
         embedding_model=result.embedding_model,
         duration_ms=int((time.monotonic() - started_at) * 1000),
     )
+
+
+async def title_conversation_task(
+    ctx: dict[str, Any], *, organization_id: str, conversation_id: str
+) -> None:
+    """Give a conversation a short, readable title.
+
+    Runs in the background, never on the chat request's critical path: an LLM
+    call there would sit inside the turn's own transaction, on a connection
+    the streaming body still owns, and a slow provider would delay the answer
+    the user actually asked for.
+
+    Like `ingest_document_task` above, this opens its own tenant-scoped
+    transaction and looks the conversation up under `organization_id`'s RLS
+    first, so a job enqueued against the wrong organization finds nothing
+    rather than retitling another tenant's conversation.
+    """
+    tenant = TenantContext(
+        organization_id=uuid.UUID(organization_id),
+        user_id=None,
+        role=None,
+        request_id=f"title:{conversation_id}",
+    )
+    conversation_uuid = uuid.UUID(conversation_id)
+
+    async with tenant_session(tenant) as session:
+        conversations = ConversationService(session, tenant)
+        conversation = await conversations.get(conversation_uuid)
+
+        # The whole cost control, in one condition. It is what makes this one
+        # call per conversation rather than one per turn, what makes a retry
+        # free, and -- because the fallback below is a real write -- what
+        # stops a conversation whose provider is broken being re-billed
+        # forever.
+        if conversation.title is not None:
+            return
+
+        messages = await conversations.history(conversation_uuid)
+        first_user = next((m for m in messages if m.role is MessageRole.USER), None)
+        if first_user is None:
+            # Enqueued after the turn commits, but a lost race must be a
+            # retry, not a title invented from an empty conversation.
+            logger.info("conversation_title_skipped_no_messages", conversation_id=conversation_id)
+            return
+        first_assistant = next((m for m in messages if m.role is MessageRole.ASSISTANT), None)
+
+        user_text = first_user.content or ""
+        assistant_text = (first_assistant.content if first_assistant else "") or ""
+
+        agent = await AgentService(session, tenant).get_agent(conversation.agent_id)
+        title: str | None = None
+        try:
+            provider = get_provider(agent.provider)
+            response = await provider.generate(
+                CompletionRequest(
+                    model=agent.model,
+                    messages=build_title_messages(user_text, assistant_text),
+                    system=TITLE_SYSTEM_PROMPT,
+                    max_tokens=TITLE_MAX_TOKENS,
+                )
+            )
+            title = clean_title(response.text)
+        except (LLMError, AppError) as exc:
+            # Deliberately not re-raised: a title is a nicety, and a job that
+            # kept failing would re-enqueue and re-bill the same broken
+            # provider. The fallback below is the answer instead.
+            logger.warning(
+                "conversation_title_generation_failed",
+                conversation_id=conversation_id,
+                error=type(exc).__name__,
+            )
+
+        # Always a write. A fallback that left `title` NULL would be
+        # re-enqueued on the next turn, forever, for exactly the
+        # conversations whose provider is broken.
+        conversation.title = title or fallback_title(user_text)
+        logger.info(
+            "conversation_titled",
+            conversation_id=conversation_id,
+            generated=title is not None,
+        )

@@ -152,12 +152,12 @@ async def test_conversations_filters_by_channel(api_client):
 async def test_conversations_for_another_organizations_agent_is_empty(api_client):
     """Not an error: an agent id that is not yours is indistinguishable from
     one that does not exist, and saying which would confirm it exists."""
-    owner_token = await _register(api_client, "owner-org-a@example.com", "Org A")
+    owner_token = await _register(api_client, "owner-org-a@example.com", "Conversations Org A")
     owner_org_id = await _organization_id(api_client, owner_token)
     agent_id = await _agent(owner_org_id)
     await _conversation(owner_org_id, agent_id)
 
-    other_token = await _register(api_client, "owner-org-b@example.com", "Org B")
+    other_token = await _register(api_client, "owner-org-b@example.com", "Conversations Org B")
 
     response = await graphql(
         api_client, CONVERSATIONS_QUERY, {"agentId": str(agent_id)}, _auth(other_token)
@@ -251,12 +251,12 @@ async def test_conversation_from_another_organization_is_null(api_client):
     """Null, like `document(id)` -- for the dashboard "not yours" and "does
     not exist" are both nothing to show, and an error that distinguished them
     would confirm the row exists."""
-    owner_token = await _register(api_client, "convo-org-a@example.com", "Org A")
+    owner_token = await _register(api_client, "convo-org-a@example.com", "Conversations Org A")
     owner_org_id = await _organization_id(api_client, owner_token)
     agent_id = await _agent(owner_org_id)
     conversation_id = await _conversation(owner_org_id, agent_id)
 
-    other_token = await _register(api_client, "convo-org-b@example.com", "Org B")
+    other_token = await _register(api_client, "convo-org-b@example.com", "Conversations Org B")
 
     response = await graphql(
         api_client, CONVERSATION_QUERY, {"id": str(conversation_id)}, _auth(other_token)

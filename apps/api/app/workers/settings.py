@@ -6,13 +6,14 @@ silence. `tests/unit/test_worker_settings.py` pins `ingest_document_task`
 actually being in this list for exactly that reason.
 """
 
+from collections.abc import Callable
 from typing import Any
 
 from arq.connections import RedisSettings
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
-from app.workers.tasks import ingest_document_task
+from app.workers.tasks import ingest_document_task, title_conversation_task
 
 
 async def _on_startup(_ctx: dict[str, Any]) -> None:
@@ -29,7 +30,10 @@ async def _on_startup(_ctx: dict[str, Any]) -> None:
 
 
 class WorkerSettings:
-    functions = [ingest_document_task]
+    # Annotated, not inferred: mypy infers a list's type from its first
+    # element, so a second job with a different signature is a `list-item`
+    # error rather than the heterogeneous registry arq actually wants.
+    functions: list[Callable[..., Any]] = [ingest_document_task, title_conversation_task]
     on_startup = _on_startup
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     # Retries at the arq job level, on top of `_embed_all`'s own per-batch

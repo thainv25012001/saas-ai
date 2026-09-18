@@ -84,3 +84,12 @@ def test_on_startup_configures_logging_in_the_worker_process() -> None:
         getattr(__import__("logging"), get_settings().log_level.upper())
     )
     assert config["wrapper_class"] is expected_level
+
+
+def test_title_conversation_task_is_registered() -> None:
+    """Same reasoning as the ingest job above: an unregistered function is
+    not an error, it is a queue nobody drains -- conversations would simply
+    never get a title, with nothing anywhere saying why."""
+    from app.workers.tasks import title_conversation_task
+
+    assert title_conversation_task in WorkerSettings.functions
