@@ -45,7 +45,11 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://app_user:app_user_password@localhost:5432/saas_ai
       MIGRATION_DATABASE_URL: postgresql+asyncpg://app_owner:app_owner_password@localhost:5432/saas_ai
       REDIS_URL: redis://localhost:6379/0
-      JWT_SECRET: ci-secret-not-for-production
+      # PyJWT >= 2.14 warns (InsecureKeyLengthWarning) when an HS256 key is
+      # under RFC 7518's 32-byte minimum, and pyproject's filterwarnings =
+      # ["error"] turns that warning into a test failure. The old 28-byte
+      # value tripped both. Keep any replacement at 32+ bytes.
+      JWT_SECRET: ci-secret-not-for-production-32b+
       # Must be "local": app/graphql/schema.py disables introspection and
       # app/main.py drops the GraphiQL IDE outside environment == "local",
       # and test_introspection_still_works_in_the_test_environment (plus the
