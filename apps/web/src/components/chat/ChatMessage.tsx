@@ -15,6 +15,25 @@ export type ChatMessageError = {
   message: string;
 };
 
+export type ChatCitation = {
+  chunkId: string;
+  documentId: string;
+  /** Untrusted -- the uploaded document's own title. See the module
+   * docstring on `Citation` in `@/lib/sse` for why this must only ever be
+   * rendered as JSX text, never through `dangerouslySetInnerHTML` or a
+   * markdown renderer. */
+  documentTitle: string;
+  rank: number;
+  score: number;
+  /** Untrusted for the same reason as `documentTitle`. */
+  excerpt: string;
+  /** 1-based page number for a PDF-sourced chunk, `null` for a source with
+   * no page concept (plain text, Markdown, HTML). Most corpora are not
+   * PDFs, so the no-page case must look deliberate, not like a missing
+   * value -- see `Citations` below. */
+  page: number | null;
+};
+
 export type ChatMessageData = {
   id: string;
   role: "user" | "assistant";
@@ -22,6 +41,10 @@ export type ChatMessageData = {
   status: "streaming" | "done" | "error";
   error?: ChatMessageError;
   meta?: ChatMessageMeta;
+  /** Arrives via the `citations` SSE event, before the first `text_delta` --
+   * present (possibly empty) as soon as that event has been seen, `undefined`
+   * before it (or for a user message, which never gets one). */
+  citations?: ChatCitation[];
 };
 
 /** `cost_usd` is `null` whenever the model isn't in the pricing table (see
@@ -50,6 +73,48 @@ function MetaChips({ meta }: { meta: ChatMessageMeta }) {
           <span>{chip.value}</span>
         </Badge>
       ))}
+    </div>
+  );
+}
+
+/**
+ * Numbered sources under the answer. Sorted by `rank` rather than trusted to
+ * already be in order -- the array comes off the wire, and numbering by
+ * position while the underlying data is unsorted would silently mislabel
+ * every entry after the first.
+ *
+ * `document_title` and `excerpt` both originate in a file the customer
+ * uploaded, and the backend deliberately does not escape them (see
+ * `_citation_payload` in `apps/api/app/chat/service.py`) -- that is correct
+ * at its layer, and escaping is this layer's job. Rendered here as plain
+ * JSX text children only: no `dangerouslySetInnerHTML`, no markdown pass.
+ * React escapes a text child by construction, so a title of `<script>` or
+ * `<b>` prints as those literal characters instead of becoming markup.
+ */
+function Citations({ citations }: { citations: ChatCitation[] }) {
+  if (citations.length === 0) return null;
+  const sorted = [...citations].sort((a, b) => a.rank - b.rank);
+  return (
+    <div className="mt-2.5 border-t border-line pt-2.5">
+      <p className="text-xs font-medium uppercase tracking-wide text-ink-subtle">Sources</p>
+      <ol className="mt-1.5 space-y-1.5">
+        {sorted.map((citation) => (
+          <li key={citation.chunkId} className="flex gap-1.5 text-xs text-ink-muted">
+            <span className="shrink-0 font-medium text-ink-subtle">{citation.rank}.</span>
+            <span className="min-w-0">
+              <span className="font-medium text-ink">{citation.documentTitle}</span>
+              {/* Most corpora are not PDFs, so a missing page must read as
+                * deliberate (nothing rendered) rather than a blank where a
+                * number was expected -- only ever shown when the source
+                * actually has one. */}
+              {citation.page !== null ? (
+                <span className="text-ink-subtle">, page {citation.page}</span>
+              ) : null}
+              <span> — {citation.excerpt}</span>
+            </span>
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }
@@ -91,6 +156,8 @@ export function ChatMessage({ message }: { message: ChatMessageData }) {
             {message.error.message}
           </Alert>
         ) : null}
+
+        {message.citations ? <Citations citations={message.citations} /> : null}
 
         {message.meta ? <MetaChips meta={message.meta} /> : null}
       </div>

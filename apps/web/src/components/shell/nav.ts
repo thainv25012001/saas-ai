@@ -30,13 +30,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/dashboard/agents", label: "Agents", icon: "agent", state: "live" },
       { href: "/dashboard/prompts", label: "Prompts", icon: "prompt", state: "soon", phase: "Phase 2" },
-      {
-        href: "/dashboard/knowledge",
-        label: "Knowledge",
-        icon: "knowledge",
-        state: "soon",
-        phase: "Phase 3",
-      },
+      { href: "/dashboard/knowledge", label: "Knowledge", icon: "knowledge", state: "live" },
       { href: "/dashboard/products", label: "Products", icon: "product", state: "soon", phase: "Phase 4" },
     ],
   },

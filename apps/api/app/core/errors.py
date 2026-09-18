@@ -47,6 +47,11 @@ class RateLimitError(AppError):
     status_code = 429
 
 
+class PayloadTooLargeError(AppError):
+    code = "payload_too_large"
+    status_code = 413
+
+
 def format_validation_errors(errors: Iterable[Mapping[str, Any]]) -> str:
     """Render pydantic's structured error list as one human-readable message.
 

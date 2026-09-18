@@ -2,12 +2,14 @@
 
 A multi-tenant SaaS where a business configures an AI sales assistant over its own
 knowledge — products, documents, prompts — and that assistant talks to the business's
-customers. This repository is **Phases 1 and 2**: authentication, organizations, agents
-and prompts, plus a real LLM call — a provider abstraction (OpenAI, Anthropic, and a
+customers. This repository is **Phases 1 to 3**: authentication, organizations, agents
+and prompts; a real LLM call — a provider abstraction (OpenAI, Anthropic, and a
 network-free `fake`), conversations and messages, a streaming `POST /api/v1/chat/stream`
-endpoint with per-message token and cost accounting, and a working playground. Later
-phases (retrieval, tool-calling, evaluation, MCP, billing) build on this foundation; see
-[Phase roadmap](#phase-roadmap) below.
+endpoint with per-message token and cost accounting, and a working playground; and a
+knowledge base — document upload, a background ingest worker (extraction, chunking,
+embedding into pgvector), hybrid retrieval, and chat answers grounded in the
+organization's own documents with citations. Later phases (tool-calling, evaluation, MCP,
+billing) build on this foundation; see [Phase roadmap](#phase-roadmap) below.
 
 ## Architecture, in one picture
 
@@ -42,7 +44,7 @@ phases (retrieval, tool-calling, evaluation, MCP, billing) build on this foundat
 │           │                              │                       │
 │   ┌───────▼──────────┐  ┌────────────────▼───────┐               │
 │   │  LLM Provider    │  │  RAG (retrieval)       │               │
-│   │  (later phases)  │  │  (later phases)        │               │
+│   │  (phase 2)       │  │  (phase 3)             │               │
 │   └──────────────────┘  └────────────────────────┘               │
 │                                                                  │
 │   Repository layer (async SQLAlchemy 2.0, tenant-bound session)   │
@@ -100,8 +102,8 @@ REDIS_URL=rediss://default:...@your-host.upstash.io:6379
 ```
 
 `db` and `redis` sit behind the `local-infra` profile, so with it off they are never
-started and `docker compose up` brings up only `api` and `web`. Paste managed URLs
-exactly as the provider gives them — the scheme and the libpq-only parameters
+started and `docker compose up` brings up only `api`, `worker` and `web`. Paste managed
+URLs exactly as the provider gives them — the scheme and the libpq-only parameters
 (`sslmode`, `channel_binding`) are normalized at startup.
 
 Two things that are easy to get wrong here, both silent:
@@ -118,6 +120,28 @@ Two things that are easy to get wrong here, both silent:
 
 Also set `ENVIRONMENT` to something other than `local` anywhere that is not a developer
 machine — `local` enables the GraphQL IDE and permits the seed script.
+
+### Document ingestion: the `worker` service
+
+Uploading a document (Phase 3) does not extract, chunk or embed it inline on the HTTP
+request — that work is queued (`app/rag/queue.py`'s `enqueue_ingest`, onto arq/Redis) and
+picked up by the `worker` service, an arq worker running the same image as `api`
+(`app/workers/settings.py`, `app/workers/tasks.py`). This is what keeps a 200-page PDF
+from holding an HTTP connection, or a request timeout, open for as long as embedding it
+takes.
+
+`api` and `worker` share a `uploads` named volume for `UPLOAD_DIR` (default
+`/data/uploads` in containers, `./var/uploads` for a native `uv run`) — the directory a
+freshly uploaded document's bytes land in before the worker reads them back out by
+`organization_id/document_id`. **This is a local-disk placeholder, not the production
+design** (see the comment in `app/rag/storage.py`): it works only as long as `api` and
+`worker` share one disk, which stops being true the moment either runs as more than one
+replica or on more than one host. Object storage (S3 or compatible) is what `UPLOAD_DIR`
+should become in that case — a swap `app/rag/storage.py` isolates to one module.
+
+Running natively instead of in containers: `make worker` (or, without `make`,
+`cd apps/api && uv run arq app.workers.settings.WorkerSettings`), same `DATABASE_URL`/
+`REDIS_URL` as `make api`.
 
 Then open [http://localhost:3000](http://localhost:3000) and sign in with the seeded
 demo account:
@@ -159,8 +183,12 @@ apps/
       agents/     agent + agent-config service and schemas
       prompts/    prompt + prompt-version service (versioning, single-active invariant)
       llm/        provider abstraction: openai, anthropic, fake; capabilities, pricing, registry
+      embeddings/ embedding provider abstraction: openai, hashing (offline, network-free); registry
       chat/       the chat service: prompt resolution, history window, streaming, persistence
       conversations/  conversation + message + usage-event service
+      documents/  document + document_chunk service (pgvector-backed, RLS-scoped)
+      rag/        extraction, chunking, and the ingest pipeline that ties them to embeddings
+      workers/    arq worker: settings (job registration, retries) and the ingest job itself
       graphql/    Strawberry schema, context, resolvers
       api/        REST routers: auth, health, chat (SSE)
     alembic/      migrations (RLS policies land here, not in application code)
@@ -194,7 +222,8 @@ without `make`.
 | `make logs` | Follows logs for all compose services. | `docker compose logs -f` |
 | `make verify-db` | Asserts the Postgres extensions, `app_owner`/`app_user` roles, and RLS configuration are correct. Requires `db`/`redis` to be up. Needs a `bash` shell (Git Bash/WSL on Windows). | `bash infrastructure/scripts/verify_db.sh` |
 | `make api` | Runs the API natively (not in a container) with autoreload, against whatever `DATABASE_URL`/`REDIS_URL` your shell has set (e.g. from `make up`). | `cd apps/api && uv run uvicorn app.main:app --reload --port 8000` |
-| `make test` | Runs the backend test suite (281 tests: unit + integration, incl. tenant isolation, RLS, and the chat/streaming suites). | `cd apps/api && uv run pytest -v` |
+| `make worker` | Runs the RAG ingest worker natively (an arq worker, not an HTTP server), against the same `DATABASE_URL`/`REDIS_URL`. This is what actually drains the ingest queue `enqueue_ingest` (`app/rag/queue.py`) puts jobs on. | `cd apps/api && uv run arq app.workers.settings.WorkerSettings` |
+| `make test` | Runs the backend test suite (551 tests: unit + integration, incl. tenant isolation, RLS, the chat/streaming suites, and the RAG ingestion and retrieval pipelines). | `cd apps/api && uv run pytest -v` |
 | `make lint` | Backend lint/format/type gate: `ruff check`, `ruff format --check`, `mypy --strict`. | `cd apps/api && uv run ruff check . && uv run ruff format --check . && uv run mypy app/` |
 | `make migrate` | Applies every Alembic migration up to head. | `cd apps/api && uv run alembic upgrade head` |
 | `make revision m="message"` | Creates a new Alembic revision with an autogenerated diff. | `cd apps/api && uv run alembic revision -m "message"` |
@@ -222,9 +251,10 @@ Frontend:
 cd apps/web && npm run test && npm run typecheck && npm run lint && npm run build
 ```
 
-`npm run test` is vitest (22 tests), covering the SSE frame parser, the chat stream's
-token-refresh path, and the playground's conversation-identity state machine. It starts
-no server and makes no network call.
+`npm run test` is vitest (189 tests), covering the SSE frame parser, the chat stream's
+token-refresh path, the playground's conversation-identity state machine, and the
+Knowledge page's upload validation, status helpers and polling lifecycle. It starts no
+server and makes no network call.
 
 CI (`.github/workflows/ci.yml`) runs both, plus a check that `packages/shared/schema.graphql`
 and `apps/web/src/graphql/generated.ts` are both up to date with the code that generates
@@ -238,7 +268,7 @@ outage or a slow database never blocks a frontend-only PR.
 |---|---|---|
 | **1 — Foundation** | Repo structure, FastAPI, GraphQL, Postgres + RLS, migrations, auth, organizations, users, agents, basic Next.js dashboard. | **Complete** (this repository) |
 | **2 — Basic LLM chat** | Next.js → chat API → LLM provider → streaming response. OpenAI first, then an Anthropic adapter behind the same interface. | **Complete** (this repository) — see [`docs/PHASE-2.md`](docs/PHASE-2.md) |
-| 3 — RAG | Document upload → extraction → chunking → embedding → pgvector → retrieval → LLM. | Not started |
+| **3 — RAG** | Document upload → extraction → chunking → embedding → pgvector → retrieval → LLM. | **Complete** (this repository) — see [`docs/PHASE-3.md`](docs/PHASE-3.md). Upload and retry endpoints, the arq ingest worker, hybrid retrieval (pgvector + full-text, fused with RRF), grounded chat with citations, and the Knowledge dashboard page. Query rewriting and embedding cost accounting are explicitly deferred; PHASE-3.md §7 says why. |
 | 4 — Agent + tools | The agent decides when to call `retrieve_knowledge`, `search_products`, `get_product`, `create_lead`. | Not started |
 | 5 — Evaluation | Test datasets, evaluation runs, retrieval and answer scoring. | Not started |
 | 6 — MCP | Expose selected business capabilities through MCP, once the built-in tool system is stable. | Not started |
@@ -257,6 +287,17 @@ the moment this leaves your laptop:
   that forgets this exposes the GraphQL IDE and schema introspection publicly, and would
   let the seed script re-create `demo@example.com` / `demo-password-123` as an owner if
   someone ran it against that database.
+- **Put a request-size cap on the reverse proxy, not only in the app.** `MAX_REQUEST_BYTES`
+  (20 MB default) is enforced inside `POST /api/v1/documents`, mid-stream, which is late:
+  the bytes have already crossed the proxy and reached the application before anything
+  rejects them. Set `client_max_body_size` (nginx) / the equivalent ingress annotation to
+  the same value or a little above it, so an oversized upload is refused at the edge and
+  the in-app cap is the second line rather than the only one.
+- **Run `ANALYZE` after a bulk ingest.** Postgres plans the vector query from table
+  statistics, and a freshly populated `document_chunks` has none until autovacuum catches
+  up — so the first queries after loading a large corpus sequentially scan it instead of
+  using the HNSW index. `ANALYZE document_chunks;` (or `VACUUM ANALYZE`) immediately after
+  a bulk load makes that a few seconds of maintenance rather than minutes of slow answers.
 - **Auth rate limiting is keyed on `request.client.host`** (see `apps/api/app/api/auth.py`).
   That is the direct TCP peer's address, which is correct with no proxy in front of the
   API — exactly Phase 1's setup. Behind a load balancer, reverse proxy, or ingress, every
@@ -268,6 +309,17 @@ the moment this leaves your laptop:
   uvicorn with `--proxy-headers --forwarded-allow-ips=<the proxy's real address>`) so only
   a header set by that trusted hop is honored.
 
+- **`POST /api/v1/documents` caps request size itself, in two layers, but a
+  proxy-level cap is still worth having.** `settings.max_request_bytes` (20 MB
+  default) is enforced both from `Content-Length` before the body is read and,
+  for a client that omits or lies about that header, by counting bytes as the
+  ASGI server actually delivers them -- see `_capped_receive` in
+  `apps/api/app/api/documents.py`. That closes the gap this app can close on
+  its own. It does not replace a reverse proxy's own body-size limit (nginx's
+  `client_max_body_size`, or the equivalent on whatever sits in front of this
+  in production) as a second, independent layer: this app's cap protects one
+  worker process's memory and disk, not the connection-handling capacity of
+  whatever terminates TLS before traffic reaches it.
 - **The SSE route must not be buffered or compressed by anything in front of it.**
   `POST /api/v1/chat/stream` sets `Cache-Control: no-cache` and `X-Accel-Buffering: no`,
   and sends no `Content-Encoding` (see `docs/PHASE-2.md` §4). Those headers only work if

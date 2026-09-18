@@ -12,10 +12,13 @@ logs:
 verify-db:
 	bash infrastructure/scripts/verify_db.sh
 
-.PHONY: api test lint
+.PHONY: api worker test lint
 
 api:
 	cd apps/api && uv run uvicorn app.main:app --reload --port 8000
+
+worker:
+	cd apps/api && uv run arq app.workers.settings.WorkerSettings
 
 test:
 	cd apps/api && uv run pytest -v

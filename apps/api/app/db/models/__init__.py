@@ -1,4 +1,5 @@
 from app.db.models.agent import Agent, AgentConfig, AgentStatus
+from app.db.models.citation import MessageCitation
 from app.db.models.conversation import (
     Conversation,
     ConversationChannel,
@@ -7,6 +8,12 @@ from app.db.models.conversation import (
     MessageRole,
     UsageEvent,
     UsageKind,
+)
+from app.db.models.document import (
+    Document,
+    DocumentChunk,
+    DocumentSourceType,
+    DocumentStatus,
 )
 from app.db.models.membership import Membership, MembershipRole
 from app.db.models.organization import Organization
@@ -27,9 +34,14 @@ __all__ = [
     "ConversationChannel",
     "ConversationMessage",
     "ConversationStatus",
+    "Document",
+    "DocumentChunk",
+    "DocumentSourceType",
+    "DocumentStatus",
     "Membership",
     "MembershipRole",
     "Message",
+    "MessageCitation",
     "MessageRole",
     "Organization",
     "Prompt",

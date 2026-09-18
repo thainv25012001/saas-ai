@@ -18,11 +18,39 @@ dependencies = [
     "email-validator>=2.2",
     "strawberry-graphql[fastapi]>=0.248",
     "anthropic>=0.40",
+    "pgvector>=0.3",
+    "pypdf>=5.1",
+    "python-docx>=1.1",
+    "selectolax>=0.3",
+    # Starlette's multipart form parsing (Request.form(), which Task 5's
+    # upload endpoint calls directly) needs this at runtime. It was already
+    # in the resolved environment transitively -- via strawberry-graphql's
+    # dev-only `cli` extra -- which is exactly the kind of accident that
+    # stops being true the day that extra's dependency graph changes.
+    # Declaring it directly means the production image still has it once
+    # that dev-only extra drops out of a prod build.
+    "python-multipart>=0.0.9",
     # Already in the closure via the OpenAI and Anthropic SDKs; declared
     # explicitly because `app/llm/openrouter_models.py` imports it directly
     # rather than relying on a transitive dependency staying put.
     "httpx2>=2.13",
     "openai>=1.50",
+    # Pins `redis<6` itself (see uv.lock), which downgrades this project's
+    # own redis-py from the 8.x line. This app's actual surface against
+    # redis-py is small and stable across that range: `from_url`/`ping`
+    # (app/core/redis.py), `eval` (app/core/rate_limit.py -- the one method
+    # the downgrade actually changed the type stub for, fixed there), and
+    # `exists`/`set(ex=...)` (the refresh-token denylist, app/auth/service.py).
+    #
+    # Accepting the pin rather than isolating arq into its own image: this
+    # project already declares `redis>=5.2`, so nothing committed to here is
+    # violated, and the compose design (worker reuses the api image and the
+    # same app/ code -- see docker-compose.yml) is exactly what isolating
+    # arq into a separate image would give up. The real cost is deferred
+    # CVE exposure on redis-py 5.x; what would unblock 6.x is either an arq
+    # release that relaxes its `redis<6` pin, or switching to a queue with
+    # no such pin.
+    "arq>=0.28",
 ]
 
 [dependency-groups]
@@ -40,6 +68,13 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Without this, a regression like the unclosed-`UploadFile` bug Task 5's
+# review caught (fixed in app/api/documents.py) is only visible to whoever
+# happens to run pytest with `-W error` by hand -- plain `uv run pytest -v`,
+# which is what CI actually runs, stays green while silently leaking file
+# descriptors. Promoting every warning to a failure here is what makes that
+# the same command, not an opt-in extra step nobody remembers.
+filterwarnings = ["error"]
 
 [tool.ruff]
 line-length = 100

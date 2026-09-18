@@ -8,10 +8,12 @@ from sqlalchemy import select
 
 from app.agents import schemas as agent_schemas
 from app.agents.service import AgentService
-from app.core.errors import AuthenticationError, format_validation_errors
+from app.core.errors import AuthenticationError, NotFoundError, format_validation_errors
 from app.core.errors import ValidationError as AppValidationError
+from app.db.models import DocumentStatus as DocumentStatusModel
 from app.db.models import Membership, Organization
 from app.db.models import User as UserModel
+from app.documents.service import DocumentService
 from app.graphql import types as gql
 from app.graphql.context import Context
 from app.llm.catalog import models_for
@@ -69,6 +71,13 @@ def _prompts(info: Info) -> PromptService:
     assert info.context.tenant is not None
     assert info.context.session is not None
     return PromptService(info.context.session, info.context.tenant)
+
+
+def _documents(info: Info) -> DocumentService:
+    _require_tenant(info)
+    assert info.context.tenant is not None
+    assert info.context.session is not None
+    return DocumentService(info.context.session, info.context.tenant)
 
 
 @strawberry.type
@@ -174,6 +183,32 @@ class Query:
     async def prompt(self, info: Info, id: uuid.UUID) -> gql.Prompt:
         return gql.Prompt.from_model(await _prompts(info).get_prompt(id))
 
+    @strawberry.field
+    async def documents(
+        self,
+        info: Info,
+        status: gql.DocumentStatus | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[gql.Document]:
+        model_status = DocumentStatusModel(status.value) if status is not None else None
+        rows = await _documents(info).list_documents(
+            status=model_status, limit=limit, offset=offset
+        )
+        return [gql.Document.from_model(row) for row in rows]
+
+    @strawberry.field
+    async def document(self, info: Info, id: uuid.UUID) -> gql.Document | None:
+        """Nullable, unlike `agent(id)` above: a hidden document (deleted,
+        or belonging to another org) is represented here as simply absent
+        rather than as a GraphQL error -- the dashboard's document viewer
+        treats "not found" and "not yours" identically, as nothing to show,
+        with no error banner to render for either."""
+        try:
+            return gql.Document.from_model(await _documents(info).get(id))
+        except NotFoundError:
+            return None
+
 
 @strawberry.type
 class Mutation:
@@ -267,3 +302,15 @@ class Mutation:
     async def activate_prompt_version(self, info: Info, version_id: uuid.UUID) -> gql.PromptVersion:
         version = await _prompts(info).activate_version(version_id)
         return gql.PromptVersion.from_model(version)
+
+    @strawberry.mutation
+    async def delete_document(self, info: Info, id: uuid.UUID) -> bool:
+        # Unlike the `document` query above, this does not catch
+        # NotFoundError -- matching `delete_agent`'s convention rather than
+        # `document`'s. Reading a hidden document as "nothing to show" is
+        # harmless; a delete silently reporting success for a document that
+        # was never touched (wrong id, or another org's) is the kind of
+        # false positive a client should not be able to mistake for "it's
+        # gone now".
+        await _documents(info).delete(id)
+        return True

@@ -29,8 +29,31 @@ export type ChatUsage = {
   output_tokens: number;
 };
 
+export type Citation = {
+  chunk_id: string;
+  document_id: string;
+  /** Untrusted: this is the uploaded document's own title, never escaped by
+   * the server (see `_citation_payload` in `apps/api/app/chat/service.py`).
+   * Rendering it must go through JSX text interpolation only -- never
+   * `dangerouslySetInnerHTML` or a markdown pass -- so React's own escaping
+   * is what keeps a title like `<script>` from doing anything but printing
+   * itself. See `ChatMessage.tsx`. */
+  document_title: string;
+  /** 1-based rank among this turn's retrieved chunks. */
+  rank: number;
+  score: number;
+  /** Untrusted for the same reason as `document_title` -- a short preview
+   * of the chunk's own content. */
+  excerpt: string;
+  /** 1-based page number for a PDF-sourced chunk; `null` for a source with
+   * no page concept (plain text, Markdown, HTML) -- see `CitationPayload`
+   * in `apps/api/app/chat/service.py`. */
+  page: number | null;
+};
+
 export type SSEEvent =
   | { type: "message_start"; conversation_id: string; message_id: string }
+  | { type: "citations"; citations: Citation[] }
   | { type: "text_delta"; text: string }
   | {
       type: "message_end";
@@ -55,6 +78,37 @@ function toChatUsage(value: unknown): ChatUsage | null {
   return { input_tokens, output_tokens };
 }
 
+function toCitation(value: unknown): Citation | null {
+  if (!isRecord(value)) return null;
+  const { chunk_id, document_id, document_title, rank, score, excerpt, page } = value;
+  if (
+    typeof chunk_id !== "string" ||
+    typeof document_id !== "string" ||
+    typeof document_title !== "string" ||
+    typeof rank !== "number" ||
+    typeof score !== "number" ||
+    typeof excerpt !== "string" ||
+    (typeof page !== "number" && page !== null)
+  ) {
+    return null;
+  }
+  return { chunk_id, document_id, document_title, rank, score, excerpt, page };
+}
+
+/** `null` if any single citation is malformed -- a partial citations list
+ * would be worse than none, since the UI numbers them by array position and
+ * a silently-dropped entry would misnumber the rest. */
+function toCitations(value: unknown): Citation[] | null {
+  if (!Array.isArray(value)) return null;
+  const citations: Citation[] = [];
+  for (const item of value) {
+    const citation = toCitation(item);
+    if (citation === null) return null;
+    citations.push(citation);
+  }
+  return citations;
+}
+
 /** Narrows a parsed JSON value into a known `SSEEvent`, or `null` if it does
  * not match any known shape (a forward-compatible unknown event type, or a
  * malformed payload). Never throws. */
@@ -66,6 +120,11 @@ function toSSEEvent(value: unknown): SSEEvent | null {
       const { conversation_id, message_id } = value;
       if (typeof conversation_id !== "string" || typeof message_id !== "string") return null;
       return { type: "message_start", conversation_id, message_id };
+    }
+    case "citations": {
+      const citations = toCitations(value.citations);
+      if (citations === null) return null;
+      return { type: "citations", citations };
     }
     case "text_delta": {
       const { text } = value;

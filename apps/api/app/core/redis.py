@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import cast
 
 from redis.asyncio import Redis
 
@@ -10,7 +11,11 @@ logger = get_logger(__name__)
 
 @lru_cache
 def get_redis() -> Redis:
-    return Redis.from_url(get_settings().redis_url, decode_responses=True)
+    # `Redis.from_url` carries no return annotation in redis-py 5.x (the
+    # version arq's `redis<6` pin forces this project onto), so mypy sees
+    # its result as `Any` rather than `Redis`. The cast states what is
+    # actually true at runtime, not a workaround for one.
+    return cast(Redis, Redis.from_url(get_settings().redis_url, decode_responses=True))
 
 
 async def check_redis() -> bool:

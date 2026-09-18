@@ -48,7 +48,21 @@ async def test_identity_tables_do_not_have_rls(owner_connection, table):
     assert result.scalar_one() is False
 
 
-@pytest.mark.parametrize("table", ["agents", "agent_configs", "prompts", "prompt_versions"])
+@pytest.mark.parametrize(
+    "table",
+    [
+        "agents",
+        "agent_configs",
+        "prompts",
+        "prompt_versions",
+        "conversations",
+        "messages",
+        "usage_events",
+        "documents",
+        "document_chunks",
+        "message_citations",
+    ],
+)
 async def test_tenant_tables_have_rls_enabled_with_a_tenant_isolation_policy(
     owner_connection, table
 ):
@@ -63,7 +77,14 @@ async def test_tenant_tables_have_rls_enabled_with_a_tenant_isolation_policy(
     the predicate does, so a policy weakened to `USING (true)` would still
     pass here. What the predicate actually enforces, with no service filter
     in the picture, is asserted in tests/integration/test_isolation_layers.py
-    ::test_rls_alone_hides_another_orgs_agents_from_raw_sql."""
+    ::test_rls_alone_hides_another_orgs_agents_from_raw_sql.
+
+    `documents`/`document_chunks` (Task 2) join the original agents/prompts
+    list here rather than getting their own parametrized block --
+    document_chunks in particular is the table whose FK checks bypass RLS
+    entirely (see DocumentService.replace_chunks), so RLS being enabled here
+    is one layer of defence among several, not the only one, but it must
+    still be present."""
     enabled = await owner_connection.execute(
         text(
             "SELECT relrowsecurity FROM pg_class "
