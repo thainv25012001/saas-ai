@@ -28,6 +28,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.schemas import Provider
 from app.auth.dependencies import get_current_tenant
 from app.chat.service import (
     ChatCitations,
@@ -113,6 +114,27 @@ class ChatStreamRequest(BaseModel):
     # creates a full billable turn plus a persisted empty `messages` row.
     message: str = Field(min_length=1, max_length=MAX_MESSAGE_LENGTH)
     conversation_id: uuid.UUID | None = None
+    # Answer this one turn with a different provider/model than the agent is
+    # configured for, changing nothing about the agent itself -- what the
+    # playground's model picker sends. `None` means "use the agent's own",
+    # which is what every other caller sends and what keeps an untouched
+    # playground byte-identical to before this existed.
+    #
+    # `Provider` is the same annotated type the agent create/update schemas
+    # use, so an unrecognised provider name is rejected here the way it is
+    # there: one wording of the rule, and FastAPI's `RequestValidationError`
+    # handler turns it into a 422 JSON envelope before the route body runs --
+    # long before a `StreamingResponse` could commit a 200.
+    provider: Provider = None
+    # Bounded exactly like `CreateAgentInput.model`. `min_length=1` is the
+    # load-bearing half: `""` is not "no override", and without a floor it
+    # reaches the vendor as a blank model id and buys a 400. The model is
+    # deliberately *not* checked against `app.llm.catalog` -- OpenRouter's
+    # catalog is a live HTTP fetch, and validating it here would put a network
+    # round-trip in front of every chat request. An unknown model fails at the
+    # provider and surfaces as a normal mid-stream error event, exactly as a
+    # bad model stored on an agent does today.
+    model: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 def get_chat_provider() -> LLMProvider | None:
@@ -355,6 +377,8 @@ async def chat_stream(
         payload.message,
         conversation_id=payload.conversation_id,
         channel=ConversationChannel.PLAYGROUND,
+        override_provider=payload.provider,
+        override_model=payload.model,
     )
 
     # Pulling the first event runs `ChatService.send()` up to (and including)

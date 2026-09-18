@@ -113,6 +113,29 @@ under Account Settings → API Keys (`RENDER_API_KEY`).
 
 Render's free instances spin down when idle, so the first request after a quiet period is slow.
 
+Only one service is deployed, so the arq worker runs *inside* the API process
+(`RUN_EMBEDDED_WORKER=true`). This is not the shape docker-compose uses, and the reason is the
+uploaded bytes: `app/rag/storage.py` writes them to a local directory, a Render Disk attaches to
+exactly one service, and a separate worker service would therefore never see them. Deploying the
+API on its own is worse — uploads are accepted, the job is queued, nothing consumes it, and every
+document stays `pending`.
+
+What that costs, and how to tell:
+
+- Ingestion shares one CPU and one connection pool with request handling. `WORKER_MAX_JOBS` is set
+  to 2 here for that reason, against the standalone worker's 5.
+- Uploads do not survive a deploy or a spin-down. Already-ingested chunks live in Postgres and keep
+  answering; re-ingesting an older document is what fails.
+- A restart cancels an in-flight ingest instead of draining it. arq re-queues the job once its
+  in-progress key expires, so it recovers by itself — but the document reads `processing` for the
+  ~10 minutes that takes.
+- Startup logs `embedded_worker_started`. If Redis is unreachable the app still serves HTTP and
+  logs `embedded_worker_stopped` with the error, rather than crash-looping.
+
+Moving to a dedicated worker means backing `storage.py` with object storage, then setting
+`RUN_EMBEDDED_WORKER=false` and adding a `type: worker` service running
+`uv run arq app.workers.settings.WorkerSettings`.
+
 ### 4. Vercel
 
 Create the project and, because this workflow builds and uploads the app itself:

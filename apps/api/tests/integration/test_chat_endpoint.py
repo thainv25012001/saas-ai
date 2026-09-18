@@ -912,3 +912,177 @@ async def test_a_baseexception_in_the_pump_still_terminates_the_stream(monkeypat
         await asyncio.wait_for(_drain(), timeout=2.0)
 
     assert chat_api._PING not in chunks  # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# 10. Per-request model / provider override (the playground's model picker)
+# ---------------------------------------------------------------------------
+
+
+async def test_model_override_is_what_reaches_the_provider(app, api_client, clean_users):
+    token = await _register(api_client, "model-override@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id, model="fake-1")
+    provider = FakeProvider(script=["ok"])
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: provider
+
+    response = await api_client.post(
+        CHAT_URL,
+        json={"agent_id": str(agent_id), "message": "hello", "model": "claude-sonnet-5"},
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200, response.text
+    assert provider.last_request is not None
+    assert provider.last_request.model == "claude-sonnet-5"
+
+
+async def test_model_override_does_not_change_the_agent(app, api_client, clean_users):
+    """The override is for one request. An implementation that wrote it back
+    to the agent row would pass the test above and silently repoint every
+    other channel this agent answers on."""
+    token = await _register(api_client, "override-not-persisted@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id, model="fake-1")
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(script=["ok"])
+
+    await api_client.post(
+        CHAT_URL,
+        json={"agent_id": str(agent_id), "message": "hello", "model": "claude-sonnet-5"},
+        headers=_auth(token),
+    )
+
+    tenant = TenantContext(
+        organization_id=org_id, user_id=None, role=MembershipRole.OWNER, request_id="test"
+    )
+    async with tenant_session(tenant) as session:
+        agent = await AgentService(session, tenant).get_agent(agent_id)
+    assert agent.model == "fake-1"
+
+
+async def test_message_end_reports_the_model_that_actually_answered(app, api_client, clean_users):
+    """`message_end.model` is what the playground prints and what cost is
+    estimated from, so it must follow the override rather than the agent."""
+    token = await _register(api_client, "override-message-end@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id, model="fake-1")
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(script=["ok"])
+
+    response = await api_client.post(
+        CHAT_URL,
+        json={"agent_id": str(agent_id), "message": "hello", "model": "gpt-4o-mini"},
+        headers=_auth(token),
+    )
+
+    end = next(e for e in _parse_events(response.text) if e["type"] == "message_end")
+    assert end["model"] == "gpt-4o-mini"
+
+
+async def test_the_overridden_provider_is_the_one_resolved(api_client, clean_users):
+    """Deliberately no `get_chat_provider` override, so the real registry
+    resolves the name. The agent is on `fake`, which always answers -- a 200
+    here would mean the override never reached provider resolution. This
+    environment has no `OPENAI_API_KEY`, so an override that *is* honoured
+    fails the same way an agent configured for openai already does, before
+    the stream is committed."""
+    token = await _register(api_client, "provider-override@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id, provider="fake", model="fake-1")
+
+    response = await api_client.post(
+        CHAT_URL,
+        json={
+            "agent_id": str(agent_id),
+            "message": "hello",
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+        },
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["error"]["code"] == "llm_misconfigured"
+    assert "text/event-stream" not in response.headers["content-type"]
+
+
+async def test_an_unknown_provider_override_is_rejected_as_json(app, api_client, clean_users):
+    token = await _register(api_client, "unknown-provider-override@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id)
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(script=["ok"])
+
+    response = await api_client.post(
+        CHAT_URL,
+        json={"agent_id": str(agent_id), "message": "hello", "provider": "not-a-provider"},
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/json")
+    assert "text/event-stream" not in response.headers["content-type"]
+
+
+async def test_an_empty_model_override_is_rejected(app, api_client, clean_users):
+    """`""` is not "no override" -- without a length floor it reaches the
+    provider as a blank model id and buys a 400 from the vendor."""
+    token = await _register(api_client, "blank-model-override@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id)
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(script=["ok"])
+
+    response = await api_client.post(
+        CHAT_URL,
+        json={"agent_id": str(agent_id), "message": "hello", "model": ""},
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 422
+
+
+async def test_without_an_override_the_agents_own_model_still_answers(app, api_client, clean_users):
+    token = await _register(api_client, "no-override@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id, model="fake-1")
+    provider = FakeProvider(script=["ok"])
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: provider
+
+    response = await api_client.post(
+        CHAT_URL, json={"agent_id": str(agent_id), "message": "hello"}, headers=_auth(token)
+    )
+
+    assert response.status_code == 200, response.text
+    assert provider.last_request is not None
+    assert provider.last_request.model == "fake-1"
+
+
+async def test_usage_event_records_the_model_that_answered(app, api_client, clean_users):
+    """`usage_events` is the substrate billing reads. Recording the agent's
+    configured model for a turn an overridden model was billed for would
+    attribute real spend to the wrong model."""
+    token = await _register(api_client, "override-usage@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id, model="fake-1")
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(script=["ok"])
+
+    await api_client.post(
+        CHAT_URL,
+        json={"agent_id": str(agent_id), "message": "hello", "model": "claude-sonnet-5"},
+        headers=_auth(token),
+    )
+
+    tenant = TenantContext(
+        organization_id=org_id, user_id=None, role=MembershipRole.OWNER, request_id="test"
+    )
+    async with tenant_session(tenant) as session:
+        rows = (
+            (
+                await session.execute(
+                    text("SELECT model FROM usage_events WHERE agent_id = :agent_id"),
+                    {"agent_id": agent_id},
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert rows == ["claude-sonnet-5"]

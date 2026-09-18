@@ -33,3 +33,25 @@ services:
         value: production
       - key: LOG_LEVEL
         value: INFO
+      # One service, so the arq worker runs inside this process rather than
+      # as its own. A second Render service would have its own filesystem
+      # and could never read the uploaded bytes this one wrote to
+      # UPLOAD_DIR (a Render Disk attaches to exactly one service), and
+      # with no worker at all `enqueue_ingest` succeeds, nothing drains the
+      # queue, and every document sits at `pending` forever. The trade-offs
+      # are written out in apps/api/app/workers/embedded.py.
+      - key: RUN_EMBEDDED_WORKER
+        value: "true"
+      # Lower than the standalone worker's default of 5: ingest jobs now
+      # draw on the same 15-connection pool (pool_size 10 + max_overflow 5)
+      # as request handling, and each job can hold two at once. 2 caps
+      # ingestion at 4 and leaves 11 for serving traffic.
+      - key: WORKER_MAX_JOBS
+        value: "2"
+      # Ephemeral, and deliberately so: the free plan has no disk, so these
+      # bytes are lost on every deploy and every spin-down. Documents
+      # already ingested are unaffected -- their chunks and embeddings are
+      # in Postgres -- so only re-ingesting an older upload fails. Object
+      # storage is the fix; see apps/api/app/rag/storage.py.
+      - key: UPLOAD_DIR
+        value: /app/var/uploads
