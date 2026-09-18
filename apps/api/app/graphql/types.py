@@ -368,6 +368,15 @@ class Conversation:
         )
 
     @strawberry.field
+    async def preview(self, info: strawberry.Info[Context, None]) -> str | None:
+        """The first question asked, for a list row whose title has not landed
+        yet -- the title job is asynchronous, and a brand-new conversation is
+        exactly the one someone is looking at."""
+        if info.context.preview_loader is None:
+            raise AuthenticationError("authentication required")
+        return await info.context.preview_loader.load(self.id)
+
+    @strawberry.field
     async def messages(self, info: strawberry.Info[Context, None]) -> list[Message]:
         # No limit: `history`'s limit exists to bound what is sent to the
         # model as context. Someone reading their own history is not paying

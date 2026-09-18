@@ -48,3 +48,20 @@ query Documents($status: DocumentStatus, $limit: Int, $offset: Int) {
 mutation DeleteDocument($id: UUID!) {
   deleteDocument(id: $id)
 }
+
+query Conversations($agentId: UUID!, $channel: ConversationChannel, $limit: Int, $offset: Int) {
+  conversations(agentId: $agentId, channel: $channel, limit: $limit, offset: $offset) {
+    id title preview lastMessageAt createdAt
+  }
+}
+
+query Conversation($id: UUID!) {
+  conversation(id: $id) {
+    id
+    title
+    messages {
+      id seq role content model inputTokens outputTokens costUsd latencyMs error
+      citations { chunkId documentId documentTitle excerpt rank score }
+    }
+  }
+}

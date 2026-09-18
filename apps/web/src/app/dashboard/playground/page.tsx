@@ -16,6 +16,8 @@ import { LoadingState } from "@/components/ui/Spinner";
 import {
   AgentsDocument,
   ConfiguredProvidersDocument,
+  ConversationDocument,
+  ConversationsDocument,
   ProviderModelsDocument,
 } from "@/graphql/generated";
 import { agentStatusLabel, agentStatusTone } from "@/lib/agent-status";
@@ -23,6 +25,7 @@ import { API_URL } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { NEW_CONVERSATION, resolveTurnOutcome, type TurnState } from "@/lib/chat-turn";
 import { sessionTotals } from "@/lib/chat-totals";
+import { conversationLabel, toTranscript } from "@/lib/conversation-transcript";
 import { firstGraphQLError } from "@/lib/graphql-errors";
 import { isOverridden, type ModelSelection, overrideFields } from "@/lib/model-selection";
 import { editableProviders, providerLabel } from "@/lib/providers";
@@ -93,6 +96,53 @@ function PlaygroundContent() {
   // loses focus without getting it back -- see `useComposerFocus`.
   const composerRef = useComposerFocus(isStreaming);
 
+  // Past conversations for the selected agent. Filtered to the playground's
+  // own channel: once the embedded widget ships, real customer traffic on the
+  // same agent would otherwise bury the threads you are testing with.
+  const [historyResult, refetchHistory] = useQuery({
+    query: ConversationsDocument,
+    variables: { agentId: agentId ?? "", channel: "PLAYGROUND" },
+    pause: agentId === null,
+  });
+  const history = useMemo(
+    () => historyResult.data?.conversations ?? [],
+    [historyResult.data],
+  );
+
+  // Paused until a row is actually chosen: this is the full transcript, and
+  // nothing should fetch one just because a list is on screen.
+  const [openingId, setOpeningId] = useState<string | null>(null);
+  const [transcriptResult] = useQuery({
+    query: ConversationDocument,
+    variables: { id: openingId ?? "" },
+    pause: openingId === null,
+  });
+
+  // Load the fetched transcript into the view once, when it arrives. Keyed on
+  // the id rather than on the data, so re-rendering for any other reason does
+  // not replay it over messages the user has since added.
+  const loadedId = useRef<string | null>(null);
+  useEffect(() => {
+    const loaded = transcriptResult.data?.conversation;
+    if (loaded === undefined || loaded === null) return;
+    const id = String(loaded.id);
+    if (loadedId.current === id) return;
+    loadedId.current = id;
+    setMessages(toTranscript(loaded.messages));
+    // Committed by definition: it is a conversation the server has already
+    // written turns into, so the next message continues this thread rather
+    // than opening a new one.
+    setConversation({ conversationId: id, committed: true });
+    stickToBottom();
+  }, [transcriptResult.data, stickToBottom]);
+
+  function onOpenConversation(conversationId: string) {
+    if (conversationId === conversation.conversationId) return;
+    abortRef.current?.abort();
+    loadedId.current = null;
+    setOpeningId(conversationId);
+  }
+
   // Preselect from ?agentId=... (set by the "Test in playground" link on an
   // agent's detail page), falling back to the first agent once the query
   // resolves. Only ever runs while nothing is selected yet, so it never
@@ -132,12 +182,16 @@ function PlaygroundContent() {
     // into one conversation_id.
     setConversation(NEW_CONVERSATION);
     setMessages([]);
+    setOpeningId(null);
+    loadedId.current = null;
     stickToBottom();
   }
 
   function onNewConversation() {
     setConversation(NEW_CONVERSATION);
     setMessages([]);
+    setOpeningId(null);
+    loadedId.current = null;
     stickToBottom();
   }
 
@@ -290,6 +344,11 @@ function PlaygroundContent() {
       );
       setIsStreaming(false);
       abortRef.current = null;
+      // A turn ending is when a new conversation appears in the list and when
+      // an existing one moves to the top. Deliberately not polled afterwards
+      // for the title: it is written by a background job, and until it lands
+      // the row reads as its first question rather than as nothing.
+      refetchHistory({ requestPolicy: "network-only" });
     }
   }
 
@@ -328,9 +387,55 @@ function PlaygroundContent() {
   }
 
   return (
-    // Three rows in a full-height grid: the transcript is the only scroll
-    // container, so the composer stays put without any viewport arithmetic.
-    <section className="grid h-full grid-rows-[auto_1fr_auto]">
+    // Two columns: the conversation list, then the playground itself as three
+    // rows -- the transcript is the only scroll container in that column, so
+    // the composer stays put without any viewport arithmetic.
+    <section className="grid h-full grid-cols-[16rem_1fr]">
+      <aside className="flex min-h-0 flex-col border-r border-line bg-surface">
+        <h2 className="border-b border-line px-4 py-3 text-sm font-semibold text-ink">
+          Conversations
+        </h2>
+        <div className="min-h-0 flex-1 overflow-y-auto p-2">
+          {history.length === 0 ? (
+            <p className="px-2 py-3 text-xs text-ink-subtle">
+              {historyResult.fetching
+                ? "Loading…"
+                : "Conversations you have with this agent are kept here."}
+            </p>
+          ) : (
+            <ul className="space-y-1">
+              {history.map((entry) => {
+                const id = String(entry.id);
+                const isOpen = id === conversation.conversationId;
+                return (
+                  <li key={id}>
+                    <button
+                      type="button"
+                      onClick={() => onOpenConversation(id)}
+                      aria-current={isOpen ? "true" : undefined}
+                      className={`w-full truncate rounded-control px-2 py-1.5 text-left text-xs ${focusRing} ${
+                        isOpen
+                          ? "bg-surface-muted font-medium text-ink"
+                          : "text-ink-muted hover:text-ink"
+                      }`}
+                      // The full label on hover: the row is one line and
+                      // these get cut, and a truncated title is not a title.
+                      title={conversationLabel(entry)}
+                    >
+                      {/* Interpolated as text, never as markup: both the
+                        * generated title and the first-question fallback are
+                        * written from what the user typed. */}
+                      {conversationLabel(entry)}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      </aside>
+
+      <div className="grid min-h-0 min-w-0 grid-rows-[auto_1fr_auto]">
       <div className="flex flex-wrap items-center gap-3 border-b border-line bg-surface px-6 py-3">
         <h1 className="text-sm font-semibold text-ink">Playground</h1>
         <label className="flex items-center gap-2 text-sm text-ink-muted">
@@ -509,6 +614,7 @@ function PlaygroundContent() {
           Enter to send · Shift+Enter for a new line
         </p>
       </form>
+      </div>
     </section>
   );
 }

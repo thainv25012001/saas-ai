@@ -389,3 +389,92 @@ async def test_a_message_without_citations_gets_an_empty_list(api_client):
     messages = response.json()["data"]["conversation"]["messages"]
     assert messages[0]["citations"] == []
     assert [c["documentTitle"] for c in messages[1]["citations"]] == ["Pricing"]
+
+
+PREVIEW_QUERY = """
+query Previews($agentId: UUID!) {
+  conversations(agentId: $agentId) { id title preview }
+}
+"""
+
+
+async def test_a_conversation_exposes_its_first_question_as_a_preview(api_client):
+    """The title arrives from a background job seconds later. Until it does --
+    which is exactly when someone is looking at a conversation they just
+    started -- the list needs something to show, and a blank row is not it."""
+    token = await _register(api_client, "preview@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _agent(org_id)
+    conversation_id = await _conversation(org_id, agent_id)
+    tenant = _tenant(org_id)
+    async with tenant_session(tenant) as session:
+        service = ConversationService(session, tenant)
+        await service.append_message(
+            conversation_id,
+            AppendMessageInput(role=MessageRole.USER, content="how much is the starter plan?"),
+        )
+        await service.append_message(
+            conversation_id,
+            AppendMessageInput(role=MessageRole.ASSISTANT, content="Forty dollars."),
+        )
+        await service.append_message(
+            conversation_id, AppendMessageInput(role=MessageRole.USER, content="and the pro plan?")
+        )
+
+    response = await graphql(api_client, PREVIEW_QUERY, {"agentId": str(agent_id)}, _auth(token))
+
+    body = response.json()
+    assert "errors" not in body, body
+    # The FIRST question, not the most recent: it is what the conversation
+    # was about, which is what a label is for.
+    assert body["data"]["conversations"][0]["preview"] == "how much is the starter plan?"
+
+
+async def test_previews_for_a_whole_page_are_fetched_in_one_query(api_client):
+    """The N+1 that made this a field rather than a client-side read of
+    `messages`: resolved per row, a page of 20 conversations would issue 20
+    transcript queries just to render 20 labels."""
+    from sqlalchemy import event
+
+    from app.db.session import engine
+
+    token = await _register(api_client, "preview-batching@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _agent(org_id)
+    tenant = _tenant(org_id)
+    for index in range(4):
+        conversation_id = await _conversation(org_id, agent_id)
+        async with tenant_session(tenant) as session:
+            await ConversationService(session, tenant).append_message(
+                conversation_id,
+                AppendMessageInput(role=MessageRole.USER, content=f"question {index}"),
+            )
+
+    statements: list[str] = []
+
+    def _record(_conn, _cursor, statement, _params, _context, _executemany):
+        if "FROM messages" in statement and statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _record)
+    try:
+        response = await graphql(
+            api_client, PREVIEW_QUERY, {"agentId": str(agent_id)}, _auth(token)
+        )
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _record)
+
+    previews = {row["preview"] for row in response.json()["data"]["conversations"]}
+    assert previews == {f"question {i}" for i in range(4)}
+    assert len(statements) == 1, f"expected one batched query, got {len(statements)}"
+
+
+async def test_a_conversation_with_no_question_has_no_preview(api_client):
+    token = await _register(api_client, "preview-empty@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _agent(org_id)
+    await _conversation(org_id, agent_id)
+
+    response = await graphql(api_client, PREVIEW_QUERY, {"agentId": str(agent_id)}, _auth(token))
+
+    assert response.json()["data"]["conversations"][0]["preview"] is None
