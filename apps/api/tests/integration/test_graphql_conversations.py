@@ -478,3 +478,74 @@ async def test_a_conversation_with_no_question_has_no_preview(api_client):
     response = await graphql(api_client, PREVIEW_QUERY, {"agentId": str(agent_id)}, _auth(token))
 
     assert response.json()["data"]["conversations"][0]["preview"] is None
+
+
+async def test_transcripts_for_a_page_of_conversations_are_fetched_in_one_query(api_client):
+    """`conversations { messages }` is a query the schema permits, and it was
+    two per row: `ConversationService.history` re-checks the tenant with its
+    own `get()` before selecting, on a conversation the resolver had already
+    loaded under the same predicate."""
+    from sqlalchemy import event
+
+    from app.db.session import engine
+
+    token = await _register(api_client, "transcript-batching@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _agent(org_id)
+    tenant = _tenant(org_id)
+    for index in range(3):
+        conversation_id = await _conversation(org_id, agent_id)
+        async with tenant_session(tenant) as session:
+            await ConversationService(session, tenant).append_message(
+                conversation_id,
+                AppendMessageInput(role=MessageRole.USER, content=f"question {index}"),
+            )
+
+    statements: list[str] = []
+
+    def _record(_conn, _cursor, statement, _params, _context, _executemany):
+        if "FROM messages" in statement and statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _record)
+    try:
+        response = await graphql(
+            api_client,
+            """
+            query Transcripts($agentId: UUID!) {
+              conversations(agentId: $agentId) { id messages { content } }
+            }
+            """,
+            {"agentId": str(agent_id)},
+            _auth(token),
+        )
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _record)
+
+    body = response.json()
+    assert "errors" not in body, body
+    contents = {row["messages"][0]["content"] for row in body["data"]["conversations"]}
+    assert contents == {f"question {i}" for i in range(3)}
+    assert len(statements) == 1, f"expected one batched query, got {len(statements)}"
+
+
+async def test_a_conversation_from_another_organization_has_no_messages(api_client):
+    """The loader carries its own `organization_id` predicate rather than
+    relying on the `get()` check that resolving through `history` used to
+    perform. This is what pins that the check did not go missing with it."""
+    owner_token = await _register(api_client, "msg-org-a@example.com", "Msgs Org A")
+    owner_org_id = await _organization_id(api_client, owner_token)
+    agent_id = await _agent(owner_org_id)
+    conversation_id = await _conversation(owner_org_id, agent_id)
+    tenant = _tenant(owner_org_id)
+    async with tenant_session(tenant) as session:
+        await ConversationService(session, tenant).append_message(
+            conversation_id, AppendMessageInput(role=MessageRole.USER, content="private")
+        )
+
+    other_token = await _register(api_client, "msg-org-b@example.com", "Msgs Org B")
+    response = await graphql(
+        api_client, CONVERSATION_QUERY, {"id": str(conversation_id)}, _auth(other_token)
+    )
+
+    assert response.json()["data"]["conversation"] is None

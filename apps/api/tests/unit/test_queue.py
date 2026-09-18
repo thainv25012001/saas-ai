@@ -9,39 +9,28 @@ so it costs nothing to run on every change.
 """
 
 import uuid
-from typing import Any
 
 import pytest
 
-from app.rag import queue as queue_module
+from app.rag.queue import enqueue_ingest
+from app.workers import enqueue as enqueue_module
 from app.workers.settings import WorkerSettings
 from app.workers.tasks import ingest_document_task
+from tests.unit._queue_stubs import FakePool
 
 pytestmark = pytest.mark.anyio
 
 
-class _FakePool:
-    def __init__(self) -> None:
-        self.enqueued: dict[str, Any] = {}
-        self.closed = False
-
-    async def enqueue_job(self, name: str, **kwargs: Any) -> None:
-        self.enqueued = {"name": name, "kwargs": kwargs}
-
-    async def aclose(self) -> None:
-        self.closed = True
-
-
 async def test_enqueue_ingest_uses_the_registered_task_name(monkeypatch):
-    pool = _FakePool()
+    pool = FakePool()
 
-    async def _fake_create_pool(_redis_settings: object) -> _FakePool:
+    async def _fake_create_pool(_redis_settings: object) -> FakePool:
         return pool
 
-    monkeypatch.setattr(queue_module, "create_pool", _fake_create_pool)
+    monkeypatch.setattr(enqueue_module, "create_pool", _fake_create_pool)
 
     document_id, organization_id = uuid.uuid4(), uuid.uuid4()
-    await queue_module.enqueue_ingest(document_id, organization_id)
+    await enqueue_ingest(document_id, organization_id)
 
     # The string this call enqueues under must match the *actual* function
     # name -- not a string that merely happens to equal it today.

@@ -9,37 +9,18 @@
  */
 
 import type { ChatMessageData } from "@/components/chat/ChatMessage";
+import type { ConversationQuery } from "@/graphql/generated";
 
-/** The message fields the `Conversation` query asks for. Declared
- * structurally rather than imported from the generated types: the generated
- * `role` is an enum and `id` is `unknown`, neither of which a test can
- * construct cheaply, and this module only ever reads these fields. */
-export type StoredMessage = {
-  id: unknown;
-  seq: number;
-  role: string;
-  content: string | null;
-  model: string | null;
-  inputTokens: number | null;
-  outputTokens: number | null;
-  costUsd: string | null;
-  latencyMs: number | null;
-  error: string | null;
-  citations: readonly {
-    chunkId: unknown;
-    documentId: unknown;
-    documentTitle: string;
-    excerpt: string;
-    rank: number;
-    score: number;
-  }[];
-};
+/** Exactly the message shape the `Conversation` query returns, taken from the
+ * generated types rather than restated by hand, so it cannot drift from the
+ * schema. */
+export type StoredMessage = NonNullable<ConversationQuery["conversation"]>["messages"][number];
 
 /** Only the two roles the transcript has a rendering for. A `system` turn is
  * the prompt, already accounted for elsewhere, and a `tool` turn (Phase 4)
  * has no display defined yet -- skipped rather than guessed at, matching how
  * `ChatService` builds history for the provider. */
-const RENDERED_ROLES: Record<string, "user" | "assistant"> = {
+const RENDERED_ROLES: Partial<Record<StoredMessage["role"], "user" | "assistant">> = {
   USER: "user",
   ASSISTANT: "assistant",
 };
@@ -54,19 +35,21 @@ export function toTranscript(messages: readonly StoredMessage[]): ChatMessageDat
     // streamed before a failure precisely so history agrees with what the
     // user watched happen.
     const text = message.content ?? "";
-    const failed = message.error !== null;
+    // Bound rather than tested twice: a separate `failed` boolean does not
+    // narrow `message.error` for the assignment below.
+    const error = message.error;
 
     const entry: ChatMessageData = {
-      id: String(message.id),
+      id: message.id,
       role,
       text,
-      status: failed ? "error" : "done",
+      status: error === null ? "done" : "error",
     };
-    if (failed) {
+    if (error !== null) {
       // The stored row keeps the message but not the machine-readable code
       // the SSE `error` event carried, so this is the honest reconstruction:
       // the text that was shown, under a generic code.
-      entry.error = { code: "error", message: message.error as string };
+      entry.error = { code: "error", message: error };
     }
     // Only when there is something real to report. Zeroes here would make a
     // failed turn claim it used no tokens rather than that nothing was
@@ -83,8 +66,13 @@ export function toTranscript(messages: readonly StoredMessage[]): ChatMessageDat
     // retrieval happened, versus retrieval that found nothing.
     if (message.citations.length > 0) {
       entry.citations = message.citations.map((citation) => ({
-        chunkId: String(citation.chunkId),
-        documentId: String(citation.documentId),
+        // Both are `ON DELETE SET NULL`: a citation outlives the chunk and
+        // the document it points at, and the row is kept so the transcript
+        // still shows what grounded the answer. Empty string, not `String(
+        // null)`, because these are only ever used as React keys and as the
+        // link target the viewer suppresses when there is nothing to open.
+        chunkId: citation.chunkId ?? "",
+        documentId: citation.documentId ?? "",
         documentTitle: citation.documentTitle,
         excerpt: citation.excerpt,
         rank: citation.rank,
@@ -99,7 +87,14 @@ export function toTranscript(messages: readonly StoredMessage[]): ChatMessageDat
   return transcript;
 }
 
-/** What a conversation with neither a title nor a question is called. */
+/** What a conversation with neither a title nor a question is called.
+ *
+ * Deliberately the same string as `UNTITLED` in
+ * `apps/api/app/conversations/titles.py`, which the title job writes when it
+ * has nothing to quote. Duplicated rather than fetched because this one is
+ * needed before any request resolves -- but reword one and reword both, or
+ * the same conversation reads differently depending on whether its label came
+ * from the server or from here. */
 const UNTITLED = "Untitled conversation";
 
 /**

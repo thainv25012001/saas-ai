@@ -40,14 +40,12 @@ class _ExplodingProvider:
         raise AssertionError("the provider must not be called for an already-titled conversation")
 
 
-class _FailingProvider:
-    name = "fake"
-
-    async def generate(self, request):  # noqa: ANN001, ANN201
-        raise LLMUnavailableError("upstream is down")
-
-    def stream(self, request):  # noqa: ANN001, ANN201
-        raise LLMUnavailableError("upstream is down")
+def _failing_provider() -> FakeProvider:
+    """`fail_with` is what `FakeProvider` already offers for this -- the same
+    idiom `test_chat_endpoint.py` uses. A hand-rolled stub would drift from
+    the `LLMProvider` protocol as it grows. The script is unused and only has
+    to be non-empty, which `FakeProvider` enforces at construction."""
+    return FakeProvider(script=["unused"], fail_with=LLMUnavailableError("upstream is down"))
 
 
 def _tenant(org_id: uuid.UUID) -> TenantContext:
@@ -123,7 +121,7 @@ async def test_an_already_titled_conversation_never_reaches_the_provider(tenant_
 async def test_a_provider_failure_falls_back_to_the_first_user_message(tenant_a, monkeypatch):
     org_id = tenant_a.organization_id
     conversation_id = await _seed(org_id)
-    _use_provider(monkeypatch, _FailingProvider())
+    _use_provider(monkeypatch, _failing_provider())
 
     await worker_tasks.title_conversation_task(
         {}, organization_id=str(org_id), conversation_id=str(conversation_id)
@@ -150,7 +148,7 @@ async def test_the_fallback_is_a_real_write_so_the_job_cannot_recur(tenant_a, mo
     is broken."""
     org_id = tenant_a.organization_id
     conversation_id = await _seed(org_id)
-    _use_provider(monkeypatch, _FailingProvider())
+    _use_provider(monkeypatch, _failing_provider())
     await worker_tasks.title_conversation_task(
         {}, organization_id=str(org_id), conversation_id=str(conversation_id)
     )
@@ -180,7 +178,7 @@ async def test_a_conversation_with_no_messages_is_left_untitled(tenant_a, monkey
 async def test_a_whitespace_only_question_still_gets_a_label(tenant_a, monkeypatch):
     org_id = tenant_a.organization_id
     conversation_id = await _seed(org_id, user_text="   ")
-    _use_provider(monkeypatch, _FailingProvider())
+    _use_provider(monkeypatch, _failing_provider())
 
     await worker_tasks.title_conversation_task(
         {}, organization_id=str(org_id), conversation_id=str(conversation_id)

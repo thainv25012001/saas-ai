@@ -96,19 +96,6 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-class _NoNewConversation:
-    """Stands in for `ChatService` in the tests below that drive
-    `_stream_body` directly.
-
-    `created_conversation = None` means the turn continued an existing
-    conversation, so no title is queued -- which keeps those tests about the
-    one thing they are each testing (session teardown, heartbeats, pump
-    failures) rather than about titling.
-    """
-
-    created_conversation = None
-
-
 class _SlowProvider:
     """Mimics FakeProvider but sleeps between chunks -- a real (tiny) delay,
     so the heartbeat's `asyncio.wait_for` timeout actually has a chance to
@@ -615,7 +602,7 @@ async def test_stream_body_rolls_back_the_session_on_abrupt_close():
 
     session_cm = _RecordingSessionCM()
     first_event = ChatMessageStart(conversation_id=uuid.uuid4(), message_id=uuid.uuid4())
-    body = _stream_body(_hangs_forever(), first_event, session_cm, _NoNewConversation())  # type: ignore[arg-type]
+    body = _stream_body(_hangs_forever(), first_event, session_cm, None, uuid.uuid4())  # type: ignore[arg-type]
 
     first_chunk = await body.__anext__()
     assert first_chunk.startswith(b"data: ")
@@ -669,7 +656,7 @@ async def test_session_still_closes_if_the_pump_task_raises_an_unexpected_baseex
     session_cm = _RecordingSessionCM()
     first_event = ChatMessageStart(conversation_id=uuid.uuid4(), message_id=uuid.uuid4())
     body = _stream_body(
-        _raises_unexpected_baseexception(), first_event, session_cm, _NoNewConversation()
+        _raises_unexpected_baseexception(), first_event, session_cm, None, uuid.uuid4()
     )  # type: ignore[arg-type]
 
     first_chunk = await body.__anext__()
@@ -730,9 +717,7 @@ async def test_disconnect_after_completed_turn_logs_discarded_usage(monkeypatch)
     )
 
     first_event = ChatMessageStart(conversation_id=uuid.uuid4(), message_id=uuid.uuid4())
-    body = _stream_body(
-        _completes_then_hangs(), first_event, _NoOpSessionCM(), _NoNewConversation()
-    )  # type: ignore[arg-type]
+    body = _stream_body(_completes_then_hangs(), first_event, _NoOpSessionCM(), None, uuid.uuid4())  # type: ignore[arg-type]
 
     first_chunk = await body.__anext__()
     assert first_chunk.startswith(b"data: ")
@@ -904,7 +889,7 @@ async def test_a_baseexception_in_the_pump_still_terminates_the_stream(monkeypat
     monkeypatch.setattr(chat_api, "HEARTBEAT_INTERVAL_SECONDS", 0.02)
     first_event = ChatMessageStart(conversation_id=uuid.uuid4(), message_id=uuid.uuid4())
     body = _stream_body(
-        _raises_unexpected_baseexception(), first_event, _NoOpSessionCM(), _NoNewConversation()
+        _raises_unexpected_baseexception(), first_event, _NoOpSessionCM(), None, uuid.uuid4()
     )  # type: ignore[arg-type]
 
     first_chunk = await body.__anext__()
