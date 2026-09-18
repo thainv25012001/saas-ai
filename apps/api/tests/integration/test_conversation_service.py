@@ -247,3 +247,75 @@ async def test_record_usage_with_a_conversation_from_another_tenant_raises_not_f
                     model="gpt-4o-mini",
                 )
             )
+
+
+async def test_list_for_agent_filters_by_channel(tenant_a):
+    """The playground lists its own test conversations. Once the embedded
+    widget ships, real customer traffic on the same agent must not bury
+    them."""
+    async with tenant_session(tenant_a) as session:
+        service = ConversationService(session, tenant_a)
+        agent = await _agent(session, tenant_a)
+        playground = await service.create(
+            agent.id, CreateConversationInput(channel=ConversationChannel.PLAYGROUND)
+        )
+        await service.create(agent.id, CreateConversationInput(channel=ConversationChannel.API))
+
+        rows = await service.list_for_agent(agent.id, channel=ConversationChannel.PLAYGROUND)
+
+    assert [row.id for row in rows] == [playground.id]
+
+
+async def test_list_for_agent_ranks_an_abandoned_conversation_below_an_active_one(tenant_a):
+    """A conversation whose first turn failed before any message was appended
+    has `last_message_at IS NULL`.
+
+    `ORDER BY last_message_at DESC` is not merely imprecise here, it is
+    backwards: Postgres sorts DESC as NULLS FIRST, so every abandoned
+    conversation outranks every real one and pins itself to the top of the
+    list forever. `COALESCE(last_message_at, created_at)` ranks it by when it
+    was actually started.
+
+    Each conversation is created in its own transaction on purpose: `now()`
+    is transaction-scoped in Postgres, so rows written in one transaction
+    share a timestamp and no ordering test over them can observe anything.
+    """
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+        agent_id = agent.id
+        abandoned = await ConversationService(session, tenant_a).create(
+            agent_id, CreateConversationInput(channel=ConversationChannel.PLAYGROUND)
+        )
+        abandoned_id = abandoned.id
+
+    async with tenant_session(tenant_a) as session:
+        service = ConversationService(session, tenant_a)
+        active = await service.create(
+            agent_id, CreateConversationInput(channel=ConversationChannel.PLAYGROUND)
+        )
+        await service.append_message(
+            active.id, AppendMessageInput(role=MessageRole.USER, content="first")
+        )
+        active_id = active.id
+
+    async with tenant_session(tenant_a) as session:
+        rows = await ConversationService(session, tenant_a).list_for_agent(agent_id)
+
+    assert [row.id for row in rows] == [active_id, abandoned_id]
+
+
+async def test_list_for_agent_paginates(tenant_a):
+    async with tenant_session(tenant_a) as session:
+        service = ConversationService(session, tenant_a)
+        agent = await _agent(session, tenant_a)
+        created = [
+            await service.create(
+                agent.id, CreateConversationInput(channel=ConversationChannel.PLAYGROUND)
+            )
+            for _ in range(3)
+        ]
+
+        page = await service.list_for_agent(agent.id, limit=1, offset=1)
+
+    # Newest first, so offset 1 is the middle one of the three.
+    assert [row.id for row in page] == [created[1].id]

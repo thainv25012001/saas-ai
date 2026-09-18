@@ -8,7 +8,14 @@ from app.conversations.schemas import AppendMessageInput, CreateConversationInpu
 from app.core.errors import ConflictError, NotFoundError
 from app.core.ids import uuid7
 from app.core.tenancy import TenantContext
-from app.db.models import Agent, Conversation, ConversationMessage, ConversationStatus, UsageEvent
+from app.db.models import (
+    Agent,
+    Conversation,
+    ConversationChannel,
+    ConversationMessage,
+    ConversationStatus,
+    UsageEvent,
+)
 
 
 class ConversationService:
@@ -58,15 +65,39 @@ class ConversationService:
             raise NotFoundError("conversation not found")
         return conversation
 
-    async def list_for_agent(self, agent_id: uuid.UUID) -> list[Conversation]:
-        result = await self.session.execute(
-            select(Conversation)
-            .where(
-                Conversation.agent_id == agent_id,
-                Conversation.organization_id == self.tenant.organization_id,
-            )
-            .order_by(Conversation.created_at.desc())
+    async def list_for_agent(
+        self,
+        agent_id: uuid.UUID,
+        *,
+        channel: ConversationChannel | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Conversation]:
+        """Most recently active first.
+
+        `channel` exists so the playground can list its own test conversations
+        without real customer traffic on the same agent burying them once the
+        embedded widget ships.
+        """
+        stmt = select(Conversation).where(
+            Conversation.agent_id == agent_id,
+            Conversation.organization_id == self.tenant.organization_id,
         )
+        if channel is not None:
+            stmt = stmt.where(Conversation.channel == channel)
+        # COALESCE, not `last_message_at DESC`: a conversation whose first turn
+        # failed before any message was appended has `last_message_at IS NULL`,
+        # and ordering on that column alone sorts it to the bottom -- or off a
+        # limited page entirely -- although it is the most recent thing the
+        # user did. Ordering by creation alone has the opposite flaw: a long
+        # conversation someone came back to today would sit below one they
+        # started this morning and abandoned.
+        stmt = stmt.order_by(
+            func.coalesce(Conversation.last_message_at, Conversation.created_at).desc()
+        ).offset(offset)
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
     async def next_seq(self, conversation_id: uuid.UUID) -> int:
