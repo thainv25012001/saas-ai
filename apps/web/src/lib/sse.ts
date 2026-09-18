@@ -266,6 +266,13 @@ export type StreamChatParams = {
    * does -- otherwise the fresh token dies with this call and the next send
    * repeats the whole refresh. */
   onAccessToken?: (token: string) => void;
+  /** Answer this one turn with a provider/model other than the agent's
+   * configured pair, without changing the agent -- the playground's model
+   * picker. Absent means "the agent's own", and the fields are then left out
+   * of the body entirely rather than sent as nulls: the API rejects a
+   * present-but-empty `model`, and every other caller sends no override at
+   * all. Build it with `overrideFields` from `./model-selection`. */
+  override?: { provider?: string; model?: string };
   signal?: AbortSignal;
 };
 
@@ -280,8 +287,28 @@ export type StreamChatParams = {
  * shape (`type: "error"`) so callers only ever have to handle one shape.
  */
 export async function streamChat(params: StreamChatParams): Promise<void> {
-  const { agentId, message, conversationId, accessToken, apiUrl, onEvent, onAccessToken, signal } =
-    params;
+  const {
+    agentId,
+    message,
+    conversationId,
+    accessToken,
+    apiUrl,
+    onEvent,
+    onAccessToken,
+    override,
+    signal,
+  } = params;
+
+  // Built once, outside `send`, so the retry after a silent refresh below
+  // sends the same turn -- an override rebuilt only on the first attempt
+  // would answer the retried turn on a different model than the one the
+  // caller asked for.
+  const body = JSON.stringify({
+    agent_id: agentId,
+    message,
+    conversation_id: conversationId ?? null,
+    ...override,
+  });
 
   const send = (token: string): Promise<Response> =>
     fetch(`${apiUrl}/api/v1/chat/stream`, {
@@ -291,11 +318,7 @@ export async function streamChat(params: StreamChatParams): Promise<void> {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({
-        agent_id: agentId,
-        message,
-        conversation_id: conversationId ?? null,
-      }),
+      body,
       signal,
     });
 

@@ -355,3 +355,88 @@ describe("streamChat token refresh", () => {
     expect(events).toEqual([{ type: "error", code: "unauthenticated", message: "expired" }]);
   });
 });
+
+describe("streamChat request body", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const ok = () =>
+    new Response('data: {"type": "text_delta", "text": "hi"}\n\n', {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+
+  function stubOnce() {
+    const bodies: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", async (_url: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return ok();
+    });
+    return bodies;
+  }
+
+  const base = {
+    agentId: "a1",
+    message: "hello",
+    conversationId: null,
+    accessToken: "token",
+    apiUrl: "http://api.test",
+    onEvent: () => {},
+  };
+
+  it("omits provider and model when no override is given", async () => {
+    // The API treats a present-but-empty model as a bad request, and every
+    // non-playground caller sends no override at all -- so "no override" has
+    // to mean absent keys, not nulls.
+    const bodies = stubOnce();
+
+    await streamChat(base);
+
+    expect(bodies[0]).toEqual({ agent_id: "a1", message: "hello", conversation_id: null });
+  });
+
+  it("sends an override as snake_case provider and model", async () => {
+    const bodies = stubOnce();
+
+    await streamChat({ ...base, override: { provider: "anthropic", model: "claude-sonnet-5" } });
+
+    expect(bodies[0]).toEqual({
+      agent_id: "a1",
+      message: "hello",
+      conversation_id: null,
+      provider: "anthropic",
+      model: "claude-sonnet-5",
+    });
+  });
+
+  it("carries the override through a silent token refresh", async () => {
+    // The retry after a 401 rebuilds the body from scratch. A version that
+    // rebuilt it without the override would answer the retried turn on the
+    // agent's model while the header still claimed the overridden one.
+    const bodies: Record<string, unknown>[] = [];
+    let call = 0;
+    vi.stubGlobal("fetch", async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).endsWith("/api/v1/auth/refresh")) {
+        return new Response(JSON.stringify({ access_token: "fresh" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      call += 1;
+      if (call === 1) {
+        return new Response(JSON.stringify({ error: { code: "unauthenticated", message: "x" } }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return ok();
+    });
+
+    await streamChat({ ...base, override: { provider: "openai", model: "gpt-4o" } });
+
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).toMatchObject({ provider: "openai", model: "gpt-4o" });
+  });
+});

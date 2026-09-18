@@ -189,7 +189,17 @@ class ChatService:
         user_text: str,
         conversation_id: uuid.UUID | None = None,
         channel: ConversationChannel = ConversationChannel.API,
+        override_provider: str | None = None,
+        override_model: str | None = None,
     ) -> AsyncIterator[ChatEvent]:
+        """`override_provider`/`override_model` answer this one turn with
+        something other than the agent's configured pair, without writing
+        anything back to the agent -- what the playground's model picker sends
+        so a model can be tried before it is committed to. Distinct from
+        `provider_override` on `__init__`, which injects a whole `LLMProvider`
+        object (tests, and nothing else); these are the *names* a caller may
+        pass per request.
+        """
         # Step 1: load the agent and its config. Both raise NotFoundError
         # (cross-tenant, or a config row that does not exist) before any
         # conversation row is created -- a misconfigured or foreign agent_id
@@ -197,10 +207,21 @@ class ChatService:
         agent = await self._agents.get_agent(agent_id)
         await self._agents.get_config(agent_id)
 
+        # What actually answers this turn. Resolved once, here, and used
+        # everywhere below in place of `agent.provider`/`agent.model` -- the
+        # persisted message and the `usage_events` row included, so billing
+        # data records what was billed rather than what the agent is
+        # configured for.
+        provider_name = override_provider or agent.provider
+        model_name = override_model or agent.model
+
         # Resolve the provider before anything is written: a missing API key
         # (LLMConfigurationError) must surface as an operator problem, not
         # disguise itself as a conversation that was created and then failed.
-        provider = self._provider_override or get_provider(agent.provider)
+        # An override naming a provider with no key configured fails here, in
+        # the same pre-stream span, for the same reason -- so it comes back as
+        # a JSON error envelope and not an in-band event.
+        provider = self._provider_override or get_provider(provider_name)
 
         system_prompt, prompt_version_id = await self._resolve_system_prompt(agent)
 
@@ -255,7 +276,7 @@ class ChatService:
         request_messages.append(LLMMessage.text("user", user_text))
 
         request = CompletionRequest(
-            model=agent.model,
+            model=model_name,
             messages=request_messages,
             system=system_prompt,
             max_tokens=agent.max_tokens,
@@ -264,7 +285,7 @@ class ChatService:
 
         accumulated: list[str] = []
         usage = Usage()
-        model_used = agent.model
+        model_used = model_name
         finish_reason: str | None = None
         chat_error: ChatError | None = None
         started_at = time.monotonic()
@@ -300,7 +321,7 @@ class ChatService:
                     role=MessageRole.ASSISTANT,
                     content=final_text,
                     prompt_version_id=prompt_version_id,
-                    provider=agent.provider,
+                    provider=provider_name,
                     model=model_used,
                     input_tokens=usage.input_tokens,
                     output_tokens=usage.output_tokens,
@@ -322,7 +343,7 @@ class ChatService:
                     agent_id=agent.id,
                     conversation_id=conversation.id,
                     kind=UsageKind.LLM,
-                    provider=agent.provider,
+                    provider=provider_name,
                     model=model_used,
                     input_tokens=usage.input_tokens,
                     output_tokens=usage.output_tokens,
@@ -349,7 +370,7 @@ class ChatService:
                     role=MessageRole.ASSISTANT,
                     content=final_text,
                     prompt_version_id=prompt_version_id,
-                    provider=agent.provider,
+                    provider=provider_name,
                     model=model_used,
                     latency_ms=latency_ms,
                     error=chat_error.message,

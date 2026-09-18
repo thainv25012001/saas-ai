@@ -163,6 +163,17 @@ saw on screen.
 {"type": "error",          "code": "llm_unavailable", "message": "..."}
 ```
 
+The request body is `{agent_id, message, conversation_id?}` plus an optional
+`{provider?, model?}` pair, which answers that one turn on something other than the agent's
+configured model and writes nothing back to the agent. It exists for the playground's model
+picker: trying a model on a real conversation must not repoint every other channel the agent
+answers on. An unrecognised `provider` is rejected as a 422 before the stream is committed,
+the same way the agent schemas reject it; `model` is deliberately *not* checked against
+`app/llm/catalog.py`, because OpenRouter's catalog is a live fetch and validating it here
+would put a network round-trip in front of every chat request. What actually answered is
+recorded on the message and the `usage_events` row — not what the agent is configured for, or
+billing would attribute real spend to the wrong model.
+
 Headers that matter and are easy to omit: `Cache-Control: no-cache`,
 `X-Accel-Buffering: no`, and no compression on this route — without them a proxy buffers
 the whole response and streaming silently degrades to a single delayed blob.

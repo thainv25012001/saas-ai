@@ -1,6 +1,7 @@
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -13,6 +14,7 @@ from app.core.config import get_settings
 from app.core.errors import AppError, format_validation_errors
 from app.core.logging import configure_logging, get_logger, request_id_var
 from app.core.security_headers import add_security_headers
+from app.workers.embedded import embedded_worker
 
 # Starlette raises HTTPException for framework-level failures that never
 # reach a route: unknown paths and wrong methods. Map each status onto the
@@ -47,7 +49,18 @@ def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
 
-    app = FastAPI(title="AI Sales Agent API", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        """Background work that lives exactly as long as the server does.
+
+        `embedded_worker` is a no-op unless `RUN_EMBEDDED_WORKER` is set --
+        see that module for why a single-service deploy needs the arq
+        worker in this process, and what it costs.
+        """
+        async with embedded_worker():
+            yield
+
+    app = FastAPI(title="AI Sales Agent API", version="0.1.0", lifespan=lifespan)
 
     add_security_headers(app, settings.environment)
 

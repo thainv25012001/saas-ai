@@ -3,6 +3,7 @@
 import { useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "urql";
+import { ModelPicker } from "@/components/agents/ModelPicker";
 import { ChatMessage, type ChatMessageData } from "@/components/chat/ChatMessage";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
@@ -12,14 +13,22 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Icon } from "@/components/ui/icons";
 import { Select, Textarea } from "@/components/ui/Input";
 import { LoadingState } from "@/components/ui/Spinner";
-import { AgentsDocument } from "@/graphql/generated";
+import {
+  AgentsDocument,
+  ConfiguredProvidersDocument,
+  ProviderModelsDocument,
+} from "@/graphql/generated";
 import { agentStatusLabel, agentStatusTone } from "@/lib/agent-status";
 import { API_URL } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { NEW_CONVERSATION, resolveTurnOutcome, type TurnState } from "@/lib/chat-turn";
 import { sessionTotals } from "@/lib/chat-totals";
 import { firstGraphQLError } from "@/lib/graphql-errors";
+import { isOverridden, type ModelSelection, overrideFields } from "@/lib/model-selection";
+import { editableProviders, providerLabel } from "@/lib/providers";
 import { streamChat } from "@/lib/sse";
+import { useComposerFocus } from "@/lib/use-composer-focus";
+import { useStickToBottom } from "@/lib/use-stick-to-bottom";
 
 function newId(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -53,6 +62,37 @@ function PlaygroundContent() {
   const [isStreaming, setIsStreaming] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
+  // The provider/model this playground is answering on. Seeded from the
+  // selected agent by the effect below, and never written back to it: the
+  // point of a playground is to try a model on a real conversation *before*
+  // committing the agent to it. `sendMessage` carries the difference as a
+  // per-request override; the agent row is untouched either way.
+  const [selection, setSelection] = useState<ModelSelection>({ provider: "", model: "" });
+
+  const [providersResult] = useQuery({
+    query: ConfiguredProvidersDocument,
+    pause: loading || !user,
+  });
+  const providers = useMemo(
+    () => providersResult.data?.configuredProviders ?? [],
+    [providersResult.data],
+  );
+  const [modelsResult] = useQuery({
+    query: ProviderModelsDocument,
+    variables: { provider: selection.provider },
+    pause: selection.provider === "",
+  });
+
+  // Follows the transcript as tokens arrive, but only while the reader is at
+  // the bottom -- see `useStickToBottom` for why the unconditional version is
+  // worse than none on a stream.
+  const transcript = useStickToBottom(messages);
+  const stickToBottom = transcript.stick;
+
+  // The composer is disabled while a turn streams, and a disabled element
+  // loses focus without getting it back -- see `useComposerFocus`.
+  const composerRef = useComposerFocus(isStreaming);
+
   // Preselect from ?agentId=... (set by the "Test in playground" link on an
   // agent's detail page), falling back to the first agent once the query
   // resolves. Only ever runs while nothing is selected yet, so it never
@@ -67,6 +107,23 @@ function PlaygroundContent() {
     }
   }, [agentId, agents, searchParams]);
 
+  const selectedAgent = agents.find((candidate) => String(candidate.id) === agentId);
+  const agentSelection: ModelSelection = {
+    provider: selectedAgent?.provider ?? "",
+    model: selectedAgent?.model ?? "",
+  };
+
+  // Seed the picker from whichever agent is selected, and re-seed whenever
+  // that changes -- switching agents already clears the transcript, so
+  // carrying the previous agent's model across would leave the header
+  // describing a turn nobody sent.
+  const seededFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (selectedAgent === undefined || seededFor.current === agentId) return;
+    seededFor.current = agentId;
+    setSelection({ provider: selectedAgent.provider, model: selectedAgent.model });
+  }, [agentId, selectedAgent]);
+
   function onSelectAgent(nextAgentId: string) {
     if (nextAgentId === agentId) return;
     setAgentId(nextAgentId);
@@ -75,11 +132,20 @@ function PlaygroundContent() {
     // into one conversation_id.
     setConversation(NEW_CONVERSATION);
     setMessages([]);
+    stickToBottom();
   }
 
   function onNewConversation() {
     setConversation(NEW_CONVERSATION);
     setMessages([]);
+    stickToBottom();
+  }
+
+  function onSelectProvider(nextProvider: string) {
+    // The model belongs to the provider that serves it, so it cannot survive
+    // the switch. Blank until the new provider's list resolves, which
+    // `ModelPicker` renders as a placeholder rather than a silently wrong id.
+    setSelection({ provider: nextProvider, model: "" });
   }
 
   const finalizeStreamingMessage = useCallback((id: string) => {
@@ -108,6 +174,9 @@ function PlaygroundContent() {
       status: "streaming",
     };
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    // Sending is an unambiguous request to see the answer, so it re-arms
+    // following even for a reader who had scrolled up to re-read something.
+    stickToBottom();
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -130,6 +199,9 @@ function PlaygroundContent() {
         apiUrl: API_URL,
         signal: controller.signal,
         onAccessToken: setAccessToken,
+        // Empty unless the picker has been moved off the agent's own pair, so
+        // an untouched playground sends exactly the request it always did.
+        override: overrideFields(selection, agentSelection),
         onEvent: (event) => {
           switch (event.type) {
             case "message_start":
@@ -225,8 +297,6 @@ function PlaygroundContent() {
     abortRef.current?.abort();
   }
 
-  const selectedAgent = agents.find((candidate) => String(candidate.id) === agentId);
-
   // The playground's job is to tell you what a real conversation costs. The
   // numbers were already arriving per turn and were never added up.
   const totals = sessionTotals(
@@ -285,7 +355,60 @@ function PlaygroundContent() {
             <Badge tone={agentStatusTone(selectedAgent.status)}>
               {agentStatusLabel(selectedAgent.status)}
             </Badge>
-            <Badge>{selectedAgent.model}</Badge>
+
+            {/* A div, not a label: this group holds two controls, and a label
+              * can only ever name one of them. Each carries its own
+              * `aria-label` instead, and the heading below is decoration. */}
+            <div className="flex items-center gap-2 text-sm text-ink-muted">
+              <span className="font-medium">Model</span>
+              {/* Not disabled while streaming, unlike Agent above: the
+                * override is read when a turn is sent, so changing it mid-
+                * stream affects only the next one -- there is nothing to
+                * protect by locking it, and locking a control that works is
+                * its own small lie. */}
+              <Select
+                value={selection.provider}
+                onChange={(e) => onSelectProvider(e.target.value)}
+                width="auto"
+                aria-label="Provider"
+              >
+                {/* Same list the agent form offers, disabled entries and all:
+                  * a provider with no API key is named and greyed out rather
+                  * than hidden, so picking it is impossible and its absence is
+                  * never a mystery. */}
+                {editableProviders(providers, agentSelection.provider).map((option) => (
+                  <option key={option.id} value={option.id} disabled={!option.configured}>
+                    {option.configured
+                      ? providerLabel(option.id)
+                      : `${providerLabel(option.id)} — no API key`}
+                  </option>
+                ))}
+              </Select>
+              <ModelPicker
+                value={selection.model}
+                onChange={(model) => setSelection((prev) => ({ ...prev, model }))}
+                options={modelsResult.data?.providerModels ?? []}
+                fetching={modelsResult.fetching}
+                failed={modelsResult.error !== undefined}
+                aria-label="Model"
+              />
+            </div>
+
+            {isOverridden(selection, agentSelection) ? (
+              // Says plainly that the agent has not been changed. Without it
+              // the header is indistinguishable from having edited the agent,
+              // which is the one thing this picker deliberately does not do.
+              <span className="flex items-center gap-1.5 text-xs text-ink-subtle">
+                <span>this session only</span>
+                <button
+                  type="button"
+                  onClick={() => setSelection(agentSelection)}
+                  className={`rounded-control px-1.5 py-0.5 underline underline-offset-2 hover:text-ink ${focusRing}`}
+                >
+                  {`back to ${agentSelection.model}`}
+                </button>
+              </span>
+            ) : null}
           </>
         ) : null}
 
@@ -313,7 +436,11 @@ function PlaygroundContent() {
         </div>
       </div>
 
-      <div className="min-h-0 space-y-5 overflow-y-auto bg-surface-muted px-6 py-6">
+      <div
+        ref={transcript.ref}
+        onScroll={transcript.onScroll}
+        className="min-h-0 space-y-5 overflow-y-auto bg-surface-muted px-6 py-6"
+      >
         {messages.length === 0 ? (
           <EmptyState
             icon="playground"
@@ -350,6 +477,7 @@ function PlaygroundContent() {
           <label className="flex-1">
             <span className="sr-only">Message</span>
             <Textarea
+              ref={composerRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {

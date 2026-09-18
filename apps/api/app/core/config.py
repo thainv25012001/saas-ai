@@ -131,6 +131,15 @@ class Settings(BaseSettings):
     # headroom rather than running right up against 7 (the exact floor).
     # Change this alongside `pool_size`/`max_overflow` if either moves.
     worker_max_jobs: int = 5
+    # Run the arq worker inside this process instead of as its own
+    # container. Off by default, because docker-compose already runs
+    # `worker` separately and turning this on there would drain one queue
+    # from two processes. On for single-service deploys, where a separate
+    # worker container could not see the uploaded bytes at all -- see
+    # `app/workers/embedded.py` for the full trade-off. Note that
+    # `worker_max_jobs`' connection arithmetic gets tighter when this is
+    # on: HTTP request handling draws from the same 15-connection pool.
+    run_embedded_worker: bool = False
     # The relevance floor on the *vector* arm of hybrid retrieval, as a
     # pgvector cosine distance (`<=>`, 0 = identical, 1 = orthogonal). A
     # candidate further away than this is dropped before fusion, because
