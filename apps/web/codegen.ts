@@ -15,6 +15,13 @@ const config: CodegenConfig = {
       // (Agent, Query, Mutation, ...) directly, so dropping the base plugin
       // loses nothing this app uses.
       plugins: ["typescript-operations", "typed-document-node"],
+      config: {
+        // Without this every custom scalar lands as `unknown`, and each id
+        // then needs a `String(...)` at its use site -- a cast that says
+        // nothing and can never fail. Naming the two scalars this schema
+        // actually has is the one place to fix that.
+        scalars: { UUID: "string", DateTime: "string" },
+      },
     },
   },
 };

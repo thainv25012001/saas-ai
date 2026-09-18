@@ -151,10 +151,10 @@ async def title_conversation_task(
             # retry, not a title invented from an empty conversation.
             logger.info("conversation_title_skipped_no_messages", conversation_id=conversation_id)
             return
-        first_assistant = next((m for m in messages if m.role is MessageRole.ASSISTANT), None)
-
         user_text = first_user.content or ""
-        assistant_text = (first_assistant.content if first_assistant else "") or ""
+        assistant_text = next(
+            (m.content or "" for m in messages if m.role is MessageRole.ASSISTANT), ""
+        )
 
         agent = await AgentService(session, tenant).get_agent(conversation.agent_id)
         title: str | None = None

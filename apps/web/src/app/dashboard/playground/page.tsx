@@ -2,7 +2,7 @@
 
 import { useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "urql";
+import { useClient, useQuery } from "urql";
 import { ModelPicker } from "@/components/agents/ModelPicker";
 import { ChatMessage, type ChatMessageData } from "@/components/chat/ChatMessage";
 import { ConversationPanel } from "@/components/chat/ConversationPanel";
@@ -124,38 +124,37 @@ function PlaygroundContent() {
     () => window.innerWidth < 1024,
   );
 
-  // Paused until a row is actually chosen: this is the full transcript, and
-  // nothing should fetch one just because a list is on screen.
+  // Fetched in the handler, not through a paused query and an effect. Opening
+  // a conversation is an event, and expressing it as state to subscribe to had
+  // a bug in it: urql re-emits the same `data` object for a repeated query, so
+  // "open a row, start a new conversation, click that row again" changed no
+  // dependency and the effect never re-ran -- the click did nothing.
+  const client = useClient();
+  // Only so the panel can highlight the row you clicked while its transcript
+  // is still in flight. Not a second source of truth for what is on screen.
   const [openingId, setOpeningId] = useState<string | null>(null);
-  const [transcriptResult] = useQuery({
-    query: ConversationDocument,
-    variables: { id: openingId ?? "" },
-    pause: openingId === null,
-  });
 
-  // Load the fetched transcript into the view once, when it arrives. Keyed on
-  // the id rather than on the data, so re-rendering for any other reason does
-  // not replay it over messages the user has since added.
-  const loadedId = useRef<string | null>(null);
-  useEffect(() => {
-    const loaded = transcriptResult.data?.conversation;
-    if (loaded === undefined || loaded === null) return;
-    const id = String(loaded.id);
-    if (loadedId.current === id) return;
-    loadedId.current = id;
-    setMessages(toTranscript(loaded.messages));
-    // Committed by definition: it is a conversation the server has already
-    // written turns into, so the next message continues this thread rather
-    // than opening a new one.
-    setConversation({ conversationId: id, committed: true });
-    stickToBottom();
-  }, [transcriptResult.data, stickToBottom]);
-
-  function onOpenConversation(conversationId: string) {
+  async function onOpenConversation(conversationId: string) {
     if (conversationId === conversation.conversationId) return;
     abortRef.current?.abort();
-    loadedId.current = null;
     setOpeningId(conversationId);
+    try {
+      const result = await client
+        .query(ConversationDocument, { id: conversationId })
+        .toPromise();
+      const loaded = result.data?.conversation;
+      // Deleted, or never yours: the list is a snapshot and the row may be
+      // stale. Leaving the transcript alone is the honest response.
+      if (!loaded) return;
+      setMessages(toTranscript(loaded.messages));
+      // Committed by definition: it is a conversation the server has already
+      // written turns into, so the next message continues this thread rather
+      // than opening a new one.
+      setConversation({ conversationId: String(loaded.id), committed: true });
+      stickToBottom();
+    } finally {
+      setOpeningId(null);
+    }
   }
 
   // Preselect from ?agentId=... (set by the "Test in playground" link on an
@@ -189,25 +188,19 @@ function PlaygroundContent() {
     setSelection({ provider: selectedAgent.provider, model: selectedAgent.model });
   }, [agentId, selectedAgent]);
 
+  function onNewConversation() {
+    setConversation(NEW_CONVERSATION);
+    setMessages([]);
+    stickToBottom();
+  }
+
   function onSelectAgent(nextAgentId: string) {
     if (nextAgentId === agentId) return;
     setAgentId(nextAgentId);
     // A conversation belongs to one agent's history/prompt; switching agents
     // starts a fresh thread rather than silently mixing two agents' turns
     // into one conversation_id.
-    setConversation(NEW_CONVERSATION);
-    setMessages([]);
-    setOpeningId(null);
-    loadedId.current = null;
-    stickToBottom();
-  }
-
-  function onNewConversation() {
-    setConversation(NEW_CONVERSATION);
-    setMessages([]);
-    setOpeningId(null);
-    loadedId.current = null;
-    stickToBottom();
+    onNewConversation();
   }
 
   function onSelectProvider(nextProvider: string) {
@@ -258,6 +251,11 @@ function PlaygroundContent() {
     // something real.
     let seenConversationId = conversation.conversationId;
     let sawMessageEnd = false;
+    // Whether this turn can add a row to the list. A continuation only
+    // reorders it, and the current conversation is already the highlighted
+    // row -- refetching for that spent a GraphQL round trip and two queries
+    // per turn to change nothing visible.
+    const startsConversation = conversation.conversationId === null;
 
     try {
       await streamChat({
@@ -359,11 +357,12 @@ function PlaygroundContent() {
       );
       setIsStreaming(false);
       abortRef.current = null;
-      // A turn ending is when a new conversation appears in the list and when
-      // an existing one moves to the top. Deliberately not polled afterwards
-      // for the title: it is written by a background job, and until it lands
-      // the row reads as its first question rather than as nothing.
-      refetchHistory({ requestPolicy: "network-only" });
+      // Deliberately not polled afterwards for the title: it is written by a
+      // background job, and until it lands the row reads as its first question
+      // rather than as nothing.
+      if (startsConversation && sawMessageEnd) {
+        refetchHistory({ requestPolicy: "network-only" });
+      }
     }
   }
 
@@ -408,7 +407,7 @@ function PlaygroundContent() {
     <section className="flex h-full">
       <ConversationPanel
         conversations={history}
-        currentId={conversation.conversationId}
+        currentId={openingId ?? conversation.conversationId}
         fetching={historyResult.fetching}
         collapsed={panelCollapsed}
         onToggle={() => setPanelCollapsed(!panelCollapsed)}

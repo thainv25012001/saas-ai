@@ -18,6 +18,10 @@ from app.db.models import (
     MessageRole,
 )
 
+#: How much of a first question the list needs. The panel truncates to one
+#: line; this is the bound on what crosses the wire to get there.
+_PREVIEW_MAX_LENGTH = 200
+
 
 class Context(BaseContext):
     """Per-request state. One tenant-bound session for the whole operation,
@@ -50,6 +54,42 @@ class Context(BaseContext):
         self.preview_loader: DataLoader[uuid.UUID, str | None] | None = (
             DataLoader(load_fn=self._load_previews) if session is not None else None
         )
+        self.messages_loader: DataLoader[uuid.UUID, list[ConversationMessage]] | None = (
+            DataLoader(load_fn=self._load_messages) if session is not None else None
+        )
+
+    async def _load_messages(
+        self, conversation_ids: Sequence[uuid.UUID]
+    ) -> list[list[ConversationMessage]]:
+        """Every transcript in the query, oldest-first, in one round trip.
+
+        Resolved through `ConversationService.history` instead, this cost two
+        queries per conversation -- `history` re-checks the tenant with its own
+        `get()` before selecting, on a conversation the resolver has already
+        loaded under the same predicate -- so `conversations { messages }`,
+        which the schema permits, was 1 + 20x2 queries for a page of 20.
+
+        The tenant check is not lost by skipping `history`: the predicate below
+        carries `organization_id` itself, exactly like the loaders beside it.
+
+        `(conversation_id, seq)` is the `uq_message_conversation_seq` index, so
+        the ordering is served directly rather than sorted.
+        """
+        assert self.session is not None
+        assert self.tenant is not None
+        result = await self.session.execute(
+            select(ConversationMessage)
+            .where(
+                ConversationMessage.conversation_id.in_(list(conversation_ids)),
+                ConversationMessage.organization_id == self.tenant.organization_id,
+            )
+            .order_by(ConversationMessage.conversation_id, ConversationMessage.seq)
+        )
+        by_conversation: dict[uuid.UUID, list[ConversationMessage]] = {}
+        for message in result.scalars().all():
+            by_conversation.setdefault(message.conversation_id, []).append(message)
+        # One slot per requested id, in order: DataLoader matches positionally.
+        return [by_conversation.get(conversation_id, []) for conversation_id in conversation_ids]
 
     async def _load_previews(self, conversation_ids: Sequence[uuid.UUID]) -> list[str | None]:
         """The first question asked in each conversation, for the list's
@@ -70,7 +110,13 @@ class Context(BaseContext):
         assert self.session is not None
         assert self.tenant is not None
         result = await self.session.execute(
-            select(ConversationMessage.conversation_id, ConversationMessage.content)
+            select(
+                ConversationMessage.conversation_id,
+                # Cut in the database: the panel renders this `truncate`d on
+                # one line, so a page of long first questions would otherwise
+                # ship tens of KB to draw 20 labels.
+                func.left(ConversationMessage.content, _PREVIEW_MAX_LENGTH).label("content"),
+            )
             .where(
                 ConversationMessage.conversation_id.in_(list(conversation_ids)),
                 ConversationMessage.organization_id == self.tenant.organization_id,

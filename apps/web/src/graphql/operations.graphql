@@ -51,7 +51,7 @@ mutation DeleteDocument($id: UUID!) {
 
 query Conversations($agentId: UUID!, $channel: ConversationChannel, $limit: Int, $offset: Int) {
   conversations(agentId: $agentId, channel: $channel, limit: $limit, offset: $offset) {
-    id title preview lastMessageAt createdAt
+    id title preview
   }
 }
 

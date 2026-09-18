@@ -80,6 +80,12 @@ def _render_template(template: str, variables: Mapping[str, str]) -> str:
 class ChatMessageStart:
     conversation_id: uuid.UUID
     message_id: uuid.UUID
+    #: Whether this turn is the one that created the conversation, rather than
+    #: continuing one. Carried here because this is already the event that
+    #: announces which conversation the turn belongs to, and the caller needs
+    #: it to decide whether to ask for a title. Defaulted, so nothing that
+    #: constructs a `ChatMessageStart` without it has to change.
+    created: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,12 +184,6 @@ class ChatService:
         self.tenant = tenant
         self._provider_override = provider_override
         self._history_window = history_window
-        # Set by `send()` when this turn is the one that created the
-        # conversation, and read by the caller *after* the transaction
-        # commits -- see `app/api/chat.py`. Plain values rather than the ORM
-        # object: by the time it is read the session is closed, and a
-        # detached instance would raise on attribute access.
-        self.created_conversation: tuple[uuid.UUID, ConversationChannel] | None = None
         self._agents = AgentService(session, tenant)
         self._prompts = PromptService(session, tenant)
         self._conversations = ConversationService(session, tenant)
@@ -233,12 +233,13 @@ class ChatService:
 
         # Step 4: create or load the conversation (404s cross-tenant for an
         # existing id, via ConversationService.get).
-        if conversation_id is None:
+        created = conversation_id is None
+        if created:
             conversation = await self._conversations.create(
                 agent_id, CreateConversationInput(channel=channel)
             )
-            self.created_conversation = (conversation.id, channel)
         else:
+            assert conversation_id is not None
             conversation = await self._conversations.get(conversation_id)
 
         # The assistant's message id is minted now, before its content is
@@ -246,7 +247,9 @@ class ChatService:
         # about to stream -- and the row persisted at the end (success or
         # failure) is created under this same id.
         message_id = uuid7()
-        yield ChatMessageStart(conversation_id=conversation.id, message_id=message_id)
+        yield ChatMessageStart(
+            conversation_id=conversation.id, message_id=message_id, created=created
+        )
 
         # Grounding happens here: after ChatMessageStart (so the caller
         # already knows which message is coming) and before history/the

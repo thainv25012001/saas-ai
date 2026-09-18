@@ -1,7 +1,6 @@
 import enum
 import uuid
 from datetime import datetime
-from decimal import Decimal
 
 import strawberry
 
@@ -321,7 +320,7 @@ class Message:
             model=model.model,
             input_tokens=model.input_tokens,
             output_tokens=model.output_tokens,
-            cost_usd=_decimal_to_str(model.cost_usd),
+            cost_usd=None if model.cost_usd is None else str(model.cost_usd),
             latency_ms=model.latency_ms,
             finish_reason=model.finish_reason,
             error=model.error,
@@ -337,10 +336,6 @@ class Message:
             raise AuthenticationError("authentication required")
         rows = await info.context.citation_loader.load(self.id)
         return [MessageCitation.from_model(row) for row in rows]
-
-
-def _decimal_to_str(value: Decimal | None) -> str | None:
-    return None if value is None else str(value)
 
 
 @strawberry.type
@@ -378,14 +373,14 @@ class Conversation:
 
     @strawberry.field
     async def messages(self, info: strawberry.Info[Context, None]) -> list[Message]:
-        # No limit: `history`'s limit exists to bound what is sent to the
-        # model as context. Someone reading their own history is not paying
-        # for it as tokens.
-        if info.context.session is None or info.context.tenant is None:
+        # Batched, like `preview` above and `citations` on `Message`: fetched
+        # per conversation, `conversations { messages }` would be a query per
+        # row. Unbounded by design -- a limit exists to bound what is sent to
+        # the model as context, and someone reading their own history is not
+        # paying for it as tokens.
+        if info.context.messages_loader is None:
             raise AuthenticationError("authentication required")
-        from app.conversations.service import ConversationService
-
-        rows = await ConversationService(info.context.session, info.context.tenant).history(self.id)
+        rows = await info.context.messages_loader.load(self.id)
         return [Message.from_model(row) for row in rows]
 
 

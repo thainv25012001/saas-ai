@@ -236,39 +236,36 @@ async def _pump(events: AsyncIterator[ChatEvent], queue: "asyncio.Queue[_QueueIt
                 queue.put_nowait(_STREAM_DONE)
 
 
-async def _queue_title_if_new(service: ChatService, *, committed: bool) -> None:
+async def _queue_title(
+    conversation_id: uuid.UUID | None, organization_id: uuid.UUID, *, committed: bool
+) -> None:
     """Ask for a title for a conversation this turn created.
 
-    Two conditions, both load-bearing:
+    `conversation_id` is `None` for every turn that did not create one, so the
+    caller's decision is already made by the time this is reached; `committed`
+    is the half only the teardown knows.
 
-    `committed` -- the job runs in the worker process against its own
-    session, so it can only see what this turn's transaction actually wrote.
-    A rolled-back turn took its conversation row with it, and enqueuing then
-    points the worker at a row that no longer exists. This is why the call
-    sits *after* `session_cm.__aexit__` rather than anywhere inside
-    `ChatService.send()`, mirroring the upload endpoint, which calls
-    `enqueue_ingest` outside its `tenant_session` block for the same reason.
+    Why it waits for the commit: the job runs in the worker process against
+    its own session, so it can only see what this turn's transaction actually
+    wrote. A rolled-back turn took its conversation row with it, and enqueuing
+    then points the worker at a row that no longer exists. That is why the
+    call sits *after* `session_cm.__aexit__`, mirroring the upload endpoint,
+    which calls `enqueue_ingest` outside its `tenant_session` block for the
+    same reason.
 
-    `created_conversation` -- only the turn that created the conversation
-    asks. The job's own `title IS NULL` check is the backstop that makes a
-    duplicate free; not enqueuing is the first line.
+    A turn that ended in an in-band `error` event still qualifies: its partial
+    reply is deliberately persisted, so the conversation is real, it appears
+    in the list, and it needs a label like any other.
 
-    A turn that ended in an in-band `error` event still qualifies: its
-    partial reply is deliberately persisted, so the conversation is real, it
-    appears in the list, and it needs a label like any other.
-
-    Never allowed to fail the request. The stream is finished and delivered
-    by this point, so a Redis outage must not turn a completed answer into a
+    Never allowed to fail the request. The stream is finished and delivered by
+    this point, so a Redis outage must not turn a completed answer into a
     failure -- and an untitled conversation still lists under its first
     message.
     """
-    if not committed or service.created_conversation is None:
-        return
-    conversation_id, channel = service.created_conversation
-    if not should_title(channel):
+    if conversation_id is None or not committed:
         return
     try:
-        await enqueue_title(conversation_id, service.tenant.organization_id)
+        await enqueue_title(conversation_id, organization_id)
     except Exception:  # noqa: BLE001 - logged, never surfaced; see docstring
         logger.warning(
             "conversation_title_enqueue_failed",
@@ -281,7 +278,8 @@ async def _stream_body(
     events: AsyncIterator[ChatEvent],
     first_event: ChatEvent,
     session_cm: AbstractAsyncContextManager[AsyncSession],
-    service: ChatService,
+    title_conversation_id: uuid.UUID | None,
+    organization_id: uuid.UUID,
 ) -> AsyncIterator[bytes]:
     """The actual SSE body, run only after `first_event` has already been
     pulled successfully -- so everything yielded here happens after the 200
@@ -386,7 +384,9 @@ async def _stream_body(
             # is guarded against leaking (see the leak test on the early
             # `events.__anext__()` failure below).
             await session_cm.__aexit__(*exc_info)
-            await _queue_title_if_new(service, committed=exc_info[0] is None)
+            await _queue_title(
+                title_conversation_id, organization_id, committed=exc_info[0] is None
+            )
 
 
 @router.post("/stream")
@@ -438,13 +438,27 @@ async def chat_stream(
         await session_cm.__aexit__(type(exc), exc, exc.__traceback__)
         raise
 
+    # Decided here, where the channel is a literal in this function rather than
+    # something round-tripped through the service and back. `should_title` is
+    # the policy -- which channels are worth paying to title -- and this route
+    # is the only caller that knows which channel it is.
+    title_conversation_id = (
+        first_event.conversation_id
+        if isinstance(first_event, ChatMessageStart)
+        and first_event.created
+        and should_title(ConversationChannel.PLAYGROUND)
+        else None
+    )
+
     headers = {
         "Cache-Control": "no-cache",
         "X-Accel-Buffering": "no",
         "Connection": "keep-alive",
     }
     return StreamingResponse(
-        _stream_body(events, first_event, session_cm, service),
+        _stream_body(
+            events, first_event, session_cm, title_conversation_id, tenant.organization_id
+        ),
         media_type="text/event-stream",
         headers=headers,
     )
