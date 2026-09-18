@@ -178,6 +178,12 @@ class ChatService:
         self.tenant = tenant
         self._provider_override = provider_override
         self._history_window = history_window
+        # Set by `send()` when this turn is the one that created the
+        # conversation, and read by the caller *after* the transaction
+        # commits -- see `app/api/chat.py`. Plain values rather than the ORM
+        # object: by the time it is read the session is closed, and a
+        # detached instance would raise on attribute access.
+        self.created_conversation: tuple[uuid.UUID, ConversationChannel] | None = None
         self._agents = AgentService(session, tenant)
         self._prompts = PromptService(session, tenant)
         self._conversations = ConversationService(session, tenant)
@@ -231,6 +237,7 @@ class ChatService:
             conversation = await self._conversations.create(
                 agent_id, CreateConversationInput(channel=channel)
             )
+            self.created_conversation = (conversation.id, channel)
         else:
             conversation = await self._conversations.get(conversation_id)
 

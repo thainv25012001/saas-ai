@@ -10,7 +10,13 @@ from strawberry.fastapi import BaseContext
 from app.auth.dependencies import tenant_from_bearer
 from app.core.errors import AuthenticationError
 from app.core.tenancy import TenantContext, tenant_session
-from app.db.models import AgentConfig, DocumentChunk
+from app.db.models import (
+    AgentConfig,
+    ConversationMessage,
+    DocumentChunk,
+    MessageCitation,
+    MessageRole,
+)
 
 
 class Context(BaseContext):
@@ -38,6 +44,78 @@ class Context(BaseContext):
         self.chunk_count_loader: DataLoader[uuid.UUID, int] | None = (
             DataLoader(load_fn=self._load_chunk_counts) if session is not None else None
         )
+        self.citation_loader: DataLoader[uuid.UUID, list[MessageCitation]] | None = (
+            DataLoader(load_fn=self._load_citations) if session is not None else None
+        )
+        self.preview_loader: DataLoader[uuid.UUID, str | None] | None = (
+            DataLoader(load_fn=self._load_previews) if session is not None else None
+        )
+
+    async def _load_previews(self, conversation_ids: Sequence[uuid.UUID]) -> list[str | None]:
+        """The first question asked in each conversation, for the list's
+        fallback label.
+
+        A field with a loader rather than something the client reads off
+        `messages`: resolved per row, a page of 20 conversations would issue
+        20 full-transcript queries just to render 20 labels.
+
+        `DISTINCT ON (conversation_id) ... ORDER BY conversation_id, seq`
+        takes the lowest `seq` per conversation in one pass -- the first
+        question, not the most recent, because a label says what the
+        conversation was about.
+
+        The explicit `organization_id` predicate is redundant with RLS and
+        deliberately so; see `_load_configs`.
+        """
+        assert self.session is not None
+        assert self.tenant is not None
+        result = await self.session.execute(
+            select(ConversationMessage.conversation_id, ConversationMessage.content)
+            .where(
+                ConversationMessage.conversation_id.in_(list(conversation_ids)),
+                ConversationMessage.organization_id == self.tenant.organization_id,
+                ConversationMessage.role == MessageRole.USER,
+            )
+            .distinct(ConversationMessage.conversation_id)
+            .order_by(ConversationMessage.conversation_id, ConversationMessage.seq)
+        )
+        first_question = {row.conversation_id: row.content for row in result}
+        # One slot per requested id, in order: DataLoader matches positionally.
+        return [first_question.get(conversation_id) for conversation_id in conversation_ids]
+
+    async def _load_citations(
+        self, message_ids: Sequence[uuid.UUID]
+    ) -> list[list[MessageCitation]]:
+        """Batches `conversation { messages { citations } }` into one query.
+
+        Without this, reopening a 40-message transcript issues 40 queries
+        against `message_citations` -- the same N+1 `_load_configs` below
+        exists to prevent, and far easier to hit here because a transcript is
+        fetched whole rather than a row at a time.
+
+        The explicit `organization_id` predicate is redundant with Postgres
+        RLS and deliberately so, matching `_load_configs`: Layer 1
+        (application-layer tenant filtering) admits no exceptions.
+        `MessageCitation` carries its own `organization_id`, so this costs no
+        join.
+        """
+        assert self.session is not None
+        assert self.tenant is not None
+        result = await self.session.execute(
+            select(MessageCitation)
+            .where(
+                MessageCitation.message_id.in_(list(message_ids)),
+                MessageCitation.organization_id == self.tenant.organization_id,
+            )
+            .order_by(MessageCitation.rank)
+        )
+        by_message: dict[uuid.UUID, list[MessageCitation]] = {}
+        for citation in result.scalars().all():
+            by_message.setdefault(citation.message_id, []).append(citation)
+        # One entry per requested id, in the order asked for: DataLoader
+        # matches results to keys positionally, so a message with no
+        # citations must still contribute an (empty) slot.
+        return [by_message.get(message_id, []) for message_id in message_ids]
 
     async def _load_configs(self, agent_ids: Sequence[uuid.UUID]) -> list[AgentConfig | None]:
         """Batches `agents { config { ... } }` into one query instead of one

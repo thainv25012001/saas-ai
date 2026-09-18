@@ -32,6 +32,29 @@ enum AgentStatus {
   DISABLED
 }
 
+type Conversation {
+  id: UUID!
+  agentId: UUID!
+  channel: ConversationChannel!
+  status: ConversationStatus!
+  title: String
+  lastMessageAt: DateTime
+  createdAt: DateTime!
+  preview: String
+  messages: [Message!]!
+}
+
+enum ConversationChannel {
+  PLAYGROUND
+  WIDGET
+  API
+}
+
+enum ConversationStatus {
+  OPEN
+  CLOSED
+}
+
 input CreateAgentInput {
   name: String!
   provider: String!
@@ -82,6 +105,40 @@ type Me {
   organizationId: UUID!
   organizationName: String!
   role: String!
+}
+
+type Message {
+  id: UUID!
+  seq: Int!
+  role: MessageRole!
+  content: String
+  provider: String
+  model: String
+  inputTokens: Int
+  outputTokens: Int
+  costUsd: String
+  latencyMs: Int
+  finishReason: String
+  error: String
+  createdAt: DateTime!
+  citations: [MessageCitation!]!
+}
+
+type MessageCitation {
+  id: UUID!
+  chunkId: UUID
+  documentId: UUID
+  documentTitle: String!
+  excerpt: String!
+  rank: Int!
+  score: Float!
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+  TOOL
 }
 
 type ModelOption {
@@ -141,6 +198,8 @@ type Query {
   prompts: [Prompt!]!
   prompt(id: UUID!): Prompt!
   documents(status: DocumentStatus = null, limit: Int! = 50, offset: Int! = 0): [Document!]!
+  conversations(agentId: UUID!, channel: ConversationChannel = null, limit: Int! = 20, offset: Int! = 0): [Conversation!]!
+  conversation(id: UUID!): Conversation
   document(id: UUID!): Document
 }
 

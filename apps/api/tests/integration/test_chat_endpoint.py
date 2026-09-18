@@ -96,6 +96,19 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+class _NoNewConversation:
+    """Stands in for `ChatService` in the tests below that drive
+    `_stream_body` directly.
+
+    `created_conversation = None` means the turn continued an existing
+    conversation, so no title is queued -- which keeps those tests about the
+    one thing they are each testing (session teardown, heartbeats, pump
+    failures) rather than about titling.
+    """
+
+    created_conversation = None
+
+
 class _SlowProvider:
     """Mimics FakeProvider but sleeps between chunks -- a real (tiny) delay,
     so the heartbeat's `asyncio.wait_for` timeout actually has a chance to
@@ -602,7 +615,7 @@ async def test_stream_body_rolls_back_the_session_on_abrupt_close():
 
     session_cm = _RecordingSessionCM()
     first_event = ChatMessageStart(conversation_id=uuid.uuid4(), message_id=uuid.uuid4())
-    body = _stream_body(_hangs_forever(), first_event, session_cm)  # type: ignore[arg-type]
+    body = _stream_body(_hangs_forever(), first_event, session_cm, _NoNewConversation())  # type: ignore[arg-type]
 
     first_chunk = await body.__anext__()
     assert first_chunk.startswith(b"data: ")
@@ -655,7 +668,9 @@ async def test_session_still_closes_if_the_pump_task_raises_an_unexpected_baseex
 
     session_cm = _RecordingSessionCM()
     first_event = ChatMessageStart(conversation_id=uuid.uuid4(), message_id=uuid.uuid4())
-    body = _stream_body(_raises_unexpected_baseexception(), first_event, session_cm)  # type: ignore[arg-type]
+    body = _stream_body(
+        _raises_unexpected_baseexception(), first_event, session_cm, _NoNewConversation()
+    )  # type: ignore[arg-type]
 
     first_chunk = await body.__anext__()
     assert first_chunk.startswith(b"data: ")
@@ -715,7 +730,9 @@ async def test_disconnect_after_completed_turn_logs_discarded_usage(monkeypatch)
     )
 
     first_event = ChatMessageStart(conversation_id=uuid.uuid4(), message_id=uuid.uuid4())
-    body = _stream_body(_completes_then_hangs(), first_event, _NoOpSessionCM())  # type: ignore[arg-type]
+    body = _stream_body(
+        _completes_then_hangs(), first_event, _NoOpSessionCM(), _NoNewConversation()
+    )  # type: ignore[arg-type]
 
     first_chunk = await body.__anext__()
     assert first_chunk.startswith(b"data: ")
@@ -886,7 +903,9 @@ async def test_a_baseexception_in_the_pump_still_terminates_the_stream(monkeypat
 
     monkeypatch.setattr(chat_api, "HEARTBEAT_INTERVAL_SECONDS", 0.02)
     first_event = ChatMessageStart(conversation_id=uuid.uuid4(), message_id=uuid.uuid4())
-    body = _stream_body(_raises_unexpected_baseexception(), first_event, _NoOpSessionCM())  # type: ignore[arg-type]
+    body = _stream_body(
+        _raises_unexpected_baseexception(), first_event, _NoOpSessionCM(), _NoNewConversation()
+    )  # type: ignore[arg-type]
 
     first_chunk = await body.__anext__()
     assert first_chunk.startswith(b"data: ")
@@ -1086,3 +1105,185 @@ async def test_usage_event_records_the_model_that_answered(app, api_client, clea
             .all()
         )
     assert rows == ["claude-sonnet-5"]
+
+
+# ---------------------------------------------------------------------------
+# 11. Titling a new conversation
+# ---------------------------------------------------------------------------
+
+
+class _TitleRecorder:
+    """Records each enqueue, and -- at the moment it happens -- whether the
+    conversation is already visible to a *separate* transaction.
+
+    That second fact is the point. The job runs in another process against
+    its own session, so an enqueue that fires before this turn's transaction
+    commits hands the worker a conversation it cannot see. Asserting commit
+    ordering directly beats asserting on a sequence of recorded events,
+    because this is the property the ordering exists to produce.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[uuid.UUID, uuid.UUID]] = []
+        self.visible: list[bool] = []
+
+    async def __call__(self, conversation_id: uuid.UUID, organization_id: uuid.UUID) -> None:
+        self.calls.append((conversation_id, organization_id))
+        tenant = TenantContext(
+            organization_id=organization_id,
+            user_id=None,
+            role=MembershipRole.OWNER,
+            request_id="title-visibility-probe",
+        )
+        async with tenant_session(tenant) as session:
+            row = await session.execute(
+                text("SELECT count(*) FROM messages WHERE conversation_id = :id"),
+                {"id": conversation_id},
+            )
+            self.visible.append(row.scalar_one() > 0)
+
+
+@pytest.fixture
+def titles(monkeypatch) -> _TitleRecorder:
+    recorder = _TitleRecorder()
+    monkeypatch.setattr(chat_api, "enqueue_title", recorder)
+    return recorder
+
+
+async def test_a_first_playground_turn_queues_a_title(app, api_client, clean_users, titles):
+    token = await _register(api_client, "title-first-turn@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id)
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(script=["ok"])
+
+    response = await api_client.post(
+        CHAT_URL, json={"agent_id": str(agent_id), "message": "hello"}, headers=_auth(token)
+    )
+
+    events = _parse_events(response.text)
+    start = next(e for e in events if e["type"] == "message_start")
+    conversation_id = uuid.UUID(str(start["conversation_id"]))
+    assert titles.calls == [(conversation_id, org_id)]
+
+
+async def test_the_title_is_queued_only_once_the_turn_has_committed(
+    app, api_client, clean_users, titles
+):
+    """The job opens its own session in another process. Enqueued before this
+    turn's transaction commits, it would find a conversation with no messages
+    and have nothing to title."""
+    token = await _register(api_client, "title-after-commit@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id)
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(script=["ok"])
+
+    await api_client.post(
+        CHAT_URL, json={"agent_id": str(agent_id), "message": "hello"}, headers=_auth(token)
+    )
+
+    assert titles.visible == [True]
+
+
+async def test_a_second_turn_does_not_queue_another_title(app, api_client, clean_users, titles):
+    """Only the turn that creates the conversation queues one. The job's own
+    `title IS NULL` check is the backstop; not enqueuing is the first line."""
+    token = await _register(api_client, "title-second-turn@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id)
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(script=["ok"])
+
+    first = await api_client.post(
+        CHAT_URL, json={"agent_id": str(agent_id), "message": "hello"}, headers=_auth(token)
+    )
+    conversation_id = next(e for e in _parse_events(first.text) if e["type"] == "message_start")[
+        "conversation_id"
+    ]
+
+    await api_client.post(
+        CHAT_URL,
+        json={
+            "agent_id": str(agent_id),
+            "message": "and again",
+            "conversation_id": str(conversation_id),
+        },
+        headers=_auth(token),
+    )
+
+    assert len(titles.calls) == 1
+
+
+async def test_a_pre_stream_failure_queues_nothing(app, api_client, clean_users, titles):
+    """No conversation was created, so there is nothing to title."""
+    token = await _register(api_client, "title-pre-stream@example.com")
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(script=["hi"])
+
+    response = await api_client.post(
+        CHAT_URL,
+        json={"agent_id": str(uuid.uuid4()), "message": "hello"},
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 404
+    assert titles.calls == []
+
+
+async def test_a_mid_stream_provider_error_still_queues_a_title(
+    app, api_client, clean_users, titles
+):
+    """The partial reply IS persisted (see the mid-stream failure tests
+    above), so the conversation is real, appears in the list, and needs a
+    label like any other."""
+    token = await _register(api_client, "title-mid-stream-error@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id)
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(
+        script=["partial ", "more"], fail_with=LLMUnavailableError("upstream down")
+    )
+
+    await api_client.post(
+        CHAT_URL, json={"agent_id": str(agent_id), "message": "hello"}, headers=_auth(token)
+    )
+
+    assert len(titles.calls) == 1
+    assert titles.visible == [True]
+
+
+async def test_a_rolled_back_turn_queues_nothing(app, api_client, clean_users, titles, monkeypatch):
+    """An unexpected exception rolls the whole turn back, taking the
+    conversation row with it. Enqueuing would point the worker at a
+    conversation that no longer exists."""
+    token = await _register(api_client, "title-rolled-back@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id)
+
+    class _BrokenProvider:
+        name = "fake"
+
+        def capabilities(self, model: str) -> ModelCapabilities:
+            return ModelCapabilities(
+                supports_sampling=True,
+                supports_thinking=False,
+                thinking_style="none",
+                supports_effort=False,
+                max_output_tokens=4096,
+            )
+
+        async def generate(self, request: CompletionRequest) -> CompletionResponse:
+            raise AssertionError("unused")
+
+        async def _stream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+            yield MessageStartEvent(model=request.model)
+            yield TextDeltaEvent(text="hi")
+            yield MessageEndEvent(stop_reason="end_turn", usage=Usage(), model=request.model)
+            raise RuntimeError("a bug after the turn finished")
+
+        def stream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+            return self._stream(request)
+
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: _BrokenProvider()
+
+    await api_client.post(
+        CHAT_URL, json={"agent_id": str(agent_id), "message": "hello"}, headers=_auth(token)
+    )
+
+    assert titles.calls == []

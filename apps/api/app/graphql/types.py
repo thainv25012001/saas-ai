@@ -1,13 +1,17 @@
 import enum
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 import strawberry
 
 from app.core.errors import AuthenticationError
 from app.db.models import Agent as AgentModel
 from app.db.models import AgentConfig as AgentConfigModel
+from app.db.models import Conversation as ConversationModel
+from app.db.models import ConversationMessage as MessageModel
 from app.db.models import Document as DocumentModel
+from app.db.models import MessageCitation as MessageCitationModel
 from app.db.models import Organization as OrganizationModel
 from app.db.models import Prompt as PromptModel
 from app.db.models import PromptVersion as PromptVersionModel
@@ -234,6 +238,155 @@ class Document:
         if info.context.chunk_count_loader is None:
             raise AuthenticationError("authentication required")
         return await info.context.chunk_count_loader.load(self.id)
+
+
+@strawberry.enum
+class ConversationChannel(enum.Enum):
+    PLAYGROUND = "playground"
+    WIDGET = "widget"
+    API = "api"
+
+
+@strawberry.enum
+class ConversationStatus(enum.Enum):
+    OPEN = "open"
+    CLOSED = "closed"
+
+
+@strawberry.enum
+class MessageRole(enum.Enum):
+    USER = "user"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+    TOOL = "tool"
+
+
+@strawberry.type
+class MessageCitation:
+    id: uuid.UUID
+    chunk_id: uuid.UUID | None
+    document_id: uuid.UUID | None
+    #: Untrusted -- the uploaded document's own title, never escaped by the
+    #: server. Rendering it must go through JSX text interpolation only; see
+    #: the same warning on `Citation` in `apps/web/src/lib/sse.ts`.
+    document_title: str
+    excerpt: str
+    rank: int
+    score: float
+
+    @classmethod
+    def from_model(cls, model: MessageCitationModel) -> "MessageCitation":
+        return cls(
+            id=model.id,
+            chunk_id=model.chunk_id,
+            document_id=model.document_id,
+            document_title=model.document_title,
+            excerpt=model.excerpt,
+            rank=model.rank,
+            score=model.score,
+        )
+
+
+@strawberry.type
+class Message:
+    id: uuid.UUID
+    seq: int
+    role: MessageRole
+    #: Nullable, and deliberately surfaced as such: a turn that died before
+    #: producing text has no content and an `error`, and the transcript
+    #: renders exactly that rather than pretending the turn never happened.
+    content: str | None
+    provider: str | None
+    model: str | None
+    input_tokens: int | None
+    output_tokens: int | None
+    #: A string, not a float: `Decimal` is what the column holds precisely,
+    #: and a float would round a fraction of a cent away on the wire. The
+    #: streaming `message_end` event already sends cost as a string for the
+    #: same reason.
+    cost_usd: str | None
+    latency_ms: int | None
+    finish_reason: str | None
+    error: str | None
+    created_at: datetime
+
+    @classmethod
+    def from_model(cls, model: MessageModel) -> "Message":
+        return cls(
+            id=model.id,
+            seq=model.seq,
+            role=MessageRole(model.role.value),
+            content=model.content,
+            provider=model.provider,
+            model=model.model,
+            input_tokens=model.input_tokens,
+            output_tokens=model.output_tokens,
+            cost_usd=_decimal_to_str(model.cost_usd),
+            latency_ms=model.latency_ms,
+            finish_reason=model.finish_reason,
+            error=model.error,
+            created_at=model.created_at,
+        )
+
+    @strawberry.field
+    async def citations(self, info: strawberry.Info[Context, None]) -> list[MessageCitation]:
+        # Batched through a loader for the same reason `Agent.config` is:
+        # resolved field-by-field, a 40-message transcript would issue 40
+        # queries against `message_citations`.
+        if info.context.citation_loader is None:
+            raise AuthenticationError("authentication required")
+        rows = await info.context.citation_loader.load(self.id)
+        return [MessageCitation.from_model(row) for row in rows]
+
+
+def _decimal_to_str(value: Decimal | None) -> str | None:
+    return None if value is None else str(value)
+
+
+@strawberry.type
+class Conversation:
+    id: uuid.UUID
+    agent_id: uuid.UUID
+    channel: ConversationChannel
+    status: ConversationStatus
+    #: `None` until the title job has run -- the list falls back to the
+    #: conversation's first message, so a row is never blank.
+    title: str | None
+    last_message_at: datetime | None
+    created_at: datetime
+
+    @classmethod
+    def from_model(cls, model: ConversationModel) -> "Conversation":
+        return cls(
+            id=model.id,
+            agent_id=model.agent_id,
+            channel=ConversationChannel(model.channel.value),
+            status=ConversationStatus(model.status.value),
+            title=model.title,
+            last_message_at=model.last_message_at,
+            created_at=model.created_at,
+        )
+
+    @strawberry.field
+    async def preview(self, info: strawberry.Info[Context, None]) -> str | None:
+        """The first question asked, for a list row whose title has not landed
+        yet -- the title job is asynchronous, and a brand-new conversation is
+        exactly the one someone is looking at."""
+        if info.context.preview_loader is None:
+            raise AuthenticationError("authentication required")
+        return await info.context.preview_loader.load(self.id)
+
+    @strawberry.field
+    async def messages(self, info: strawberry.Info[Context, None]) -> list[Message]:
+        # No limit: `history`'s limit exists to bound what is sent to the
+        # model as context. Someone reading their own history is not paying
+        # for it as tokens.
+        if info.context.session is None or info.context.tenant is None:
+            raise AuthenticationError("authentication required")
+        from app.conversations.service import ConversationService
+
+        rows = await ConversationService(info.context.session, info.context.tenant).history(self.id)
+        return [Message.from_model(row) for row in rows]
 
 
 @strawberry.input

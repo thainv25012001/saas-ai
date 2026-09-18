@@ -5,6 +5,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { useQuery } from "urql";
 import { ModelPicker } from "@/components/agents/ModelPicker";
 import { ChatMessage, type ChatMessageData } from "@/components/chat/ChatMessage";
+import { ConversationPanel } from "@/components/chat/ConversationPanel";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonLink } from "@/components/ui/Button";
@@ -16,6 +17,8 @@ import { LoadingState } from "@/components/ui/Spinner";
 import {
   AgentsDocument,
   ConfiguredProvidersDocument,
+  ConversationDocument,
+  ConversationsDocument,
   ProviderModelsDocument,
 } from "@/graphql/generated";
 import { agentStatusLabel, agentStatusTone } from "@/lib/agent-status";
@@ -23,11 +26,13 @@ import { API_URL } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { NEW_CONVERSATION, resolveTurnOutcome, type TurnState } from "@/lib/chat-turn";
 import { sessionTotals } from "@/lib/chat-totals";
+import { toTranscript } from "@/lib/conversation-transcript";
 import { firstGraphQLError } from "@/lib/graphql-errors";
 import { isOverridden, type ModelSelection, overrideFields } from "@/lib/model-selection";
 import { editableProviders, providerLabel } from "@/lib/providers";
 import { streamChat } from "@/lib/sse";
 import { useComposerFocus } from "@/lib/use-composer-focus";
+import { useRememberedFlag } from "@/lib/use-remembered-flag";
 import { useStickToBottom } from "@/lib/use-stick-to-bottom";
 
 function newId(): string {
@@ -93,6 +98,66 @@ function PlaygroundContent() {
   // loses focus without getting it back -- see `useComposerFocus`.
   const composerRef = useComposerFocus(isStreaming);
 
+  // Past conversations for the selected agent. Filtered to the playground's
+  // own channel: once the embedded widget ships, real customer traffic on the
+  // same agent would otherwise bury the threads you are testing with.
+  const [historyResult, refetchHistory] = useQuery({
+    query: ConversationsDocument,
+    variables: { agentId: agentId ?? "", channel: "PLAYGROUND" },
+    pause: agentId === null,
+  });
+  const history = useMemo(
+    () => (historyResult.data?.conversations ?? []).map((row) => ({
+      id: String(row.id),
+      title: row.title,
+      preview: row.preview,
+    })),
+    [historyResult.data],
+  );
+
+  // Collapsed by default on a narrow viewport -- below `lg` the app's own nav
+  // is already a drawer, and a 15rem panel beside the transcript leaves
+  // neither of them usable. Remembered afterwards, so the choice survives
+  // navigating away.
+  const [panelCollapsed, setPanelCollapsed] = useRememberedFlag(
+    "playground:conversations-collapsed",
+    () => window.innerWidth < 1024,
+  );
+
+  // Paused until a row is actually chosen: this is the full transcript, and
+  // nothing should fetch one just because a list is on screen.
+  const [openingId, setOpeningId] = useState<string | null>(null);
+  const [transcriptResult] = useQuery({
+    query: ConversationDocument,
+    variables: { id: openingId ?? "" },
+    pause: openingId === null,
+  });
+
+  // Load the fetched transcript into the view once, when it arrives. Keyed on
+  // the id rather than on the data, so re-rendering for any other reason does
+  // not replay it over messages the user has since added.
+  const loadedId = useRef<string | null>(null);
+  useEffect(() => {
+    const loaded = transcriptResult.data?.conversation;
+    if (loaded === undefined || loaded === null) return;
+    const id = String(loaded.id);
+    if (loadedId.current === id) return;
+    loadedId.current = id;
+    setMessages(toTranscript(loaded.messages));
+    // Committed by definition: it is a conversation the server has already
+    // written turns into, so the next message continues this thread rather
+    // than opening a new one.
+    setConversation({ conversationId: id, committed: true });
+    stickToBottom();
+  }, [transcriptResult.data, stickToBottom]);
+
+  function onOpenConversation(conversationId: string) {
+    if (conversationId === conversation.conversationId) return;
+    abortRef.current?.abort();
+    loadedId.current = null;
+    setOpeningId(conversationId);
+  }
+
   // Preselect from ?agentId=... (set by the "Test in playground" link on an
   // agent's detail page), falling back to the first agent once the query
   // resolves. Only ever runs while nothing is selected yet, so it never
@@ -132,12 +197,16 @@ function PlaygroundContent() {
     // into one conversation_id.
     setConversation(NEW_CONVERSATION);
     setMessages([]);
+    setOpeningId(null);
+    loadedId.current = null;
     stickToBottom();
   }
 
   function onNewConversation() {
     setConversation(NEW_CONVERSATION);
     setMessages([]);
+    setOpeningId(null);
+    loadedId.current = null;
     stickToBottom();
   }
 
@@ -290,6 +359,11 @@ function PlaygroundContent() {
       );
       setIsStreaming(false);
       abortRef.current = null;
+      // A turn ending is when a new conversation appears in the list and when
+      // an existing one moves to the top. Deliberately not polled afterwards
+      // for the title: it is written by a background job, and until it lands
+      // the row reads as its first question rather than as nothing.
+      refetchHistory({ requestPolicy: "network-only" });
     }
   }
 
@@ -328,11 +402,30 @@ function PlaygroundContent() {
   }
 
   return (
-    // Three rows in a full-height grid: the transcript is the only scroll
-    // container, so the composer stays put without any viewport arithmetic.
-    <section className="grid h-full grid-rows-[auto_1fr_auto]">
-      <div className="flex flex-wrap items-center gap-3 border-b border-line bg-surface px-6 py-3">
-        <h1 className="text-sm font-semibold text-ink">Playground</h1>
+    // Two columns: the conversation panel, then the playground itself as three
+    // rows -- the transcript is the only scroll container in that column, so
+    // the composer stays put without any viewport arithmetic.
+    <section className="flex h-full">
+      <ConversationPanel
+        conversations={history}
+        currentId={conversation.conversationId}
+        fetching={historyResult.fetching}
+        collapsed={panelCollapsed}
+        onToggle={() => setPanelCollapsed(!panelCollapsed)}
+        onOpen={onOpenConversation}
+        onNew={onNewConversation}
+        canStartNew={!isStreaming && messages.length > 0}
+      />
+
+      <div className="grid min-h-0 min-w-0 flex-1 grid-rows-[auto_1fr_auto]">
+      {/* Three groups, not seven: what is answering (Agent), what it is
+        * answering with (Model), and what that is costing. "New conversation"
+        * moved into the panel, where the thread it acts on lives, and the
+        * "Playground" heading moved to `sr-only` -- the nav already says
+        * which page this is, and the toolbar was repeating it. */}
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-b border-line bg-surface px-6 py-2.5">
+        <h1 className="sr-only">Playground</h1>
+
         <label className="flex items-center gap-2 text-sm text-ink-muted">
           <span className="font-medium">Agent</span>
           <Select
@@ -340,7 +433,7 @@ function PlaygroundContent() {
             onChange={(e) => onSelectAgent(e.target.value)}
             disabled={fetching || isStreaming}
             width="auto"
-            className="min-w-48"
+            className="min-w-44"
           >
             {agents.map((agent) => (
               <option key={String(agent.id)} value={String(agent.id)}>
@@ -348,92 +441,82 @@ function PlaygroundContent() {
               </option>
             ))}
           </Select>
-        </label>
-
-        {selectedAgent ? (
-          <>
+          {selectedAgent ? (
             <Badge tone={agentStatusTone(selectedAgent.status)}>
               {agentStatusLabel(selectedAgent.status)}
             </Badge>
+          ) : null}
+        </label>
 
-            {/* A div, not a label: this group holds two controls, and a label
-              * can only ever name one of them. Each carries its own
-              * `aria-label` instead, and the heading below is decoration. */}
-            <div className="flex items-center gap-2 text-sm text-ink-muted">
-              <span className="font-medium">Model</span>
-              {/* Not disabled while streaming, unlike Agent above: the
-                * override is read when a turn is sent, so changing it mid-
-                * stream affects only the next one -- there is nothing to
-                * protect by locking it, and locking a control that works is
-                * its own small lie. */}
-              <Select
-                value={selection.provider}
-                onChange={(e) => onSelectProvider(e.target.value)}
-                width="auto"
-                aria-label="Provider"
-              >
-                {/* Same list the agent form offers, disabled entries and all:
-                  * a provider with no API key is named and greyed out rather
-                  * than hidden, so picking it is impossible and its absence is
-                  * never a mystery. */}
-                {editableProviders(providers, agentSelection.provider).map((option) => (
-                  <option key={option.id} value={option.id} disabled={!option.configured}>
-                    {option.configured
-                      ? providerLabel(option.id)
-                      : `${providerLabel(option.id)} — no API key`}
-                  </option>
-                ))}
-              </Select>
-              <ModelPicker
-                value={selection.model}
-                onChange={(model) => setSelection((prev) => ({ ...prev, model }))}
-                options={modelsResult.data?.providerModels ?? []}
-                fetching={modelsResult.fetching}
-                failed={modelsResult.error !== undefined}
-                aria-label="Model"
-              />
-            </div>
+        {selectedAgent ? (
+          /* A div, not a label: this group holds two controls, and a label
+           * can only ever name one of them. Each carries its own
+           * `aria-label` instead, and the heading is decoration. */
+          <div className="flex flex-wrap items-center gap-2 text-sm text-ink-muted">
+            <span className="font-medium">Model</span>
+            {/* Not disabled while streaming, unlike Agent above: the override
+              * is read when a turn is sent, so changing it mid-stream affects
+              * only the next one -- there is nothing to protect by locking
+              * it, and locking a control that works is its own small lie. */}
+            <Select
+              value={selection.provider}
+              onChange={(e) => onSelectProvider(e.target.value)}
+              width="auto"
+              aria-label="Provider"
+            >
+              {/* Same list the agent form offers, disabled entries and all: a
+                * provider with no API key is named and greyed out rather than
+                * hidden, so picking it is impossible and its absence is never
+                * a mystery. */}
+              {editableProviders(providers, agentSelection.provider).map((option) => (
+                <option key={option.id} value={option.id} disabled={!option.configured}>
+                  {option.configured
+                    ? providerLabel(option.id)
+                    : `${providerLabel(option.id)} — no API key`}
+                </option>
+              ))}
+            </Select>
+            <ModelPicker
+              value={selection.model}
+              onChange={(model) => setSelection((prev) => ({ ...prev, model }))}
+              options={modelsResult.data?.providerModels ?? []}
+              fetching={modelsResult.fetching}
+              failed={modelsResult.error !== undefined}
+              aria-label="Model"
+            />
 
             {isOverridden(selection, agentSelection) ? (
-              // Says plainly that the agent has not been changed. Without it
-              // the header is indistinguishable from having edited the agent,
-              // which is the one thing this picker deliberately does not do.
-              <span className="flex items-center gap-1.5 text-xs text-ink-subtle">
-                <span>this session only</span>
+              // A badge and a verb, where a sentence used to be. It still has
+              // to say the agent itself is unchanged -- that is the one thing
+              // this picker deliberately does not do -- but "Session only"
+              // says it in two words, and the agent's own model is on the
+              // reset control where it explains what reset means.
+              <>
+                <Badge tone="info">Session only</Badge>
                 <button
                   type="button"
                   onClick={() => setSelection(agentSelection)}
-                  className={`rounded-control px-1.5 py-0.5 underline underline-offset-2 hover:text-ink ${focusRing}`}
+                  title={`Back to the agent's model (${agentSelection.model})`}
+                  className={`rounded-control px-1.5 py-0.5 text-xs text-ink-subtle underline underline-offset-2 hover:text-ink ${focusRing}`}
                 >
-                  {`back to ${agentSelection.model}`}
+                  Reset
                 </button>
-              </span>
+              </>
             ) : null}
-          </>
+          </div>
         ) : null}
 
-        <div className="ml-auto flex items-center gap-3">
-          {totals.pricedTurns + totals.unpricedTurns > 0 ? (
-            <p className="text-xs text-ink-muted">
-              {totals.pricedTurns > 0 ? (
-                <>
-                  <span className="font-medium text-ink">${totals.costUsd.toFixed(4)}</span>{" "}
-                  ·{" "}
-                </>
-              ) : null}
-              {totals.inputTokens} in / {totals.outputTokens} out
-              {totals.unpricedTurns > 0 ? ` · ${totals.unpricedTurns} unpriced` : ""}
-            </p>
-          ) : null}
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={onNewConversation}
-            disabled={isStreaming || messages.length === 0}
-          >
-            New conversation
-          </Button>
-        </div>
+        {totals.pricedTurns + totals.unpricedTurns > 0 ? (
+          <p className="ml-auto text-xs text-ink-muted">
+            {totals.pricedTurns > 0 ? (
+              <>
+                <span className="font-medium text-ink">${totals.costUsd.toFixed(4)}</span> ·{" "}
+              </>
+            ) : null}
+            {totals.inputTokens} in / {totals.outputTokens} out
+            {totals.unpricedTurns > 0 ? ` · ${totals.unpricedTurns} unpriced` : ""}
+          </p>
+        ) : null}
       </div>
 
       <div
@@ -509,6 +592,7 @@ function PlaygroundContent() {
           Enter to send · Shift+Enter for a new line
         </p>
       </form>
+      </div>
     </section>
   );
 }

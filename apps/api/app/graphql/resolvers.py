@@ -8,8 +8,10 @@ from sqlalchemy import select
 
 from app.agents import schemas as agent_schemas
 from app.agents.service import AgentService
+from app.conversations.service import ConversationService
 from app.core.errors import AuthenticationError, NotFoundError, format_validation_errors
 from app.core.errors import ValidationError as AppValidationError
+from app.db.models import ConversationChannel as ConversationChannelModel
 from app.db.models import DocumentStatus as DocumentStatusModel
 from app.db.models import Membership, Organization
 from app.db.models import User as UserModel
@@ -78,6 +80,13 @@ def _documents(info: Info) -> DocumentService:
     assert info.context.tenant is not None
     assert info.context.session is not None
     return DocumentService(info.context.session, info.context.tenant)
+
+
+def _conversations(info: Info) -> ConversationService:
+    _require_tenant(info)
+    assert info.context.tenant is not None
+    assert info.context.session is not None
+    return ConversationService(info.context.session, info.context.tenant)
 
 
 @strawberry.type
@@ -196,6 +205,39 @@ class Query:
             status=model_status, limit=limit, offset=offset
         )
         return [gql.Document.from_model(row) for row in rows]
+
+    @strawberry.field
+    async def conversations(
+        self,
+        info: Info,
+        agent_id: uuid.UUID,
+        channel: gql.ConversationChannel | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[gql.Conversation]:
+        """An agent's conversations, most recently active first.
+
+        An agent id belonging to another organization returns an empty list
+        rather than an error: it is indistinguishable from one that does not
+        exist, and saying which would confirm it exists.
+        """
+        model_channel = ConversationChannelModel(channel.value) if channel is not None else None
+        rows = await _conversations(info).list_for_agent(
+            agent_id, channel=model_channel, limit=limit, offset=offset
+        )
+        return [gql.Conversation.from_model(row) for row in rows]
+
+    @strawberry.field
+    async def conversation(self, info: Info, id: uuid.UUID) -> gql.Conversation | None:
+        """Nullable for the same reason `document(id)` is: for the dashboard
+        "not yours" and "does not exist" are both nothing to show. The
+        service still raises `NotFoundError` underneath -- that distinction
+        is what must never reach a client."""
+        service = _conversations(info)
+        try:
+            return gql.Conversation.from_model(await service.get(id))
+        except NotFoundError:
+            return None
 
     @strawberry.field
     async def document(self, info: Info, id: uuid.UUID) -> gql.Document | None:
