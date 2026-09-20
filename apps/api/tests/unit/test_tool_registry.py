@@ -11,7 +11,7 @@ import uuid
 
 import pytest
 from anyio import fail_after
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field
 
 from app.llm.types import ToolUseBlock
 from app.tools.base import AgentTool, ToolContext, ToolResult
@@ -110,6 +110,53 @@ class _NestedLeakTool(AgentTool):
     name = "nested-leak"
     description = "Buries organization_id one level down, in a nested model."
     args_model = _NestedLeakArgs
+
+    async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolResult:
+        return ToolResult(content="must never run")
+
+
+class _ValidationAliasLeakArgs(BaseModel):
+    # The mirror image of `_AliasedLeakArgs`: the attribute name is innocuous
+    # ("sneaky_org"), but the model is shown, and can populate, a wire
+    # argument literally named "organization_id".
+    sneaky_org: uuid.UUID = Field(validation_alias="organization_id")
+
+
+class _ValidationAliasLeakTool(AgentTool):
+    name = "validation-alias-leak"
+    description = "Clean attribute name, but validation_alias='organization_id'."
+    args_model = _ValidationAliasLeakArgs
+
+    async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolResult:
+        return ToolResult(content="must never run")
+
+
+class _AliasChoicesLeakArgs(BaseModel):
+    # The rendered JSON schema shows only the first choice
+    # ("sneaky_org_wire") as the property name -- "organization_id" is still
+    # live input, just invisible to anyone reading the schema.
+    sneaky_org: uuid.UUID = Field(
+        validation_alias=AliasChoices("sneaky_org_wire", "organization_id")
+    )
+
+
+class _AliasChoicesLeakTool(AgentTool):
+    name = "alias-choices-leak"
+    description = "Offers organization_id as one of several accepted wire names."
+    args_model = _AliasChoicesLeakArgs
+
+    async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolResult:
+        return ToolResult(content="must never run")
+
+
+class _AliasPathLeakArgs(BaseModel):
+    sneaky_org: uuid.UUID = Field(validation_alias=AliasPath("filters", "organization_id"))
+
+
+class _AliasPathLeakTool(AgentTool):
+    name = "alias-path-leak"
+    description = "Reaches organization_id through a nested-input alias path."
+    args_model = _AliasPathLeakArgs
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolResult:
         return ToolResult(content="must never run")
@@ -231,3 +278,18 @@ def test_registering_a_tool_with_organization_id_buried_in_a_nested_model_is_rej
 def test_registering_a_tool_that_allows_extra_fields_is_rejected() -> None:
     with pytest.raises(ValueError, match="extra"):
         _registry(_ExtraAllowTool())
+
+
+def test_registering_a_tool_with_organization_id_as_a_validation_alias_is_rejected() -> None:
+    with pytest.raises(ValueError, match="organization_id"):
+        _registry(_ValidationAliasLeakTool())
+
+
+def test_registering_a_tool_offering_organization_id_as_an_alias_choice_is_rejected() -> None:
+    with pytest.raises(ValueError, match="organization_id"):
+        _registry(_AliasChoicesLeakTool())
+
+
+def test_registering_a_tool_reaching_organization_id_through_an_alias_path_is_rejected() -> None:
+    with pytest.raises(ValueError, match="organization_id"):
+        _registry(_AliasPathLeakTool())

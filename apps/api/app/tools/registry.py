@@ -15,7 +15,7 @@ import asyncio
 from collections.abc import Iterator
 from typing import get_args, get_origin
 
-from pydantic import BaseModel
+from pydantic import AliasChoices, AliasPath, BaseModel
 from pydantic import ValidationError as PydanticValidationError
 
 from app.core.errors import format_validation_errors
@@ -50,30 +50,73 @@ def _nested_models(annotation: object) -> Iterator[type[BaseModel]]:
         yield annotation
 
 
+def _alias_names(alias: "str | AliasPath | AliasChoices | None") -> Iterator[str]:
+    """Every plain wire name an alias value could match against.
+
+    `field_info.alias` and `field_info.serialization_alias` are always a
+    plain string when set. `field_info.validation_alias` can be that too, but
+    can also be an `AliasChoices` -- several wire names that all validate,
+    of which the rendered JSON schema shows only the *first* as the
+    property key, leaving the rest just as live as input but invisible to
+    anyone reading the schema -- or an `AliasPath`, a path into nested input
+    (e.g. `AliasPath("filters", "organization_id")`) whose segments can be
+    strings (keys) or ints (list indices); only the string segments are
+    names to check.
+    """
+    if isinstance(alias, str):
+        yield alias
+    elif isinstance(alias, AliasChoices):
+        for choice in alias.choices:
+            yield from _alias_names(choice)
+    elif isinstance(alias, AliasPath):
+        for segment in alias.path:
+            if isinstance(segment, str):
+                yield segment
+
+
 def _reject_tenant_leaking_model(
     tool_name: str, model: type[BaseModel], seen: set[type[BaseModel]]
 ) -> None:
     """Raise if `model`, or any model nested inside it, could carry
     `organization_id` from model-supplied input.
 
-    Three routes were demonstrated against an earlier version of this check
-    that only read `model_json_schema()["properties"]`, and each is closed
-    here on its own terms rather than patched around:
+    "Carry organization_id" is checked in **both** of the two namespaces a
+    field lives in, because each one governs a different half of the
+    guarantee, and checking only one moves the hole rather than closing it:
 
-    - `Field(alias="org_id")` on an `organization_id` field renames the
-      *wire* property the schema advertises, but leaves the attribute a tool
-      body actually reads (`args.organization_id`) unchanged. Reading
-      `model.model_fields` -- keyed by attribute name, never by alias --
-      instead of the schema closes this regardless of aliasing depth.
+    - the **attribute** name (`model_fields`' keys) -- what a tool body
+      reads (`args.organization_id`) -- which an alias renames on the wire
+      without changing;
+    - every **wire** name the field accepts (`field_info.alias`,
+      `validation_alias`, `serialization_alias`, and everything inside an
+      `AliasChoices`/`AliasPath`) -- what the model is shown and can
+      populate -- which a *validation alias pointed at a differently-named
+      attribute* leaves the attribute name clean while the model still sees
+      and can fill an argument literally called `organization_id`.
+
+    Four routes were demonstrated against earlier versions of this check,
+    each closed on its own terms rather than patched around:
+
+    - `Field(alias="org_id")` on an `organization_id` field renames the wire
+      property the schema advertises, but not the attribute a tool body
+      reads. Closed by checking `model_fields` (attribute names).
+    - `Field(validation_alias="organization_id")` on a field named e.g.
+      `sneaky_org` is the mirror image: the attribute is clean, but the
+      model is shown (and can populate) a wire argument literally named
+      `organization_id` -- and if the alias is instead an `AliasChoices`
+      offering `organization_id` as one of several accepted names, the
+      rendered schema shows only the *first* choice as the property key, so
+      reading the schema would not even reveal this one. Closed by checking
+      every alias attribute via `_alias_names`, not the schema.
     - A nested model (e.g. `filters: SomeFilters` where `SomeFilters`
       declares `organization_id`) doesn't appear as a top-level property at
       all. `_nested_models` walks every field's annotation to find it.
     - `ConfigDict(extra="allow")` accepts `organization_id` as an *undeclared*
       key with no field to inspect at all -- `model_extra` after validation,
-      invisible to any check of `model_fields` or the schema. There is no
-      way to allow-list "extra fields except this one name" against a model
-      that accepts arbitrary keys, so `extra="allow"` is refused outright on
-      every args model, independent of what it happens to declare.
+      invisible to any check of `model_fields`, aliases, or the schema.
+      There is no way to allow-list "extra fields except this one name"
+      against a model that accepts arbitrary keys, so `extra="allow"` is
+      refused outright on every args model, independent of what it declares.
 
     `seen` guards a self-referential or mutually-referential model from
     recursing forever; the checks below are cheap enough not to need a
@@ -92,11 +135,17 @@ def _reject_tenant_leaking_model(
         )
 
     for field_name, field_info in model.model_fields.items():
-        if field_name == _FORBIDDEN_ARG_FIELD:
+        exposed_names = {
+            field_name,
+            *_alias_names(field_info.alias),
+            *_alias_names(field_info.validation_alias),
+            *_alias_names(field_info.serialization_alias),
+        }
+        if _FORBIDDEN_ARG_FIELD in exposed_names:
             raise ValueError(
-                f"tool '{tool_name}' args_model '{model.__name__}' declares "
-                f"'{_FORBIDDEN_ARG_FIELD}'; tenancy comes from ToolContext, "
-                "never from a model-supplied argument"
+                f"tool '{tool_name}' args_model '{model.__name__}' exposes "
+                f"'{_FORBIDDEN_ARG_FIELD}' as a field name or alias; tenancy "
+                "comes from ToolContext, never from a model-supplied argument"
             )
         for nested in _nested_models(field_info.annotation):
             _reject_tenant_leaking_model(tool_name, nested, seen)
