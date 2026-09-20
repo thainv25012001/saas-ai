@@ -8,9 +8,14 @@ from openai import Omit, omit
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionFunctionToolParam,
+    ChatCompletionMessageFunctionToolCallParam,
     ChatCompletionMessageParam,
     ChatCompletionSystemMessageParam,
+    ChatCompletionToolMessageParam,
     ChatCompletionUserMessageParam,
+)
+from openai.types.chat.chat_completion_message_function_tool_call_param import (
+    Function as ToolCallFunction,
 )
 from openai.types.shared_params import FunctionDefinition
 
@@ -26,11 +31,13 @@ from app.llm.types import (
     CompletionRequest,
     CompletionResponse,
     ContentBlock,
+    Message,
     MessageEndEvent,
     MessageStartEvent,
     StreamEvent,
     TextBlock,
     TextDeltaEvent,
+    ToolResultBlock,
     ToolUseBlock,
     ToolUseEvent,
     Usage,
@@ -115,6 +122,72 @@ class OpenAIProvider:
         """
         return None
 
+    def _assistant_message(self, message: Message) -> list[ChatCompletionMessageParam]:
+        """One assistant turn, rendered per OpenAI's shape rather than
+        through `Message.text_content` -- which silently discards every
+        `ToolUseBlock`, the exact bug this method exists to fix. Any text
+        becomes `content`; every `ToolUseBlock` becomes an entry in
+        `tool_calls`, with `input` serialized back to the JSON string this
+        wire format expects (the same string `stream()`'s accumulator
+        parsed OUT of when the call streamed in).
+
+        A turn with neither text nor a tool call renders to nothing and is
+        dropped rather than sent as an empty message: Anthropic rejects an
+        empty-content message outright, and `AgentRunner` can produce this
+        exact shape (`outcome.text == ""` with no calls, on whatever step
+        ends the turn), so keeping the two providers aligned here means one
+        does not silently accept what the other would 400 on.
+        """
+        text = "".join(b.text for b in message.content if isinstance(b, TextBlock)) or None
+        tool_calls = [
+            ChatCompletionMessageFunctionToolCallParam(
+                id=b.id,
+                type="function",
+                function=ToolCallFunction(name=b.name, arguments=json.dumps(b.input)),
+            )
+            for b in message.content
+            if isinstance(b, ToolUseBlock)
+        ]
+        if text is not None and tool_calls:
+            return [
+                ChatCompletionAssistantMessageParam(
+                    role="assistant", content=text, tool_calls=tool_calls
+                )
+            ]
+        if text is not None:
+            return [ChatCompletionAssistantMessageParam(role="assistant", content=text)]
+        if tool_calls:
+            return [ChatCompletionAssistantMessageParam(role="assistant", tool_calls=tool_calls)]
+        return []
+
+    def _user_messages(self, message: Message) -> list[ChatCompletionMessageParam]:
+        """A `user`-role internal message carries plain text OR one or more
+        `ToolResultBlock`s -- `AgentRunner` never mixes the two in one
+        message -- but each is rendered independently regardless. Text
+        becomes a single `role: "user"` message; each tool result becomes
+        its OWN `role: "tool"` message with a `tool_call_id`, since that is
+        the shape this wire format requires (unlike Anthropic, which nests
+        `tool_result` blocks inside one user-role message) and nothing here
+        forces one shape into the other.
+
+        This wire format has no field for `ToolResultBlock.is_error` the
+        way Anthropic's `tool_result` block does; `content` already carries
+        a human-readable description of a failure (`ToolRegistry.execute`
+        never returns a bare error code), so it is sent as-is.
+        """
+        rendered: list[ChatCompletionMessageParam] = []
+        text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
+        if text:
+            rendered.append(ChatCompletionUserMessageParam(role="user", content=text))
+        for block in message.content:
+            if isinstance(block, ToolResultBlock):
+                rendered.append(
+                    ChatCompletionToolMessageParam(
+                        role="tool", tool_call_id=block.tool_use_id, content=block.content
+                    )
+                )
+        return rendered
+
     def _messages(self, request: CompletionRequest) -> list[ChatCompletionMessageParam]:
         # OpenAI has no top-level system parameter — the mirror image of
         # Anthropic, which takes the system prompt as a top-level `system`
@@ -125,16 +198,10 @@ class OpenAIProvider:
             ChatCompletionSystemMessageParam(role="system", content=request.system)
         ]
         for message in request.messages:
-            if message.role == "user":
-                messages.append(
-                    ChatCompletionUserMessageParam(role="user", content=message.text_content)
-                )
-            elif message.role == "assistant":
-                messages.append(
-                    ChatCompletionAssistantMessageParam(
-                        role="assistant", content=message.text_content
-                    )
-                )
+            if message.role == "assistant":
+                messages.extend(self._assistant_message(message))
+            elif message.role == "user":
+                messages.extend(self._user_messages(message))
             # A "system" entry inside `request.messages` (there shouldn't be
             # one — `request.system` is the one true source) is dropped
             # rather than duplicated as a second system message.

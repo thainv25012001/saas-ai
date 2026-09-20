@@ -29,6 +29,7 @@ from app.llm.types import (
     StreamEvent,
     TextBlock,
     TextDeltaEvent,
+    ToolResultBlock,
     ToolUseBlock,
     ToolUseEvent,
     Usage,
@@ -122,6 +123,62 @@ class AnthropicProvider:
         # guessing it does not merely sends less than we could have.
         return _CAPABILITIES.get(model, _NO_SAMPLING)
 
+    def _content_block(self, block: ContentBlock) -> dict[str, Any] | None:
+        """One internal `ContentBlock` rendered as Anthropic's wire shape, or
+        `None` if it contributes nothing on the wire.
+
+        `TextBlock(text="")` renders as `None`, not an empty text block:
+        Anthropic rejects a text content block with no non-whitespace text
+        with a 400, and an assistant turn that produced a tool call but no
+        prose (the common case, per `AgentRunner`) has exactly this shape --
+        `outcome.text` is `""`, never omitted, so this filter is load-bearing
+        on every tool-only step, not just a defensive edge case.
+        """
+        if isinstance(block, TextBlock):
+            return {"type": "text", "text": block.text} if block.text else None
+        if isinstance(block, ToolUseBlock):
+            return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
+        if isinstance(block, ToolResultBlock):
+            # `tool_result` is only ever valid inside a USER-role message on
+            # the wire -- `AgentRunner` only ever puts it there (see its own
+            # comment on why), so there is nothing to branch on here.
+            return {
+                "type": "tool_result",
+                "tool_use_id": block.tool_use_id,
+                "content": block.content,
+                "is_error": block.is_error,
+            }
+        return None  # pragma: no cover - ContentBlock has no fourth variant
+
+    def _messages(self, request: CompletionRequest) -> list[dict[str, Any]]:
+        """Every non-system message, serialized block by block rather than
+        through `Message.text_content` -- which silently discards every
+        `ToolUseBlock`/`ToolResultBlock`, the exact bug this method exists to
+        fix. `content` is always a list of blocks, never a bare string: it is
+        the one shape that represents plain text, a tool call, and a tool
+        result identically, so an assistant turn mixing text and tool calls
+        needs no special case.
+
+        A message that renders to ZERO blocks (a `TextBlock("")` with
+        nothing else, or an assistant turn that is truly empty) is dropped
+        from the list entirely rather than sent as `content: []` --
+        Anthropic rejects an empty-content message outright, on ANY role,
+        anywhere in the array, not just the last one.
+        """
+        messages: list[dict[str, Any]] = []
+        for m in request.messages:
+            if m.role == "system":
+                continue
+            content = [
+                rendered
+                for block in m.content
+                if (rendered := self._content_block(block)) is not None
+            ]
+            if not content:
+                continue
+            messages.append({"role": m.role, "content": content})
+        return messages
+
     def _build_kwargs(self, request: CompletionRequest) -> dict[str, Any]:
         caps = self.capabilities(request.model)
 
@@ -139,11 +196,7 @@ class AnthropicProvider:
             "max_tokens": max_tokens,
             # Anthropic takes the system prompt top-level, NOT as a message.
             "system": request.system,
-            "messages": [
-                {"role": m.role, "content": m.text_content}
-                for m in request.messages
-                if m.role != "system"
-            ],
+            "messages": self._messages(request),
         }
 
         if request.temperature is not None:

@@ -11,7 +11,8 @@ from app.llm.errors import (
     LLMUnavailableError,
 )
 from app.llm.openai_provider import OpenAIProvider
-from app.llm.types import CompletionRequest, Message, ToolSpec
+from app.llm.types import CompletionRequest, Message, TextBlock, ToolResultBlock, ToolSpec
+from app.llm.types import ToolUseBlock as AppToolUseBlock
 
 from ._llm_stubs import chunk, streaming, tool_call_delta
 
@@ -222,6 +223,93 @@ async def test_server_status_error_is_mapped_to_llm_unavailable_error():
     with pytest.raises(LLMUnavailableError):
         async for _ in provider.stream(_request()):
             pass
+
+
+def _tool_round_trip_messages() -> list[Message]:
+    """The exact message shape `AgentRunner.run` builds on step two of a
+    tool-using turn: the original user text, an assistant turn carrying
+    text PLUS two `ToolUseBlock`s (the multi-call case, since that is where
+    OpenAI's one-message-per-result shape diverges most from Anthropic's),
+    and a user turn carrying the two matching `ToolResultBlock`s -- one of
+    them an error."""
+    return [
+        Message.text("user", "find shoes"),
+        Message(
+            role="assistant",
+            content=[
+                TextBlock(text="Let me check."),
+                AppToolUseBlock(id="call_1", name="search_products", input={"q": "shoes"}),
+                AppToolUseBlock(id="call_2", name="search_products", input={"q": "boots"}),
+            ],
+        ),
+        Message(
+            role="user",
+            content=[
+                ToolResultBlock(tool_use_id="call_1", content="3 results", is_error=False),
+                ToolResultBlock(tool_use_id="call_2", content="no results", is_error=True),
+            ],
+        ),
+    ]
+
+
+async def test_tool_round_trip_serializes_every_block_not_just_text():
+    """THE bug Task 4's reviewer found: `Message.text_content` silently
+    discards every `ToolUseBlock`/`ToolResultBlock`, so a step-two request
+    degraded to an empty-content assistant turn and an empty-content user
+    turn -- the tool result never reaching the model, so it would
+    re-request the same tool every step until the cap. This builds the
+    message list `AgentRunner` actually produces on step two: an assistant
+    message with a `tool_calls` array (not nested content blocks, unlike
+    Anthropic), and each tool result as its OWN `role: "tool"` message."""
+    provider = _provider_with([_chunk("hi", finish_reason="stop")])
+    async for _ in provider.stream(_request(messages=_tool_round_trip_messages())):
+        pass
+    messages = provider._client.chat.completions.create.call_args.kwargs["messages"]  # noqa: SLF001
+
+    assert messages[0]["role"] == "system"
+    assert messages[1] == {"role": "user", "content": "find shoes"}
+
+    assistant = messages[2]
+    assert assistant["role"] == "assistant"
+    assert assistant["content"] == "Let me check."
+    assert assistant["tool_calls"] == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "search_products", "arguments": '{"q": "shoes"}'},
+        },
+        {
+            "id": "call_2",
+            "type": "function",
+            "function": {"name": "search_products", "arguments": '{"q": "boots"}'},
+        },
+    ]
+
+    # Each result is its OWN message -- the shape that diverges most from
+    # Anthropic's single nested-content-block user turn.
+    assert messages[3] == {"role": "tool", "tool_call_id": "call_1", "content": "3 results"}
+    assert messages[4] == {"role": "tool", "tool_call_id": "call_2", "content": "no results"}
+    assert len(messages) == 5
+
+
+async def test_an_entirely_empty_assistant_message_is_dropped_not_sent():
+    """Kept aligned with the Anthropic adapter's own guard against this
+    shape: `AgentRunner` produces an assistant turn with neither text
+    (`outcome.text == ""`) nor tool calls whenever a step's outcome is
+    truly empty, and Anthropic outright rejects that content -- dropping it
+    here too means the same conversation history behaves the same way
+    against both providers instead of one silently accepting it."""
+    messages = [
+        Message.text("user", "hi"),
+        Message(role="assistant", content=[TextBlock(text="")]),
+        Message.text("user", "still there?"),
+    ]
+    provider = _provider_with([_chunk("hi", finish_reason="stop")])
+    async for _ in provider.stream(_request(messages=messages)):
+        pass
+    sent = provider._client.chat.completions.create.call_args.kwargs["messages"]  # noqa: SLF001
+    roles = [m["role"] for m in sent]
+    assert roles == ["system", "user", "user"]  # the empty assistant turn is gone
 
 
 def test_capabilities_report_sampling_support():

@@ -9,7 +9,8 @@ run when driven through this subclass.
 import pytest
 
 from app.llm.openrouter_provider import OPENROUTER_BASE_URL, OpenRouterProvider
-from app.llm.types import CompletionRequest, Message, ToolSpec
+from app.llm.types import CompletionRequest, Message, ToolResultBlock, ToolSpec
+from app.llm.types import ToolUseBlock as AppToolUseBlock
 
 from ._llm_stubs import chunk, streaming
 
@@ -80,6 +81,33 @@ async def test_tool_specs_flow_through_the_inherited_stream_loop():
         pass
     kwargs = provider._client.chat.completions.create.call_args.kwargs  # noqa: SLF001
     assert kwargs["tools"][0]["function"]["name"] == "search"
+
+
+async def test_tool_round_trip_flows_through_the_inherited_message_rendering():
+    """Message rendering (`_assistant_message`/`_user_messages`) lives
+    entirely in `OpenAIProvider`, inherited here unchanged. One smoke test
+    proves an assistant turn's `tool_calls` and a matching tool-result
+    message both survive through this subclass -- exhaustive coverage of
+    the rendering itself is `test_openai_provider.py`'s job."""
+    messages = [
+        Message.text("user", "find shoes"),
+        Message(
+            role="assistant",
+            content=[AppToolUseBlock(id="call_1", name="search", input={"q": "shoes"})],
+        ),
+        Message(
+            role="user",
+            content=[ToolResultBlock(tool_use_id="call_1", content="3 results")],
+        ),
+    ]
+    provider = _provider_with([_chunk("hi", finish_reason="stop")])
+    async for _ in provider.stream(_request(messages=messages)):
+        pass
+    sent = provider._client.chat.completions.create.call_args.kwargs["messages"]  # noqa: SLF001
+    assistant = next(m for m in sent if m["role"] == "assistant")
+    assert assistant["tool_calls"][0]["function"]["name"] == "search"
+    tool_result = next(m for m in sent if m["role"] == "tool")
+    assert tool_result == {"role": "tool", "tool_call_id": "call_1", "content": "3 results"}
 
 
 async def test_reasoning_is_disabled_so_the_model_answers_in_prose():

@@ -21,7 +21,8 @@ from app.llm.errors import (
     LLMRateLimitError,
     LLMUnavailableError,
 )
-from app.llm.types import CompletionRequest, Message, ToolSpec
+from app.llm.types import CompletionRequest, Message, TextBlock, ToolResultBlock, ToolSpec
+from app.llm.types import ToolUseBlock as AppToolUseBlock
 
 pytestmark = pytest.mark.anyio
 
@@ -582,6 +583,92 @@ async def test_generate_includes_tool_use_blocks_in_content():
     assert len(tool_blocks) == 1
     assert tool_blocks[0].name == "lookup_order"
     assert tool_blocks[0].input == {"order_id": "A1"}
+
+
+def _tool_round_trip_messages() -> list[Message]:
+    """The exact message shape `AgentRunner.run` builds on step two of a
+    tool-using turn: the original user text, an assistant turn carrying
+    text PLUS two `ToolUseBlock`s (the multi-call case, since that is where
+    a naive implementation is most likely to only handle one), and a user
+    turn carrying the two matching `ToolResultBlock`s -- one of them an
+    error, since `is_error` must round-trip too."""
+    return [
+        Message.text("user", "find shoes"),
+        Message(
+            role="assistant",
+            content=[
+                TextBlock(text="Let me check."),
+                AppToolUseBlock(id="call_1", name="search_products", input={"q": "shoes"}),
+                AppToolUseBlock(id="call_2", name="search_products", input={"q": "boots"}),
+            ],
+        ),
+        Message(
+            role="user",
+            content=[
+                ToolResultBlock(tool_use_id="call_1", content="3 results", is_error=False),
+                ToolResultBlock(tool_use_id="call_2", content="no results", is_error=True),
+            ],
+        ),
+    ]
+
+
+async def test_tool_round_trip_serializes_every_block_not_just_text():
+    """THE bug Task 4's reviewer found: `Message.text_content` silently
+    discards every `ToolUseBlock`/`ToolResultBlock`, so a step-two request
+    degraded to `[{'role':'user','content':'find shoes'},
+    {'role':'assistant','content':''}, {'role':'user','content':''}]` --
+    a 400 against the real API for the empty-text assistant turn, or, if it
+    weren't, a tool result that never reaches the model at all. This builds
+    the message list `AgentRunner` actually produces on step two and asserts
+    every block survives serialization, matched to its call by id."""
+    provider = _provider_with(_FakeStream([_text_delta("hi")], _final_message()))
+    async for _ in provider.stream(_request(messages=_tool_round_trip_messages())):
+        pass
+    messages = provider._client.messages.stream.call_args.kwargs["messages"]  # noqa: SLF001
+
+    assert messages[0] == {"role": "user", "content": [{"type": "text", "text": "find shoes"}]}
+
+    assistant = messages[1]
+    assert assistant["role"] == "assistant"
+    assert assistant["content"] == [
+        {"type": "text", "text": "Let me check."},
+        {"type": "tool_use", "id": "call_1", "name": "search_products", "input": {"q": "shoes"}},
+        {"type": "tool_use", "id": "call_2", "name": "search_products", "input": {"q": "boots"}},
+    ]
+
+    tool_results = messages[2]
+    assert tool_results["role"] == "user"
+    assert tool_results["content"] == [
+        {
+            "type": "tool_result",
+            "tool_use_id": "call_1",
+            "content": "3 results",
+            "is_error": False,
+        },
+        {
+            "type": "tool_result",
+            "tool_use_id": "call_2",
+            "content": "no results",
+            "is_error": True,
+        },
+    ]
+
+
+async def test_an_entirely_empty_assistant_message_is_dropped_not_sent():
+    """Anthropic rejects an empty-content message outright, on any role,
+    anywhere in the array. `AgentRunner` produces exactly this shape when a
+    step's outcome has neither text (`outcome.text == ""`) nor tool calls."""
+    messages = [
+        Message.text("user", "hi"),
+        Message(role="assistant", content=[TextBlock(text="")]),
+        Message.text("user", "still there?"),
+    ]
+    provider = _provider_with(_FakeStream([_text_delta("hi")], _final_message()))
+    async for _ in provider.stream(_request(messages=messages)):
+        pass
+    kwargs = provider._client.messages.stream.call_args.kwargs  # noqa: SLF001
+    roles = [m["role"] for m in kwargs["messages"]]
+    assert roles == ["user", "user"]  # the empty assistant turn is gone entirely
 
 
 def test_capabilities_report_no_sampling_for_current_models():
