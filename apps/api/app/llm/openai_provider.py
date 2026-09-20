@@ -170,10 +170,18 @@ class OpenAIProvider:
         `tool_result` blocks inside one user-role message) and nothing here
         forces one shape into the other.
 
-        This wire format has no field for `ToolResultBlock.is_error` the
-        way Anthropic's `tool_result` block does; `content` already carries
-        a human-readable description of a failure (`ToolRegistry.execute`
-        never returns a bare error code), so it is sent as-is.
+        This wire format has no field for `ToolResultBlock.is_error` the way
+        Anthropic's `tool_result` block does -- so it must be carried in the
+        one channel this format has, `content` itself. Today every failure
+        `ToolRegistry.execute` produces is already self-describing prose
+        (`"'x' failed unexpectedly"`, `"unknown tool 'x'"`, ...), so this
+        holds by CONVENTION, not construction: nothing stops a future tool
+        author from returning `ToolResult(content="", is_error=True)`, which
+        would render identically to an empty success and silently tell the
+        model its tool worked -- exactly the fiction ARCHITECTURE.md §7.3
+        requires a failed tool never present as. Prefixing on `is_error`
+        makes the distinction structural instead of a convention every tool
+        author has to independently uphold.
         """
         rendered: list[ChatCompletionMessageParam] = []
         text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
@@ -181,9 +189,21 @@ class OpenAIProvider:
             rendered.append(ChatCompletionUserMessageParam(role="user", content=text))
         for block in message.content:
             if isinstance(block, ToolResultBlock):
+                if block.is_error:
+                    # An empty `content` here must still read as a failure
+                    # a model can act on, not "Error: " followed by nothing
+                    # -- a bare prefix with no detail reads as a rendering
+                    # glitch, not a clear signal that the call failed.
+                    content = (
+                        f"Error: {block.content}"
+                        if block.content
+                        else "Error: the tool call failed with no further detail"
+                    )
+                else:
+                    content = block.content
                 rendered.append(
                     ChatCompletionToolMessageParam(
-                        role="tool", tool_call_id=block.tool_use_id, content=block.content
+                        role="tool", tool_call_id=block.tool_use_id, content=content
                     )
                 )
         return rendered

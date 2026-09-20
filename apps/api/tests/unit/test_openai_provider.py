@@ -286,9 +286,17 @@ async def test_tool_round_trip_serializes_every_block_not_just_text():
     ]
 
     # Each result is its OWN message -- the shape that diverges most from
-    # Anthropic's single nested-content-block user turn.
+    # Anthropic's single nested-content-block user turn. `call_2`'s result
+    # is `is_error=True` and picks up the "Error: " prefix this format needs
+    # to carry that signal at all (no dedicated field, unlike Anthropic's
+    # `tool_result.is_error`) -- see the dedicated distinguishability tests
+    # below for why that prefix exists.
     assert messages[3] == {"role": "tool", "tool_call_id": "call_1", "content": "3 results"}
-    assert messages[4] == {"role": "tool", "tool_call_id": "call_2", "content": "no results"}
+    assert messages[4] == {
+        "role": "tool",
+        "tool_call_id": "call_2",
+        "content": "Error: no results",
+    }
     assert len(messages) == 5
 
 
@@ -310,6 +318,60 @@ async def test_an_entirely_empty_assistant_message_is_dropped_not_sent():
     sent = provider._client.chat.completions.create.call_args.kwargs["messages"]  # noqa: SLF001
     roles = [m["role"] for m in sent]
     assert roles == ["system", "user", "user"]  # the empty assistant turn is gone
+
+
+async def test_a_failed_tool_result_is_rendered_distinguishably_from_success():
+    """This wire format has no `is_error` field the way Anthropic's
+    `tool_result` block does, so the signal must survive in `content`
+    itself -- ARCHITECTURE.md §7.3 requires a failed tool reach the model as
+    a readable failure, not fiction. `ToolResult(content="", is_error=True)`
+    is legal for a tool author to return today, and without a prefix it
+    would render byte-for-byte identical to an empty SUCCESS
+    (`{"role": "tool", "tool_call_id": "c1", "content": ""}` either way).
+    Both the general case and the empty-content edge (a bare "Error: " with
+    nothing after it reads as a rendering glitch, not a clear failure
+    signal) are pinned here."""
+    messages = [
+        Message.text("user", "find shoes"),
+        Message(
+            role="assistant",
+            content=[AppToolUseBlock(id="call_1", name="search", input={"q": "shoes"})],
+        ),
+        Message(
+            role="user",
+            content=[ToolResultBlock(tool_use_id="call_1", content="", is_error=True)],
+        ),
+    ]
+    provider = _provider_with([_chunk("hi", finish_reason="stop")])
+    async for _ in provider.stream(_request(messages=messages)):
+        pass
+    sent = provider._client.chat.completions.create.call_args.kwargs["messages"]  # noqa: SLF001
+    tool_message = next(m for m in sent if m["role"] == "tool")
+    assert tool_message["content"] != ""
+    assert "error" in tool_message["content"].lower()
+
+
+async def test_a_successful_empty_tool_result_is_not_marked_as_an_error():
+    """The counterpart to the test above: without this, `is_error` could be
+    ignored entirely and every result -- success included -- could be
+    prefixed as an error, and the suite would still catch the failure case."""
+    messages = [
+        Message.text("user", "find shoes"),
+        Message(
+            role="assistant",
+            content=[AppToolUseBlock(id="call_1", name="search", input={"q": "shoes"})],
+        ),
+        Message(
+            role="user",
+            content=[ToolResultBlock(tool_use_id="call_1", content="", is_error=False)],
+        ),
+    ]
+    provider = _provider_with([_chunk("hi", finish_reason="stop")])
+    async for _ in provider.stream(_request(messages=messages)):
+        pass
+    sent = provider._client.chat.completions.create.call_args.kwargs["messages"]  # noqa: SLF001
+    tool_message = next(m for m in sent if m["role"] == "tool")
+    assert tool_message["content"] == ""
 
 
 def test_capabilities_report_sampling_support():
