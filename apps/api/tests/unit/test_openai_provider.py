@@ -430,6 +430,46 @@ async def test_a_tool_only_turn_streams_no_text_and_does_not_trip_the_empty_resp
     )
     events = [e async for e in provider.stream(_request())]
     assert [e.type for e in events] == ["message_start", "tool_use", "usage", "message_end"]
+    end = events[-1]
+    assert end.stop_reason == "tool_calls"
+
+
+async def test_concurrent_tool_calls_are_finalized_in_index_order_even_when_fragments_are_not():
+    """The wire is under no obligation to send index 0's fragments before
+    index 1's. `sorted(pending_tool_calls)` in the provider is what turns
+    arrival order into deterministic call order -- without it, this test
+    passes or fails depending on dict insertion order, which happens to
+    match ascending index today only because every other test in this file
+    sends fragments in ascending order."""
+    provider = _provider_with(
+        [
+            _chunk(
+                tool_calls=[
+                    tool_call_delta(1, id="call_2", name="search", arguments=""),
+                    tool_call_delta(0, id="call_1", name="search", arguments=""),
+                ]
+            ),
+            _chunk(
+                tool_calls=[
+                    tool_call_delta(1, arguments='{"q": "b'),
+                    tool_call_delta(0, arguments='{"q": "a'),
+                ]
+            ),
+            _chunk(
+                tool_calls=[
+                    tool_call_delta(1, arguments='"}'),
+                    tool_call_delta(0, arguments='"}'),
+                ]
+            ),
+            _chunk(finish_reason="tool_calls"),
+            _chunk(usage=(10, 4)),
+        ]
+    )
+    tool_events = [e async for e in provider.stream(_request()) if e.type == "tool_use"]
+    assert [(e.block.id, e.block.input) for e in tool_events] == [
+        ("call_1", {"q": "a"}),
+        ("call_2", {"q": "b"}),
+    ]
 
 
 async def test_generate_includes_tool_use_blocks_in_content():

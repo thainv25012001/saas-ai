@@ -201,9 +201,23 @@ class AnthropicProvider:
                         # buffer per index -- never one shared buffer -- so
                         # two tool calls streamed in the same turn cannot
                         # interleave into each other's JSON.
-                        pending_tool_calls[raw_event.index].fragments.append(
-                            raw_event.delta.partial_json
-                        )
+                        #
+                        # `.get` rather than `[...]`: a fragment for an index
+                        # that never had a `content_block_start`, or whose
+                        # `content_block_stop` already popped it, is a wire
+                        # anomaly we did not cause -- it must not become an
+                        # unhandled `KeyError` propagating straight out of
+                        # `stream()` past every `except` clause below (none of
+                        # which map `KeyError` to anything). Dropped and
+                        # logged instead, the same treatment a hallucinated
+                        # tool name gets in `ToolRegistry.execute`.
+                        pending = pending_tool_calls.get(raw_event.index)
+                        if pending is None:
+                            logger.warning(
+                                "anthropic_orphaned_tool_fragment", index=raw_event.index
+                            )
+                            continue
+                        pending.fragments.append(raw_event.delta.partial_json)
                         continue
 
                     if (

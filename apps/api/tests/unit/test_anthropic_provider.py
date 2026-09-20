@@ -466,6 +466,29 @@ async def test_a_tool_only_turn_streams_no_text_and_does_not_trip_the_empty_resp
     provider = _provider_with(_FakeStream(events, _final_message(stop_reason="tool_use")))
     result = [e async for e in provider.stream(_request())]
     assert [e.type for e in result] == ["message_start", "tool_use", "usage", "message_end"]
+    end = result[-1]
+    assert end.stop_reason == "tool_use"
+
+
+async def test_an_input_json_delta_for_an_index_with_no_pending_call_does_not_crash():
+    """Two shapes of the same wire anomaly, neither of which we cause: a
+    fragment for an index that never had a `content_block_start` at all, and
+    a fragment that arrives AFTER that index's `content_block_stop` already
+    popped it (the exact case the brief names). Before the `.get` guard,
+    `pending_tool_calls[raw_event.index]` raised `KeyError` straight out of
+    `stream()`, uncaught by any of the `except` clauses below it."""
+    events = [
+        _input_json_delta(9, '{"orphaned": true}'),  # index 9 never started
+        _tool_use_start(0, "call_1", "lookup_order"),
+        _input_json_delta(0, "{}"),
+        _content_block_stop(0),
+        _input_json_delta(0, '{"too_late": true}'),  # arrives after the stop
+    ]
+    provider = _provider_with(_FakeStream(events, _final_message(stop_reason="tool_use")))
+    tool_events = [e async for e in provider.stream(_request()) if e.type == "tool_use"]
+    assert len(tool_events) == 1
+    assert tool_events[0].block.id == "call_1"
+    assert tool_events[0].block.input == {}
 
 
 async def test_tool_use_with_no_arguments_parses_as_an_empty_dict():

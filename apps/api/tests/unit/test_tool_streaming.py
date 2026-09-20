@@ -104,6 +104,22 @@ async def test_generate_also_advances_the_turn_cursor():
     assert second.stop_reason == "end_turn"
 
 
+async def test_stream_then_generate_advance_the_same_cursor():
+    """Task 4's loop will call `stream()` repeatedly, but nothing rules out a
+    mixed call pattern -- e.g. a caller reaching for `generate()` on a final
+    turn once it knows no more streaming is needed. This pins that `stream()`
+    consuming turn 1 leaves `generate()` to consume turn 2, not turn 1 again."""
+    provider = FakeProvider(
+        turns=[[FakeToolCall(name="lookup_order", input={"order_id": "A1"})], "Shipped."]
+    )
+    first = [event async for event in provider.stream(_request())]
+    assert first[1].block.name == "lookup_order"
+
+    second = await provider.generate(_request())
+    assert second.text == "Shipped."
+    assert second.stop_reason == "end_turn"
+
+
 async def test_old_script_construction_is_completely_unaffected():
     """Pin against the exact regression this task must not cause: every
     existing chat test constructs `FakeProvider(script=[...])` and expects
