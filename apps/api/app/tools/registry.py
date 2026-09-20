@@ -12,7 +12,10 @@ becomes a `ToolResult(is_error=True)`.
 """
 
 import asyncio
+from collections.abc import Iterator
+from typing import get_args, get_origin
 
+from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
 
 from app.core.errors import format_validation_errors
@@ -22,6 +25,82 @@ from app.tools.base import AgentTool, ToolContext, ToolResult
 
 logger = get_logger(__name__)
 
+#: The one field a tool's own arguments may never carry, at any depth. Kept as
+#: a name, not a schema key, because that is exactly the distinction that
+#: matters -- see `_reject_tenant_leaking_model` below.
+_FORBIDDEN_ARG_FIELD = "organization_id"
+
+
+def _nested_models(annotation: object) -> Iterator[type[BaseModel]]:
+    """Every `BaseModel` reachable from a field's type annotation.
+
+    Walks generic containers (`list[X]`, `X | None`, `dict[str, X]`, ...) via
+    `get_origin`/`get_args` rather than reading the JSON-schema's `$defs`:
+    the schema keys a nested model's own fields by their *alias* too, so
+    resolving through it would reproduce the exact blind spot this function
+    exists to close one level down. Walking the Python types directly finds
+    the attribute name at every depth, regardless of how any level aliases it.
+    """
+    origin = get_origin(annotation)
+    if origin is not None:
+        for arg in get_args(annotation):
+            yield from _nested_models(arg)
+        return
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        yield annotation
+
+
+def _reject_tenant_leaking_model(
+    tool_name: str, model: type[BaseModel], seen: set[type[BaseModel]]
+) -> None:
+    """Raise if `model`, or any model nested inside it, could carry
+    `organization_id` from model-supplied input.
+
+    Three routes were demonstrated against an earlier version of this check
+    that only read `model_json_schema()["properties"]`, and each is closed
+    here on its own terms rather than patched around:
+
+    - `Field(alias="org_id")` on an `organization_id` field renames the
+      *wire* property the schema advertises, but leaves the attribute a tool
+      body actually reads (`args.organization_id`) unchanged. Reading
+      `model.model_fields` -- keyed by attribute name, never by alias --
+      instead of the schema closes this regardless of aliasing depth.
+    - A nested model (e.g. `filters: SomeFilters` where `SomeFilters`
+      declares `organization_id`) doesn't appear as a top-level property at
+      all. `_nested_models` walks every field's annotation to find it.
+    - `ConfigDict(extra="allow")` accepts `organization_id` as an *undeclared*
+      key with no field to inspect at all -- `model_extra` after validation,
+      invisible to any check of `model_fields` or the schema. There is no
+      way to allow-list "extra fields except this one name" against a model
+      that accepts arbitrary keys, so `extra="allow"` is refused outright on
+      every args model, independent of what it happens to declare.
+
+    `seen` guards a self-referential or mutually-referential model from
+    recursing forever; the checks below are cheap enough not to need a
+    memoised "already known safe" cache on top of it.
+    """
+    if model in seen:
+        return
+    seen.add(model)
+
+    if model.model_config.get("extra") == "allow":
+        raise ValueError(
+            f"tool '{tool_name}' args_model '{model.__name__}' sets "
+            "extra='allow'; an argument model populated from model output "
+            "must declare every field it accepts, or a tenant id could ride "
+            "in as an undeclared key"
+        )
+
+    for field_name, field_info in model.model_fields.items():
+        if field_name == _FORBIDDEN_ARG_FIELD:
+            raise ValueError(
+                f"tool '{tool_name}' args_model '{model.__name__}' declares "
+                f"'{_FORBIDDEN_ARG_FIELD}'; tenancy comes from ToolContext, "
+                "never from a model-supplied argument"
+            )
+        for nested in _nested_models(field_info.annotation):
+            _reject_tenant_leaking_model(tool_name, nested, seen)
+
 
 class ToolRegistry:
     def __init__(self) -> None:
@@ -30,21 +109,17 @@ class ToolRegistry:
     def register(self, tool: AgentTool) -> None:
         """Add a tool, keyed by its own `name`.
 
-        Refuses a tool whose `args_model` declares `organization_id`: per
-        `docs/ARCHITECTURE.md` §7.3, tenancy comes from `ToolContext`, which
-        the server builds from the authenticated request, never from
-        model-supplied arguments. Checking the *schema* here (once, at
+        Refuses an `args_model` that could carry `organization_id` from
+        model-supplied input, at any nesting depth or under any alias, and
+        refuses one that accepts undeclared fields at all -- see
+        `_reject_tenant_leaking_model` for the three routes this closes and
+        why each is closed where it is. Checking this here (once, at
         registration) rather than trusting every future tool author to
         remember the rule is what makes the guarantee "a model has no
         argument through which to ask for another tenant's data" hold for
         tools nobody has written yet.
         """
-        schema_properties = tool.args_model.model_json_schema().get("properties", {})
-        if "organization_id" in schema_properties:
-            raise ValueError(
-                f"tool '{tool.name}' declares 'organization_id' in its args_model; "
-                "tenancy comes from ToolContext, never from a model-supplied argument"
-            )
+        _reject_tenant_leaking_model(tool.name, tool.args_model, set())
         self._tools[tool.name] = tool
 
     def specs_for(self, names: list[str]) -> list[ToolSpec]:

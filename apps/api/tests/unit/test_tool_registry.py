@@ -11,7 +11,7 @@ import uuid
 
 import pytest
 from anyio import fail_after
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.llm.types import ToolUseBlock
 from app.tools.base import AgentTool, ToolContext, ToolResult
@@ -78,6 +78,53 @@ class _LeakyTool(AgentTool):
     name = "leaky"
     description = "Illegally asks the model for a tenant id."
     args_model = _LeakyArgs
+
+    async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolResult:
+        return ToolResult(content="must never run")
+
+
+class _AliasedLeakArgs(BaseModel):
+    # The wire-facing schema property is "org_id" -- only the attribute a
+    # tool body actually reads (`args.organization_id`) is the forbidden name.
+    organization_id: uuid.UUID = Field(alias="org_id")
+
+
+class _AliasedLeakTool(AgentTool):
+    name = "aliased-leak"
+    description = "Hides organization_id from the schema behind an alias."
+    args_model = _AliasedLeakArgs
+
+    async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolResult:
+        return ToolResult(content="must never run")
+
+
+class _NestedLeak(BaseModel):
+    organization_id: str
+
+
+class _NestedLeakArgs(BaseModel):
+    filters: _NestedLeak
+
+
+class _NestedLeakTool(AgentTool):
+    name = "nested-leak"
+    description = "Buries organization_id one level down, in a nested model."
+    args_model = _NestedLeakArgs
+
+    async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolResult:
+        return ToolResult(content="must never run")
+
+
+class _ExtraAllowArgs(BaseModel):
+    # Declares no fields at all -- `organization_id` would ride in as an
+    # undeclared key, invisible to any check of declared fields or schema.
+    model_config = ConfigDict(extra="allow")
+
+
+class _ExtraAllowTool(AgentTool):
+    name = "extra-allow"
+    description = "Accepts any undeclared field, organization_id included."
+    args_model = _ExtraAllowArgs
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolResult:
         return ToolResult(content="must never run")
@@ -167,3 +214,20 @@ async def test_a_successful_call_returns_the_tools_own_result() -> None:
 def test_registering_a_tool_that_asks_the_model_for_organization_id_is_rejected() -> None:
     with pytest.raises(ValueError, match="organization_id"):
         _registry(_LeakyTool())
+
+
+def test_registering_a_tool_with_an_aliased_organization_id_field_is_rejected() -> None:
+    # A schema-only check (reading `properties`) would see "org_id" and miss
+    # this entirely, while `args.organization_id` is fully populated.
+    with pytest.raises(ValueError, match="organization_id"):
+        _registry(_AliasedLeakTool())
+
+
+def test_registering_a_tool_with_organization_id_buried_in_a_nested_model_is_rejected() -> None:
+    with pytest.raises(ValueError, match="organization_id"):
+        _registry(_NestedLeakTool())
+
+
+def test_registering_a_tool_that_allows_extra_fields_is_rejected() -> None:
+    with pytest.raises(ValueError, match="extra"):
+        _registry(_ExtraAllowTool())
