@@ -1,12 +1,18 @@
+import json
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from typing import Any
 
 import openai
+from openai import Omit, omit
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
+    ChatCompletionFunctionToolParam,
     ChatCompletionMessageParam,
     ChatCompletionSystemMessageParam,
     ChatCompletionUserMessageParam,
 )
+from openai.types.shared_params import FunctionDefinition
 
 from app.core.logging import get_logger
 from app.llm.base import ModelCapabilities, SchemaT
@@ -19,16 +25,36 @@ from app.llm.errors import (
 from app.llm.types import (
     CompletionRequest,
     CompletionResponse,
+    ContentBlock,
     MessageEndEvent,
     MessageStartEvent,
     StreamEvent,
     TextBlock,
     TextDeltaEvent,
+    ToolUseBlock,
+    ToolUseEvent,
     Usage,
     UsageEvent,
 )
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class _PendingToolCall:
+    """Accumulates one tool call's `function.arguments` fragments, keyed by
+    the SDK's own `index`. That index exists precisely because a single
+    response can ask for several tools at once, each streamed with its own
+    index-keyed fragments interleaved in the same chunk stream -- one buffer
+    per index, never one shared buffer, is what keeps parallel calls from
+    corrupting each other's JSON. `id`/`name` default empty because only the
+    FIRST fragment for a given index carries them; later fragments carry
+    only a piece of `arguments`."""
+
+    id: str = ""
+    name: str = ""
+    fragments: list[str] = field(default_factory=list)
+
 
 # Unlike Anthropic, OpenAI did not remove sampling from any current chat
 # model, and there is no per-model "thinking" surface on the Chat Completions
@@ -138,9 +164,30 @@ class OpenAIProvider:
             )
         return max_tokens
 
+    def _tools(self, request: CompletionRequest) -> list[ChatCompletionFunctionToolParam] | Omit:
+        """The request's tool specs in the SDK's own shape, or `omit`.
+
+        `omit` -- not `None` -- is what "not provided" means to this SDK
+        parameter (`tools: Iterable[...] | Omit`, no `None` in the type at
+        all); sending a literal `null` for it is a different, and for some
+        vendors rejected, request body.
+        """
+        if not request.tools:
+            return omit
+        return [
+            ChatCompletionFunctionToolParam(
+                type="function",
+                function=FunctionDefinition(
+                    name=t.name, description=t.description, parameters=t.input_schema
+                ),
+            )
+            for t in request.tools
+        ]
+
     async def _stream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
         messages = self._messages(request)
         max_tokens = self._max_tokens(request)
+        tools = self._tools(request)
         try:
             # `AsyncCompletions.create` is `@overload`ed on the LITERAL value
             # of `stream=`. Building one `dict[str, Any]` of kwargs and
@@ -162,6 +209,7 @@ class OpenAIProvider:
                     stream=True,
                     stream_options={"include_usage": True},
                     temperature=request.temperature,
+                    tools=tools,
                     extra_body=self._extra_body(),
                 )
             else:
@@ -171,6 +219,7 @@ class OpenAIProvider:
                     max_tokens=max_tokens,
                     stream=True,
                     stream_options={"include_usage": True},
+                    tools=tools,
                     extra_body=self._extra_body(),
                 )
 
@@ -178,6 +227,7 @@ class OpenAIProvider:
             emitted_text = False
             usage = Usage()
             finish_reason: str | None = None
+            pending_tool_calls: dict[int, _PendingToolCall] = {}
             async for chunk in stream:
                 # The usage-only final chunk (sent because we asked for
                 # `stream_options.include_usage`) has an EMPTY `choices`
@@ -191,6 +241,18 @@ class OpenAIProvider:
                     if content:
                         emitted_text = True
                         yield TextDeltaEvent(text=content)
+                    if choice.delta.tool_calls:
+                        for tool_call_delta in choice.delta.tool_calls:
+                            pending = pending_tool_calls.setdefault(
+                                tool_call_delta.index, _PendingToolCall()
+                            )
+                            if tool_call_delta.id:
+                                pending.id = tool_call_delta.id
+                            if tool_call_delta.function is not None:
+                                if tool_call_delta.function.name:
+                                    pending.name = tool_call_delta.function.name
+                                if tool_call_delta.function.arguments:
+                                    pending.fragments.append(tool_call_delta.function.arguments)
                     if choice.finish_reason is not None:
                         finish_reason = choice.finish_reason
                 if chunk.usage is not None:
@@ -198,6 +260,18 @@ class OpenAIProvider:
                         input_tokens=chunk.usage.prompt_tokens,
                         output_tokens=chunk.usage.completion_tokens,
                     )
+
+            # Unlike Anthropic's `content_block_stop`, this wire format has no
+            # explicit "this tool call is complete" event -- the end of the
+            # stream is the only signal. Finalized in INDEX order (not dict
+            # insertion order, which happens to match today but is not a
+            # promise this format makes) so parallel calls come out in the
+            # order the model asked for them.
+            for index in sorted(pending_tool_calls):
+                call = pending_tool_calls[index]
+                raw_json = "".join(call.fragments)
+                input_data: dict[str, Any] = json.loads(raw_json) if raw_json else {}
+                yield ToolUseEvent(block=ToolUseBlock(id=call.id, name=call.name, input=input_data))
 
             if not emitted_text and finish_reason not in _NO_TEXT_EXPECTED_STOP_REASONS:
                 # The stream completed without a single text delta, and not
@@ -245,15 +319,20 @@ class OpenAIProvider:
 
     async def generate(self, request: CompletionRequest) -> CompletionResponse:
         parts: list[str] = []
+        tool_blocks: list[ToolUseBlock] = []
         usage = Usage()
         stop_reason: str | None = None
         async for event in self._stream(request):
             if event.type == "text_delta":
                 parts.append(event.text)
+            elif event.type == "tool_use":
+                tool_blocks.append(event.block)
             elif event.type == "message_end":
                 usage, stop_reason = event.usage, event.stop_reason
+        content: list[ContentBlock] = [TextBlock(text="".join(parts))]
+        content.extend(tool_blocks)
         return CompletionResponse(
-            content=[TextBlock(text="".join(parts))],
+            content=content,
             usage=usage,
             model=request.model,
             stop_reason=stop_reason,

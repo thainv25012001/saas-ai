@@ -17,6 +17,7 @@ from app.llm.types import (
     StreamEvent,
     TextBlock,
     ToolUseBlock,
+    ToolUseEvent,
     Usage,
 )
 
@@ -62,6 +63,19 @@ def test_stream_events_discriminate_on_type():
     """Same guard as above, for the StreamEvent union used by the SSE layer."""
     event = TypeAdapter(StreamEvent).validate_python({"type": "error", "code": "c", "message": "m"})
     assert isinstance(event, ErrorEvent)
+
+
+def test_tool_use_stream_event_discriminates_on_type():
+    """Phase 4 adds `tool_use` to the `StreamEvent` union. Validated as a raw
+    dict, the only path where the discriminator actually runs -- constructing
+    `ToolUseEvent(...)` directly in Python would never exercise it."""
+    event = TypeAdapter(StreamEvent).validate_python(
+        {"type": "tool_use", "block": {"id": "t1", "name": "search", "input": {"q": "x"}}}
+    )
+    assert isinstance(event, ToolUseEvent)
+    assert isinstance(event.block, ToolUseBlock)
+    assert event.block.name == "search"
+    assert event.block.input == {"q": "x"}
 
 
 def test_completion_request_defaults_temperature_to_none():

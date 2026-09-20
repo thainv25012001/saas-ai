@@ -9,20 +9,47 @@ non-obvious part, and a second copy would lose it.
 from unittest.mock import AsyncMock, MagicMock
 
 
-def chunk(text=None, usage=None, finish_reason=None):
+def tool_call_delta(index, id=None, name=None, arguments=None):
+    """One fragment of a streamed OpenAI tool call.
+
+    A real delta carries `id` and `function.name` only on the FIRST fragment
+    for a given `index`; every later fragment for that same call carries
+    `id=None`, `function.name=None`, and only a piece of `function.arguments`
+    -- `id`/`name` default to `None` here for exactly that reason, not as a
+    generic convenience default.
+
+    `MagicMock(name=...)` cannot be used for `function.name`: the mock
+    constructor special-cases the `name` kwarg as the mock's own repr, not an
+    attribute, so it is set after construction instead.
+    """
+    delta = MagicMock()
+    delta.index = index
+    delta.id = id
+    if name is None and arguments is None:
+        delta.function = None
+    else:
+        function = MagicMock()
+        function.name = name
+        function.arguments = arguments
+        delta.function = function
+    return delta
+
+
+def chunk(text=None, usage=None, finish_reason=None, tool_calls=None):
     """One streamed chunk. `usage` is a `(prompt_tokens, completion_tokens)`
-    pair; a chunk with neither text nor a finish reason models the usage-only
-    final chunk, which carries an empty `choices`."""
+    pair; a chunk with no text, finish reason, or tool calls models the
+    usage-only final chunk, which carries an empty `choices`."""
     stub = MagicMock()
     if usage is None:
         stub.usage = None
     else:
         stub.usage = MagicMock(prompt_tokens=usage[0], completion_tokens=usage[1])
-    if text is None and finish_reason is None:
+    if text is None and finish_reason is None and tool_calls is None:
         stub.choices = []
     else:
         choice = MagicMock()
         choice.delta.content = text
+        choice.delta.tool_calls = tool_calls
         choice.finish_reason = finish_reason
         stub.choices = [choice]
     return stub

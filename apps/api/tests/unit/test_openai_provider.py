@@ -11,9 +11,9 @@ from app.llm.errors import (
     LLMUnavailableError,
 )
 from app.llm.openai_provider import OpenAIProvider
-from app.llm.types import CompletionRequest, Message
+from app.llm.types import CompletionRequest, Message, ToolSpec
 
-from ._llm_stubs import chunk, streaming
+from ._llm_stubs import chunk, streaming, tool_call_delta
 
 pytestmark = pytest.mark.anyio
 
@@ -29,8 +29,8 @@ def _request(**overrides) -> CompletionRequest:
     return CompletionRequest(**payload)
 
 
-def _chunk(text=None, usage=None, finish_reason=None):
-    return chunk(text=text, usage=usage, finish_reason=finish_reason)
+def _chunk(text=None, usage=None, finish_reason=None, tool_calls=None):
+    return chunk(text=text, usage=usage, finish_reason=finish_reason, tool_calls=tool_calls)
 
 
 def _provider_with(chunks):
@@ -313,3 +313,140 @@ async def test_openai_is_sent_no_vendor_extras():
         pass
     kwargs = provider._client.chat.completions.create.call_args.kwargs  # noqa: SLF001
     assert kwargs.get("extra_body") is None
+
+
+def _tools_request(**overrides):
+    tools = [
+        ToolSpec(
+            name="search",
+            description="search stuff",
+            input_schema={"type": "object", "properties": {}},
+        )
+    ]
+    return _request(tools=tools, **overrides)
+
+
+async def test_tool_specs_are_sent_in_the_request():
+    provider = _provider_with([_chunk("hi", finish_reason="stop")])
+    async for _ in provider.stream(_tools_request()):
+        pass
+    kwargs = provider._client.chat.completions.create.call_args.kwargs  # noqa: SLF001
+    assert kwargs["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "search stuff",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+
+async def test_no_tools_key_is_sent_when_the_request_has_none():
+    """The counterpart to the test above: without this, the branch could send
+    an empty list (or omit the field entirely from a different code path) and
+    the suite would stay green. `openai.omit` is what "not provided" looks
+    like in this SDK -- a plain `None` is a different, disallowed value for
+    this parameter."""
+    provider = _provider_with([_chunk("hi", finish_reason="stop")])
+    async for _ in provider.stream(_request()):
+        pass
+    kwargs = provider._client.chat.completions.create.call_args.kwargs  # noqa: SLF001
+    assert kwargs["tools"] is openai.omit
+
+
+async def test_tool_call_arguments_split_across_three_chunks_are_accumulated():
+    """The defect this project keeps finding: a fake that delivers whole JSON
+    in one delta tests nothing about the accumulator. This delivers
+    `{"order_id": "A1", "confirm": true}` in three fragments, none of which is
+    valid JSON on its own."""
+    provider = _provider_with(
+        [
+            _chunk(tool_calls=[tool_call_delta(0, id="call_1", name="lookup_order", arguments="")]),
+            _chunk(tool_calls=[tool_call_delta(0, arguments='{"order_id": ')]),
+            _chunk(tool_calls=[tool_call_delta(0, arguments='"A1", "conf')]),
+            _chunk(tool_calls=[tool_call_delta(0, arguments='irm": true}')]),
+            _chunk(finish_reason="tool_calls"),
+            _chunk(usage=(10, 4)),
+        ]
+    )
+    tool_events = [e async for e in provider.stream(_request()) if e.type == "tool_use"]
+    assert len(tool_events) == 1
+    block = tool_events[0].block
+    assert block.id == "call_1"
+    assert block.name == "lookup_order"
+    assert block.input == {"order_id": "A1", "confirm": True}
+
+
+async def test_two_concurrent_tool_calls_are_accumulated_independently():
+    """OpenAI's fragments are keyed by `index` precisely because a model can
+    ask for several tools at once; accumulating into one shared buffer
+    instead of per-index would corrupt both calls' JSON."""
+    provider = _provider_with(
+        [
+            _chunk(
+                tool_calls=[
+                    tool_call_delta(0, id="call_1", name="search", arguments=""),
+                    tool_call_delta(1, id="call_2", name="search", arguments=""),
+                ]
+            ),
+            _chunk(
+                tool_calls=[
+                    tool_call_delta(0, arguments='{"q": "a'),
+                    tool_call_delta(1, arguments='{"q": "b'),
+                ]
+            ),
+            _chunk(
+                tool_calls=[
+                    tool_call_delta(0, arguments='"}'),
+                    tool_call_delta(1, arguments='"}'),
+                ]
+            ),
+            _chunk(finish_reason="tool_calls"),
+            _chunk(usage=(10, 4)),
+        ]
+    )
+    tool_events = [e async for e in provider.stream(_request()) if e.type == "tool_use"]
+    assert [(e.block.id, e.block.input) for e in tool_events] == [
+        ("call_1", {"q": "a"}),
+        ("call_2", {"q": "b"}),
+    ]
+
+
+async def test_a_tool_only_turn_streams_no_text_and_does_not_trip_the_empty_response_guard():
+    """Confirmed through real streamed tool-call deltas, not just by handing
+    `finish_reason="tool_calls"` to a chunk with no tool content at all --
+    that would pass even against a naive `if not emitted_text: raise` guard,
+    since this test would then raise `LLMEmptyResponseError` and fail."""
+    provider = _provider_with(
+        [
+            _chunk(
+                tool_calls=[tool_call_delta(0, id="call_1", name="lookup_order", arguments="{}")]
+            ),
+            _chunk(finish_reason="tool_calls"),
+            _chunk(usage=(10, 2)),
+        ]
+    )
+    events = [e async for e in provider.stream(_request())]
+    assert [e.type for e in events] == ["message_start", "tool_use", "usage", "message_end"]
+
+
+async def test_generate_includes_tool_use_blocks_in_content():
+    provider = _provider_with(
+        [
+            _chunk(
+                tool_calls=[
+                    tool_call_delta(
+                        0, id="call_1", name="lookup_order", arguments='{"order_id": "A1"}'
+                    )
+                ]
+            ),
+            _chunk(finish_reason="tool_calls"),
+        ]
+    )
+    response = await provider.generate(_request())
+    tool_blocks = [b for b in response.content if b.type == "tool_use"]
+    assert len(tool_blocks) == 1
+    assert tool_blocks[0].name == "lookup_order"
+    assert tool_blocks[0].input == {"order_id": "A1"}

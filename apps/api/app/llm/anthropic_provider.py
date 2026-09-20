@@ -1,8 +1,16 @@
+import json
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from typing import Any
 
 import anthropic
-from anthropic.types import RawContentBlockDeltaEvent
+from anthropic.types import (
+    InputJSONDelta,
+    RawContentBlockDeltaEvent,
+    RawContentBlockStartEvent,
+    RawContentBlockStopEvent,
+)
+from anthropic.types import ToolUseBlock as AnthropicToolUseBlock
 
 from app.core.logging import get_logger
 from app.llm.base import ModelCapabilities, SchemaT
@@ -15,16 +23,32 @@ from app.llm.errors import (
 from app.llm.types import (
     CompletionRequest,
     CompletionResponse,
+    ContentBlock,
     MessageEndEvent,
     MessageStartEvent,
     StreamEvent,
     TextBlock,
     TextDeltaEvent,
+    ToolUseBlock,
+    ToolUseEvent,
     Usage,
     UsageEvent,
 )
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class _PendingToolCall:
+    """Accumulates one tool call's `input_json_delta` fragments, keyed by
+    content-block index so two calls in the same turn (Anthropic sends one
+    `tool_use` content block per call, interleaved with the others by
+    `index`) never share a buffer."""
+
+    id: str
+    name: str
+    fragments: list[str] = field(default_factory=list)
+
 
 # Sampling was REMOVED from these models: sending `temperature` returns a 400.
 # Thinking is adaptive and on by default; depth is set with output_config.effort.
@@ -138,6 +162,12 @@ class AnthropicProvider:
         if request.effort is not None and caps.supports_effort:
             kwargs["output_config"] = {"effort": request.effort}
 
+        if request.tools:
+            kwargs["tools"] = [
+                {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+                for t in request.tools
+            ]
+
         return kwargs
 
     async def _stream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
@@ -146,7 +176,52 @@ class AnthropicProvider:
             async with self._client.messages.stream(**kwargs) as stream:
                 yield MessageStartEvent(model=request.model)
                 emitted_text = False
+                pending_tool_calls: dict[int, _PendingToolCall] = {}
                 async for raw_event in stream:
+                    # A `tool_use` content block starts with an empty
+                    # `input` on the wire -- the real arguments arrive after,
+                    # as `input_json_delta` fragments below -- so only the
+                    # call's id/name are captured here. `isinstance` (rather
+                    # than reading `.content_block.type`) is what lets mypy
+                    # narrow the block's type at all, matching the text-delta
+                    # check below.
+                    if isinstance(raw_event, RawContentBlockStartEvent) and isinstance(
+                        raw_event.content_block, AnthropicToolUseBlock
+                    ):
+                        pending_tool_calls[raw_event.index] = _PendingToolCall(
+                            id=raw_event.content_block.id, name=raw_event.content_block.name
+                        )
+                        continue
+
+                    if isinstance(raw_event, RawContentBlockDeltaEvent) and isinstance(
+                        raw_event.delta, InputJSONDelta
+                    ):
+                        # Fragments arrive keyed by the SAME content-block
+                        # `index` as the `content_block_start` above, one
+                        # buffer per index -- never one shared buffer -- so
+                        # two tool calls streamed in the same turn cannot
+                        # interleave into each other's JSON.
+                        pending_tool_calls[raw_event.index].fragments.append(
+                            raw_event.delta.partial_json
+                        )
+                        continue
+
+                    if (
+                        isinstance(raw_event, RawContentBlockStopEvent)
+                        and raw_event.index in pending_tool_calls
+                    ):
+                        call = pending_tool_calls.pop(raw_event.index)
+                        raw_json = "".join(call.fragments)
+                        # A tool invoked with no arguments streams ZERO
+                        # `input_json_delta` fragments at all -- `json.loads("")`
+                        # raises, so the empty case is spelled out rather than
+                        # fed through the parser.
+                        input_data: dict[str, Any] = json.loads(raw_json) if raw_json else {}
+                        yield ToolUseEvent(
+                            block=ToolUseBlock(id=call.id, name=call.name, input=input_data)
+                        )
+                        continue
+
                     # `RawContentBlockDeltaEvent` is the single member of the
                     # SDK's stream-event union that carries `.delta.text` — the
                     # isinstance check narrows `.delta` (itself a discriminated
@@ -222,15 +297,20 @@ class AnthropicProvider:
 
     async def generate(self, request: CompletionRequest) -> CompletionResponse:
         parts: list[str] = []
+        tool_blocks: list[ToolUseBlock] = []
         usage = Usage()
         stop_reason: str | None = None
         async for event in self._stream(request):
             if event.type == "text_delta":
                 parts.append(event.text)
+            elif event.type == "tool_use":
+                tool_blocks.append(event.block)
             elif event.type == "message_end":
                 usage, stop_reason = event.usage, event.stop_reason
+        content: list[ContentBlock] = [TextBlock(text="".join(parts))]
+        content.extend(tool_blocks)
         return CompletionResponse(
-            content=[TextBlock(text="".join(parts))],
+            content=content,
             usage=usage,
             model=request.model,
             stop_reason=stop_reason,
