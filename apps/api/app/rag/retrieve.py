@@ -121,6 +121,38 @@ class CitationPayload:
     page: int | None
 
 
+# Mirrors `app/chat/service.py`'s `_EXCERPT_MAX_CHARS`/`_excerpt`: a preview
+# only, not the full chunk `content`, for the same reason -- it would double
+# the bytes of every grounded turn (SSE citation or tool result alike) for
+# no benefit the UI needs, since it already has `chunk_id` to fetch the rest
+# on demand. Kept as its own constant here rather than imported from
+# `app/chat/service.py` to avoid a RAG-module -> chat-module dependency for
+# one integer; `app/tools/retrieve.py` uses this copy too.
+_EXCERPT_MAX_CHARS = 240
+
+
+def _excerpt(content: str) -> str:
+    if len(content) <= _EXCERPT_MAX_CHARS:
+        return content
+    return content[:_EXCERPT_MAX_CHARS].rstrip() + "..."
+
+
+def build_citation(chunk: RetrievedChunk) -> CitationPayload:
+    """The one place a `RetrievedChunk` becomes the SSE- and tool-facing
+    `CitationPayload` -- used by `app/tools/retrieve.py`'s
+    `RetrieveKnowledgeTool` so a tool result and a chat turn report a
+    grounding chunk identically."""
+    return CitationPayload(
+        chunk_id=chunk.chunk_id,
+        document_id=chunk.document_id,
+        document_title=chunk.document_title,
+        rank=chunk.rank,
+        score=chunk.score,
+        excerpt=_excerpt(chunk.content),
+        page=chunk.page,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _CandidateInfo:
     """Everything about a chunk *except* its fused score/rank -- captured
@@ -145,12 +177,25 @@ class _CandidateInfo:
 # consult RLS); binding organization_id independently on both tables here
 # means a chunk that ever ended up mislinked that way still cannot leak
 # another org's document title through this join.
+# `d.status = 'ready'` closes Phase 3's first carried debt: without it, a
+# document the dashboard shows as `failed` can still ground answers.
+# Concretely -- a document ingests successfully (status=ready, chunks
+# written), a *later* re-ingest (a re-upload, a retry) fails during
+# extraction before `replace_chunks` ever runs, so `documents.status` flips
+# to `failed` while the *old* chunks -- still attached to that document_id --
+# are untouched in `document_chunks`. Nothing upstream of this filter ever
+# revisits them, so they keep being retrieved and cited forever, even though
+# the UI has already told the user this document failed. Filtering here,
+# rather than in `DocumentService` or at ingestion time, is the one place
+# that is guaranteed to run on every retrieval regardless of how a document
+# got into a bad state.
 _VECTOR_SQL = text(
     "SELECT dc.id AS id, dc.document_id AS document_id, d.title AS title, "
     "dc.content AS content, dc.metadata AS metadata "
     "FROM document_chunks dc "
     "JOIN documents d ON d.id = dc.document_id AND d.organization_id = :organization_id "
     "WHERE dc.organization_id = :organization_id "
+    "AND d.status = 'ready' "
     "AND dc.embedding <=> CAST(:query_vector AS vector) <= :max_distance "
     "ORDER BY dc.embedding <=> CAST(:query_vector AS vector) ASC "
     "LIMIT :candidates"
@@ -188,25 +233,40 @@ _KEYWORD_SQL_TEMPLATE = (
     "FROM document_chunks dc "
     "JOIN documents d ON d.id = dc.document_id AND d.organization_id = :organization_id "
     "WHERE dc.organization_id = :organization_id "
+    "AND d.status = 'ready' "
     "AND dc.content_tsv @@ {tsquery} "
     "{rank_floor}"
     "ORDER BY ts_rank_cd(dc.content_tsv, {tsquery}) DESC "
     "LIMIT :candidates"
 )
 
-_KEYWORD_ALL_TERMS_SQL = text(_KEYWORD_SQL_TEMPLATE.format(tsquery=_AND_TSQUERY, rank_floor=""))
-# The OR form carries a `ts_rank_cd` floor the AND form does not need: "every
-# content word is present" is already a relevance predicate, "at least one
-# is" is not. See `settings.retrieval_min_keyword_rank`.
-#
-# That floor is load-bearing for correctness, not only for quality:
-# `websearch_to_tsquery` reads a leading hyphen as negation, so "-cat dog"
-# gives `!'cat' & 'dog'` (no rows, hence the fallback) and then
-# `!'cat' | 'dog'`, which matches every chunk without "cat" -- the whole
-# corpus. `ts_rank_cd` scores a negated match 0.0, so the floor is the only
-# thing that drops it. A *bare* negation ("-cat") is a different case this
-# does not cover: it matches everything through the strict form above, which
-# has no floor.
+# Both keyword forms now carry the same `ts_rank_cd` floor -- see
+# `settings.retrieval_min_keyword_rank`. The OR form has always needed one:
+# "at least one content word is present" is a weak relevance predicate on
+# its own. The AND form used to ship with none, on the reasoning that "every
+# content word is present" already *is* a relevance predicate -- true for an
+# ordinary match, but false for the one shape that reaches this arm without
+# ever having matched anything: a **bare negation**. `websearch_to_tsquery`
+# reads a leading hyphen as negation, so "-cat" parses to `!'cat'`, which
+# `@@` matches against every chunk that merely lacks the word "cat" -- i.e.
+# the entire corpus -- with `ts_rank_cd` scoring every one of those matches
+# 0.0. Without a floor here, that satisfies `WHERE ... @@ {tsquery}` and
+# returns up to `candidates` rows from a query that named no positive term
+# at all, and the OR fallback below (guarded by `if not keyword_rows`) never
+# even runs because the AND form did not return zero rows. Phase 3 had
+# already reasoned through the *multi-term* case ("-cat dog" -> `!'cat' &
+# 'dog'` -> zero AND rows -> the OR fallback -> `!'cat' | 'dog'`, matches
+# everything without "cat", caught by the OR form's own floor) but not this
+# one, single-term case, where the AND form itself is the whole match and
+# has no floor to catch it. Adding the identical floor here closes it the
+# same way, and costs nothing on a genuine multi-word match: real lexical
+# coverage produces a strictly positive `ts_rank_cd`.
+_KEYWORD_ALL_TERMS_SQL = text(
+    _KEYWORD_SQL_TEMPLATE.format(
+        tsquery=_AND_TSQUERY,
+        rank_floor=f"AND ts_rank_cd(dc.content_tsv, {_AND_TSQUERY}) >= :min_rank ",
+    )
+)
 _KEYWORD_ANY_TERM_SQL = text(
     _KEYWORD_SQL_TEMPLATE.format(
         tsquery=_OR_TSQUERY,
@@ -289,6 +349,7 @@ class RetrievalService:
             "query_text": query,
             "candidates": candidates,
             "organization_id": organization_id,
+            "min_rank": min_keyword_rank,
         }
         keyword_rows = (await self.session.execute(_KEYWORD_ALL_TERMS_SQL, keyword_params)).all()
         if not keyword_rows:
@@ -298,12 +359,7 @@ class RetrievalService:
             # this path: a chunk matching several query terms ranks above one
             # matching a single term, `ts_rank_cd` orders them that way, and
             # fusion with the vector arm settles the rest.
-            keyword_rows = (
-                await self.session.execute(
-                    _KEYWORD_ANY_TERM_SQL,
-                    {**keyword_params, "min_rank": min_keyword_rank},
-                )
-            ).all()
+            keyword_rows = (await self.session.execute(_KEYWORD_ANY_TERM_SQL, keyword_params)).all()
 
         scores: dict[uuid.UUID, float] = {}
         info: dict[uuid.UUID, _CandidateInfo] = {}

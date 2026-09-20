@@ -46,9 +46,20 @@ def _negate(vector: list[float]) -> list[float]:
 
 
 async def _document(session, tenant, title: str = "Doc"):
-    return await DocumentService(session, tenant).create(
+    """Every test in this file that seeds chunks directly (as opposed to
+    running the real `ingest_document` pipeline, which sets this status
+    itself) needs its document at `status=ready` -- retrieval now filters
+    to it (see the `d.status = 'ready'` predicate in `app/rag/retrieve.py`,
+    Phase 3's first carried debt). Marking it ready here, once, keeps every
+    other test in this file about the *retrieval* behaviour it was written
+    to test rather than about document lifecycle plumbing it never asked
+    to depend on.
+    """
+    document = await DocumentService(session, tenant).create(
         CreateDocumentInput(title=title, source_type=DocumentSourceType.TEXT)
     )
+    await DocumentService(session, tenant).mark_ready(document.id)
+    return document
 
 
 async def _seed(
@@ -704,3 +715,94 @@ async def test_a_document_ingested_through_the_real_embedder_retrieves_its_own_s
         assert keyword_only == [], f"{query!r} was answerable without the embedder"
         assert vector_only, f"{query!r} retrieved nothing from the vector arm"
         assert expected_fragment in vector_only[0].content
+
+
+# --- Phase 3 debt 1: `documents.status` must gate retrieval -----------------
+
+
+async def test_stale_chunks_of_a_document_now_failed_do_not_surface(tenant_a):
+    """Reproduces, live, exactly what Phase 3's final review found: a
+    document ingests to `ready` (chunks written, query answerable), a later
+    re-ingest fails during extraction *before* `replace_chunks` ever runs,
+    so `documents.status` flips to `failed` while the old chunks -- still
+    attached to that same `document_id` -- are left untouched in
+    `document_chunks`. Without `d.status = 'ready'` in both retrieval arms,
+    those stale rows keep grounding answers forever, even though the
+    dashboard has already told the user this document failed.
+
+    The positive-control retrieval (while still `ready`) is load-bearing,
+    not decorative: without it, a passing assertion after `mark_failed`
+    could just as easily mean the corpus never matched this query at all,
+    which is the vacuous shape this suite keeps guarding against.
+    """
+    query = "extended cargo warranty terms for pickup beds"
+    query_vector = await _embed(query)
+
+    async with tenant_session(tenant_a) as session:
+        document = await _document(session, tenant_a, title="Cargo terms")
+        await _seed(
+            session,
+            tenant_a,
+            document.id,
+            [("Extended cargo warranty terms cover beds, racks and tie-downs.", query_vector)],
+        )
+
+    async with tenant_session(tenant_a) as session:
+        while_ready = await RetrievalService(session, tenant_a).retrieve(query)
+    assert while_ready, "the seeded chunk should answer this query while the document is ready"
+
+    async with tenant_session(tenant_a) as session:
+        await DocumentService(session, tenant_a).mark_failed(document.id, "extraction crashed")
+
+    async with tenant_session(tenant_a) as session:
+        after_failed = await RetrievalService(session, tenant_a).retrieve(query)
+
+    assert after_failed == []
+
+
+# --- Phase 3 debt 2: a bare negation must not match the whole corpus --------
+
+
+async def test_bare_leading_hyphen_query_does_not_match_the_whole_corpus(tenant_a):
+    """`websearch_to_tsquery` reads a leading hyphen as negation, so a query
+    of just `-cat` parses to `!'cat'`, which `@@` matches against every
+    chunk that merely lacks the word "cat" -- the entire corpus below, none
+    of which mentions it. Before the strict (AND) keyword arm carried a
+    rank floor, that satisfied its `WHERE` clause outright (`ts_rank_cd`
+    scores every one of those matches exactly 0.0, but nothing checked it),
+    so all three chunks would come back cited for a query that named no
+    positive term at all -- and the OR-fallback path, which *does* have a
+    floor, never even ran, because the strict form did not return zero
+    rows.
+
+    The vector arm is switched off (`max_distance=-1.0`, never a valid
+    cosine distance) so this isolates the keyword arm's own behaviour --
+    otherwise a coincidental vector-arm hit could paper over a still-broken
+    keyword floor.
+    """
+    async with tenant_session(tenant_a) as session:
+        document = await _document(session, tenant_a)
+        await _seed(
+            session,
+            tenant_a,
+            document.id,
+            [
+                (
+                    "The quarterly sales report is due at the end of the month.",
+                    await _embed("unrelated filler one"),
+                ),
+                (
+                    "Employees may request remote work with manager approval.",
+                    await _embed("unrelated filler two"),
+                ),
+                (
+                    "The parking garage closes at midnight on weekdays.",
+                    await _embed("unrelated filler three"),
+                ),
+            ],
+        )
+
+    async with tenant_session(tenant_a) as session:
+        results = await RetrievalService(session, tenant_a).retrieve("-cat", max_distance=-1.0)
+
+    assert results == []
