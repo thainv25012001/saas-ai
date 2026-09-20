@@ -177,6 +177,13 @@ class AnthropicProvider:
                 yield MessageStartEvent(model=request.model)
                 emitted_text = False
                 pending_tool_calls: dict[int, _PendingToolCall] = {}
+                # Tracks indices whose `content_block_stop` has already been
+                # processed, purely so an orphaned-fragment log line can say
+                # WHICH anomaly it is: a fragment for an index that never
+                # started at all, versus one arriving after that index's call
+                # was already finalized. Both are dropped identically; only
+                # the diagnosis differs.
+                completed_tool_call_indices: set[int] = set()
                 async for raw_event in stream:
                     # A `tool_use` content block starts with an empty
                     # `input` on the wire -- the real arguments arrive after,
@@ -214,7 +221,14 @@ class AnthropicProvider:
                         pending = pending_tool_calls.get(raw_event.index)
                         if pending is None:
                             logger.warning(
-                                "anthropic_orphaned_tool_fragment", index=raw_event.index
+                                "anthropic_orphaned_tool_fragment",
+                                model=request.model,
+                                index=raw_event.index,
+                                cause=(
+                                    "late_after_stop"
+                                    if raw_event.index in completed_tool_call_indices
+                                    else "never_started"
+                                ),
                             )
                             continue
                         pending.fragments.append(raw_event.delta.partial_json)
@@ -225,12 +239,36 @@ class AnthropicProvider:
                         and raw_event.index in pending_tool_calls
                     ):
                         call = pending_tool_calls.pop(raw_event.index)
+                        completed_tool_call_indices.add(raw_event.index)
                         raw_json = "".join(call.fragments)
-                        # A tool invoked with no arguments streams ZERO
-                        # `input_json_delta` fragments at all -- `json.loads("")`
-                        # raises, so the empty case is spelled out rather than
-                        # fed through the parser.
-                        input_data: dict[str, Any] = json.loads(raw_json) if raw_json else {}
+                        try:
+                            # A tool invoked with no arguments streams ZERO
+                            # `input_json_delta` fragments at all --
+                            # `json.loads("")` raises, so the empty case is
+                            # spelled out rather than fed through the parser.
+                            input_data: dict[str, Any] = json.loads(raw_json) if raw_json else {}
+                        except json.JSONDecodeError:
+                            # The accumulated fragments never formed valid
+                            # JSON -- e.g. a fragment for this SAME call
+                            # arrived before its own `content_block_start`
+                            # (dropped as "never_started" above, since at
+                            # that point this index had no pending entry yet)
+                            # and the remainder is missing its beginning.
+                            # There is no missing piece to recover here, so
+                            # this call is dropped rather than raised: the
+                            # response simply carries no `tool_use` block for
+                            # it, and Task 4's loop sees no call for it and
+                            # proceeds with whatever text (and whatever OTHER
+                            # successfully-parsed calls) the turn had --
+                            # degraded, not wedged, and one malformed call
+                            # does not take down calls that parsed fine.
+                            logger.warning(
+                                "anthropic_malformed_tool_call_json",
+                                model=request.model,
+                                index=raw_event.index,
+                                tool_name=call.name,
+                            )
+                            continue
                         yield ToolUseEvent(
                             block=ToolUseBlock(id=call.id, name=call.name, input=input_data)
                         )

@@ -491,6 +491,27 @@ async def test_an_input_json_delta_for_an_index_with_no_pending_call_does_not_cr
     assert tool_events[0].block.input == {}
 
 
+async def test_a_fragment_arriving_before_its_own_call_starts_is_dropped_not_crashed():
+    """The `.get` guard's blind spot: a fragment for index 0 that arrives
+    BEFORE that index's own `content_block_start` is correctly dropped as
+    "never started", since nothing is pending for it yet -- but that drop
+    means the LATER fragments for the same call, once it does start, no
+    longer add up to valid JSON. Before wrapping the parse in try/except,
+    this raised an uncaught `JSONDecodeError` out of `stream()` with the same
+    blast radius as the original `KeyError`."""
+    events = [
+        _input_json_delta(0, '{"order_id": '),  # arrives before its own start
+        _tool_use_start(0, "call_1", "lookup_order"),
+        _input_json_delta(0, '"A1"}'),
+        _content_block_stop(0),
+    ]
+    provider = _provider_with(_FakeStream(events, _final_message(stop_reason="tool_use")))
+    tool_events = [e async for e in provider.stream(_request()) if e.type == "tool_use"]
+    # The malformed call is dropped entirely -- no `tool_use` event for it --
+    # rather than the whole turn (or the process) crashing on it.
+    assert tool_events == []
+
+
 async def test_tool_use_with_no_arguments_parses_as_an_empty_dict():
     """A tool called with no arguments streams zero `input_json_delta`
     fragments at all -- `json.loads("")` raises, so this edge (as distinct
