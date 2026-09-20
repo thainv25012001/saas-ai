@@ -2,7 +2,7 @@ import enum
 import uuid
 from typing import Any
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
@@ -30,11 +30,33 @@ class Tool(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     its policy compares `organization_id` for equality only, and a NULL
     compared to anything is UNKNOWN rather than TRUE, which would hide every
     builtin from every organization. See the hand-written policy in
-    `alembic/versions/0008_tools_and_leads.py` for the exception and why it
-    is not a general change to `enable_rls`.
+    `alembic/versions/0008_tools_and_leads.py` for the exception, why it is
+    not a general change to `enable_rls`, and why that policy's `WITH CHECK`
+    is deliberately *not* the same predicate as its `USING`.
+
+    Two unique constraints, not one: `uq_tool_org_name` (`organization_id`,
+    `name`) stops two org-scoped rows from colliding, but Postgres treats
+    NULL as distinct from NULL for uniqueness purposes, so it does nothing
+    for two builtins named the same thing -- `uq_tool_global_name` is the
+    partial index that closes that second case. Both exist because
+    `ToolRegistry` (Task 7) resolves a tool by `name` into a dict; a
+    collision within either scope would not error, it would silently drop
+    one row's `config`/`overrides` from resolution. Deliberately not
+    prevented: an org-scoped tool named the same as a builtin -- that
+    shadowing is legal and its precedence is Task 7's decision, not this
+    schema's.
     """
 
     __tablename__ = "tools"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "name", name="uq_tool_org_name"),
+        Index(
+            "uq_tool_global_name",
+            "name",
+            unique=True,
+            postgresql_where=text("organization_id IS NULL"),
+        ),
+    )
 
     organization_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True),

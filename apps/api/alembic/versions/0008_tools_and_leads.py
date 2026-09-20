@@ -49,21 +49,21 @@ def _enable_tools_rls() -> None:
     other table's, but a predicate that also admits `organization_id IS
     NULL`.
 
-    WITH CHECK mirrors USING rather than narrowing it. This schema's RLS is
-    Layer 2 of the two-layer model in docs/ARCHITECTURE.md §2.3; Layer 1 --
-    the repository that will own writes to this table -- is what should
-    stop an ordinary tenant request from writing a NULL-org (global) row.
-    A WITH CHECK that already forbade it here would just be a second,
-    easy-to-drift implementation of that same rule, not an extra layer of
-    safety: every write path this schema exposes today runs as either
-    app_owner (migrations/seeding, which bypasses RLS entirely) or a tenant
-    session whose only route to this table is a not-yet-written repository.
+    WITH CHECK deliberately does *not* mirror USING here, unlike every other
+    policy in this migration (agent_tools/message_tool_calls/leads all use
+    the ordinary symmetric `enable_rls`). USING must keep admitting NULL so
+    every tenant can still read global builtins; WITH CHECK must not, or a
+    tenant session could INSERT/UPDATE a NULL-org row of its own, and that
+    same NULL branch on USING would then show it to every *other*
+    organization too -- a tenant-created row masquerading as a builtin.
+    Builtins are seeded by the owner role, which bypasses RLS entirely, so
+    no legitimate write ever needs the NULL branch on the WITH CHECK side.
     """
     op.execute("ALTER TABLE tools ENABLE ROW LEVEL SECURITY")
     op.execute(
         "CREATE POLICY tenant_isolation ON tools "
         f"USING (organization_id = {_GUARDED_ORG} OR organization_id IS NULL) "
-        f"WITH CHECK (organization_id = {_GUARDED_ORG} OR organization_id IS NULL)"
+        f"WITH CHECK (organization_id = {_GUARDED_ORG})"
     )
 
 
@@ -91,8 +91,22 @@ def upgrade() -> None:
         sa.Column("config", postgresql.JSONB(), nullable=False, server_default="{}"),
         sa.Column("is_enabled", sa.Boolean(), nullable=False, server_default="true"),
         *_TIMESTAMPS,
+        # Postgres treats NULL as distinct from NULL for uniqueness, so this
+        # constraint only ever fires for two org-scoped rows -- it does
+        # nothing to stop two builtins sharing a name. That second case is
+        # ix_tools_uq_global_name below. See the Tool docstring for why both
+        # exist: ToolRegistry resolves by name into a dict, and a collision
+        # would silently drop one row's config, not error.
+        sa.UniqueConstraint("organization_id", "name", name="uq_tool_org_name"),
     )
     op.create_index("ix_tools_organization_id", "tools", ["organization_id"])
+    op.create_index(
+        "uq_tool_global_name",
+        "tools",
+        ["name"],
+        unique=True,
+        postgresql_where=sa.text("organization_id IS NULL"),
+    )
     _enable_tools_rls()
 
     op.create_table(

@@ -89,6 +89,133 @@ async def test_org_scoped_tool_visible_only_to_its_own_org(
     assert scoped_id not in visible_to_b
 
 
+async def test_tenant_session_cannot_insert_a_global_tool(tenant_a: TenantContext):
+    """USING must admit `organization_id IS NULL` so tenants can read
+    builtins, but WITH CHECK must not, or a tenant session could write its
+    own NULL-org row and that same USING clause would then show it to every
+    other organization too -- a tenant-created row masquerading as a
+    builtin. See the asymmetric policy in
+    alembic/versions/0008_tools_and_leads.py::_enable_tools_rls.
+
+    Fail-check performed: loosened WITH CHECK back to its old, symmetric
+    form (`organization_id = guarded OR organization_id IS NULL`) and
+    reran -- the insert succeeded and this test failed with no exception
+    raised. Restored afterwards; see task-3-report.md.
+    """
+    from sqlalchemy.exc import DBAPIError
+
+    async with tenant_session(tenant_a) as session:
+        with pytest.raises(DBAPIError, match="row-level security"):
+            await session.execute(
+                text(
+                    "INSERT INTO tools (id, organization_id, name, type, config, is_enabled) "
+                    "VALUES (:id, NULL, 'sneaky_global_tool', 'builtin', '{}', true)"
+                ),
+                {"id": uuid7()},
+            )
+        await session.rollback()
+
+
+@pytest.fixture
+async def two_org_scoped_tools_same_name(owner_connection, tenant_a, tenant_b):
+    """One org-scoped tool per org, both named identically -- the case that
+    stays legal: uq_tool_org_name only fires within a single org."""
+    tool_a, tool_b = uuid7(), uuid7()
+    for tool_id, tenant in ((tool_a, tenant_a), (tool_b, tenant_b)):
+        await owner_connection.execute(
+            text(
+                "INSERT INTO tools (id, organization_id, name, type, config, is_enabled) "
+                "VALUES (:id, :org, 'shared_name_tool', 'http', '{}', true)"
+            ),
+            {"id": tool_id, "org": tenant.organization_id},
+        )
+    await owner_connection.commit()
+    yield tool_a, tool_b
+    await owner_connection.execute(
+        text("DELETE FROM tools WHERE id IN (:a, :b)"), {"a": tool_a, "b": tool_b}
+    )
+    await owner_connection.commit()
+
+
+async def test_same_tool_name_allowed_across_different_orgs(two_org_scoped_tools_same_name):
+    """Positive control for the two uniqueness tests below: proves
+    uq_tool_org_name is scoped per-org, not global, before asserting what it
+    does forbid."""
+    tool_a, tool_b = two_org_scoped_tools_same_name
+    assert tool_a != tool_b
+
+
+async def test_duplicate_tool_name_rejected_within_the_same_org(owner_connection, tenant_a):
+    """ToolRegistry (Task 7) resolves a tool by name into a dict -- two
+    enabled rows in the same org with the same name would not error there,
+    they would silently drop one row's config/overrides from resolution.
+    uq_tool_org_name is what turns that into a constraint violation instead.
+
+    Fail-check performed: dropped uq_tool_org_name and reran -- both inserts
+    succeeded and this test failed. Restored afterwards.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    first_id = uuid7()
+    await owner_connection.execute(
+        text(
+            "INSERT INTO tools (id, organization_id, name, type, config, is_enabled) "
+            "VALUES (:id, :org, 'duplicate_org_tool', 'http', '{}', true)"
+        ),
+        {"id": first_id, "org": tenant_a.organization_id},
+    )
+    await owner_connection.commit()
+    try:
+        with pytest.raises(IntegrityError, match="uq_tool_org_name"):
+            await owner_connection.execute(
+                text(
+                    "INSERT INTO tools (id, organization_id, name, type, config, is_enabled) "
+                    "VALUES (:id, :org, 'duplicate_org_tool', 'http', '{}', true)"
+                ),
+                {"id": uuid7(), "org": tenant_a.organization_id},
+            )
+        await owner_connection.rollback()
+    finally:
+        await owner_connection.execute(text("DELETE FROM tools WHERE id = :id"), {"id": first_id})
+        await owner_connection.commit()
+
+
+async def test_duplicate_global_tool_name_rejected(owner_connection):
+    """Same failure mode as the org-scoped case, for builtins: two NULL-org
+    rows named the same thing would silently collide in ToolRegistry's
+    lookup. uq_tool_org_name cannot catch this half -- Postgres treats NULL
+    as distinct from NULL for uniqueness -- so the partial unique index
+    uq_tool_global_name (WHERE organization_id IS NULL) is what does.
+
+    Fail-check performed: dropped uq_tool_global_name and reran -- both
+    inserts succeeded and this test failed. Restored afterwards.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    first_id = uuid7()
+    await owner_connection.execute(
+        text(
+            "INSERT INTO tools (id, organization_id, name, type, config, is_enabled) "
+            "VALUES (:id, NULL, 'duplicate_global_tool', 'builtin', '{}', true)"
+        ),
+        {"id": first_id},
+    )
+    await owner_connection.commit()
+    try:
+        with pytest.raises(IntegrityError, match="uq_tool_global_name"):
+            await owner_connection.execute(
+                text(
+                    "INSERT INTO tools (id, organization_id, name, type, config, is_enabled) "
+                    "VALUES (:id, NULL, 'duplicate_global_tool', 'builtin', '{}', true)"
+                ),
+                {"id": uuid7()},
+            )
+        await owner_connection.rollback()
+    finally:
+        await owner_connection.execute(text("DELETE FROM tools WHERE id = :id"), {"id": first_id})
+        await owner_connection.commit()
+
+
 @pytest.fixture
 async def agents_and_agent_tools(owner_connection, tenant_a, tenant_b):
     """An agent plus an enabled agent_tools link in each of two orgs, and one
