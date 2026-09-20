@@ -512,6 +512,51 @@ async def test_a_fragment_arriving_before_its_own_call_starts_is_dropped_not_cra
     assert tool_events == []
 
 
+@pytest.mark.parametrize(
+    "fragments",
+    [
+        pytest.param(["42"], id="scalar-number"),
+        pytest.param(['"hello"'], id="scalar-string"),
+        pytest.param(["null"], id="scalar-null"),
+        pytest.param(["[1, ", "2, 3]"], id="array"),
+    ],
+)
+async def test_valid_but_non_object_json_is_dropped_not_crashed(fragments):
+    """`json.loads` happily parses `42`, `"hello"`, `null`, and `[1, 2, 3]` --
+    none of them raise `JSONDecodeError` -- so a guard scoped to that one
+    exception lets every one of these through to `ToolUseBlock(input=...)`,
+    which then raises `pydantic.ValidationError` because `input` must be a
+    `dict`. That error must be caught by the SAME guard as malformed JSON
+    syntax, not a fourth `except` clause bolted on next to it."""
+    events = [
+        _tool_use_start(0, "call_1", "lookup_order"),
+        *[_input_json_delta(0, fragment) for fragment in fragments],
+        _content_block_stop(0),
+    ]
+    provider = _provider_with(_FakeStream(events, _final_message(stop_reason="tool_use")))
+    tool_events = [e async for e in provider.stream(_request()) if e.type == "tool_use"]
+    assert tool_events == []
+
+
+async def test_one_malformed_tool_call_does_not_take_down_a_well_formed_one():
+    """The whole point of dropping rather than raising: a malformed call
+    sharing a turn with a well-formed one must not cost the well-formed
+    call its `ToolUseEvent`."""
+    events = [
+        _tool_use_start(0, "call_1", "broken"),
+        _input_json_delta(0, "42"),  # valid JSON, not an object -- dropped
+        _content_block_stop(0),
+        _tool_use_start(1, "call_2", "search"),
+        _input_json_delta(1, '{"q": "x"}'),
+        _content_block_stop(1),
+    ]
+    provider = _provider_with(_FakeStream(events, _final_message(stop_reason="tool_use")))
+    tool_events = [e async for e in provider.stream(_request()) if e.type == "tool_use"]
+    assert len(tool_events) == 1
+    assert tool_events[0].block.id == "call_2"
+    assert tool_events[0].block.input == {"q": "x"}
+
+
 async def test_tool_use_with_no_arguments_parses_as_an_empty_dict():
     """A tool called with no arguments streams zero `input_json_delta`
     fragments at all -- `json.loads("")` raises, so this edge (as distinct

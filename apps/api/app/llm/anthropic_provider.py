@@ -240,38 +240,62 @@ class AnthropicProvider:
                     ):
                         call = pending_tool_calls.pop(raw_event.index)
                         completed_tool_call_indices.add(raw_event.index)
-                        raw_json = "".join(call.fragments)
                         try:
+                            # This region is deliberately PURE -- join the
+                            # fragments, parse them, build the block, nothing
+                            # else -- so the broad `except` below can only
+                            # ever be catching untrusted wire data doing
+                            # something unexpected, never a bug of ours it
+                            # would be wrong to swallow (no I/O, no logging,
+                            # no calls back into our own control flow happen
+                            # in here).
+                            #
+                            # Three failure shapes have been found
+                            # empirically, each turning up in a LATER round
+                            # of review than the last: syntactically invalid
+                            # JSON (e.g. a fragment for this same call arrived
+                            # before its own `content_block_start`, dropped
+                            # as "never_started" above, leaving the remainder
+                            # missing its beginning); JSON that parses but
+                            # isn't an object (`42`, `"hello"`, `null`,
+                            # `[1, 2, 3]` all parse cleanly and then fail
+                            # `ToolUseBlock`'s `input: dict[str, Any]`
+                            # validation); and whatever a future SDK version
+                            # turns out to send that isn't either. Catching
+                            # each shape with its own `except` only ever
+                            # closes the ONE instance just found and leaves
+                            # the next -- `json.JSONDecodeError` alone missed
+                            # the second shape entirely. One broad `except`
+                            # around this single, narrow, pure region covers
+                            # all three today and whatever the next one is,
+                            # rather than growing a list that is always one
+                            # behind.
+                            #
                             # A tool invoked with no arguments streams ZERO
                             # `input_json_delta` fragments at all --
                             # `json.loads("")` raises, so the empty case is
                             # spelled out rather than fed through the parser.
+                            raw_json = "".join(call.fragments)
                             input_data: dict[str, Any] = json.loads(raw_json) if raw_json else {}
-                        except json.JSONDecodeError:
-                            # The accumulated fragments never formed valid
-                            # JSON -- e.g. a fragment for this SAME call
-                            # arrived before its own `content_block_start`
-                            # (dropped as "never_started" above, since at
-                            # that point this index had no pending entry yet)
-                            # and the remainder is missing its beginning.
-                            # There is no missing piece to recover here, so
-                            # this call is dropped rather than raised: the
-                            # response simply carries no `tool_use` block for
-                            # it, and Task 4's loop sees no call for it and
-                            # proceeds with whatever text (and whatever OTHER
-                            # successfully-parsed calls) the turn had --
-                            # degraded, not wedged, and one malformed call
-                            # does not take down calls that parsed fine.
+                            block = ToolUseBlock(id=call.id, name=call.name, input=input_data)
+                        except Exception:
+                            # There is no missing or malformed piece to
+                            # recover here, so this call is dropped rather
+                            # than raised: the response simply carries no
+                            # `tool_use` block for it, and Task 4's loop sees
+                            # no call for it and proceeds with whatever text
+                            # (and whatever OTHER successfully-parsed calls)
+                            # the turn had -- degraded, not wedged, and one
+                            # malformed call does not take down calls that
+                            # parsed fine.
                             logger.warning(
-                                "anthropic_malformed_tool_call_json",
+                                "anthropic_malformed_tool_call",
                                 model=request.model,
                                 index=raw_event.index,
                                 tool_name=call.name,
                             )
                             continue
-                        yield ToolUseEvent(
-                            block=ToolUseBlock(id=call.id, name=call.name, input=input_data)
-                        )
+                        yield ToolUseEvent(block=block)
                         continue
 
                     # `RawContentBlockDeltaEvent` is the single member of the
