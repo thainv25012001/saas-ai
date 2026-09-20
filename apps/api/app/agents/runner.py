@@ -12,6 +12,19 @@ multi-step turn would otherwise under-report tokens actually spent).
 Scope, per the Task 4 brief: provider-and-registry only. No database
 session, no savepoint, no persistence -- those belong to whoever owns the
 session (Task 7). This module never imports `sqlalchemy` or a `Session`.
+
+One more deliberate choice, called out here because it is easy to assume
+the opposite: a tool call the model asks for on the step that turns out to
+be the *last* one (`max_steps` is then hit right after) is still executed
+and its result still surfaces via `AgentToolCallEnd`, exactly like any
+other step. Skipping it would mean either yielding `AgentToolCallStart`
+with no matching `AgentToolCallEnd` (breaking the "every issued tool_use
+gets a matching tool_result" guarantee this module exists to provide) or
+silently dropping that the model asked for a tool at all. A caller that
+cares whether a side-effecting tool (e.g. `create_lead`, Task 6) ran right
+before a step-limit cutoff has everything it needs to say so: the
+`AgentToolCallEnd` for that call arrives immediately before the
+`AgentStepLimit`.
 """
 
 import asyncio
@@ -47,17 +60,31 @@ class AgentTextDelta:
 
 @dataclass(frozen=True, slots=True)
 class AgentToolCallStart:
-    """One step's `tool_use` blocks, about to be run. `calls[i]` and the
-    following `AgentToolCallEnd.results[i]` are the same call, by position
-    -- `asyncio.gather` preserves the order of the awaitables it was given,
-    so no separate id-keyed mapping is needed here."""
+    """One step's `tool_use` blocks, about to be run."""
 
     calls: list[ToolUseBlock]
 
 
 @dataclass(frozen=True, slots=True)
+class AgentToolResult:
+    """One call's outcome, with the id that ties it back to its `tool_use`
+    block carried inline -- deliberately not left to be re-derived by
+    zipping `AgentToolCallStart.calls` against `AgentToolCallEnd.results`
+    by position. That correlation happens to hold today (`asyncio.gather`
+    preserves input order, and the results here are built via
+    `zip(..., strict=True)`), but a downstream consumer relying on position
+    instead of the id has no defence against a future refactor that
+    reorders, filters, or sorts either list -- it would silently attribute
+    one tool's result to a different tool's card in the UI, with nothing
+    that fails loudly."""
+
+    tool_call_id: str
+    result: ToolResult
+
+
+@dataclass(frozen=True, slots=True)
 class AgentToolCallEnd:
-    results: list[ToolResult]
+    results: list[AgentToolResult]
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +140,14 @@ class AgentRunner:
         effort: Effort | None = None,
         max_steps: int,
     ) -> None:
+        if max_steps < 1:
+            # `max_steps` is sourced from `config.max_agent_steps`, a plain
+            # database column (Task 7) -- a `0` there is a data-entry
+            # mistake, not a caller decision to accept, and left unchecked
+            # it would emit `AgentStepLimit` without ever calling the
+            # provider: a turn that answers nothing and looks, from the
+            # event stream alone, exactly like a real step-limit hit.
+            raise ValueError(f"max_steps must be >= 1, got {max_steps}")
         self.provider = provider
         self.registry = registry
         self.model = model
@@ -122,8 +157,8 @@ class AgentRunner:
         self.max_steps = max_steps
 
     def _resolve_specs(self, tool_names: list[str]) -> list[ToolSpec]:
-        """Specs for every name that resolves, in the order given, silently
-        dropping any that don't.
+        """Specs for every distinct name that resolves, in first-seen order,
+        silently dropping any that don't.
 
         `ToolRegistry.specs_for` raises `KeyError` on an unregistered name
         by design (see its docstring): a caller asking for a spec that does
@@ -137,9 +172,17 @@ class AgentRunner:
         resolved independently and a miss is logged and skipped rather than
         propagated. A genuinely empty `tool_names`, or one where every name
         is stale, degrades to a plain no-tools turn -- never an exception.
+
+        `dict.fromkeys` also dedupes before resolving: Task 3's schema
+        allows an org-scoped tool to shadow a builtin of the same name (its
+        resolution order is left to Task 7), and that is exactly the shape
+        through which a caller could end up asking for the same name twice.
+        A provider tool list with two entries of the same name is invalid
+        wire format Anthropic itself rejects with a 400, so it is closed
+        here regardless of how shadowing eventually gets resolved.
         """
         specs: list[ToolSpec] = []
-        for name in tool_names:
+        for name in dict.fromkeys(tool_names):
             try:
                 specs.extend(self.registry.specs_for([name]))
             except KeyError:
@@ -207,7 +250,13 @@ class AgentRunner:
                     outcome = item
                 else:
                     yield item
-            assert outcome is not None  # _run_step always yields exactly one
+            if outcome is None:
+                # `_run_step` always yields exactly one `_StepOutcome`, as
+                # its very last item -- a plain `assert` here would be
+                # stripped under `python -O`, turning this into a confusing
+                # `AttributeError` on `None` instead of a clear signal that
+                # `_run_step` itself is broken.
+                raise AssertionError("_run_step ended without yielding a _StepOutcome")
 
             total_usage = _sum_usage(total_usage, outcome.usage)
             yield AgentUsage(usage=total_usage)
@@ -231,30 +280,31 @@ class AgentRunner:
                 *(self.registry.execute(call, ctx) for call in outcome.calls),
                 return_exceptions=True,
             )
-            results: list[ToolResult] = []
+            results: list[AgentToolResult] = []
             for call, raw in zip(outcome.calls, raw_results, strict=True):
                 if isinstance(raw, BaseException):
                     logger.exception("agent_tool_call_raised", tool_name=call.name, exc_info=raw)
-                    results.append(
-                        ToolResult(content=f"'{call.name}' failed unexpectedly", is_error=True)
+                    tool_result = ToolResult(
+                        content=f"'{call.name}' failed unexpectedly", is_error=True
                     )
                 else:
-                    results.append(raw)
+                    tool_result = raw
+                results.append(AgentToolResult(tool_call_id=call.id, result=tool_result))
             yield AgentToolCallEnd(results=results)
 
-            # Every issued tool_use gets a matching tool_result -- built
-            # from the same zipped pair above, so a result can never be
-            # dropped or mismatched to the wrong call's id.
+            # Every issued tool_use gets a matching tool_result -- read off
+            # `tool_call_id` on each `AgentToolResult`, not off position, so
+            # a result can never be mismatched to the wrong call's id.
             history.append(
                 Message(
                     role="user",
                     content=[
                         ToolResultBlock(
-                            tool_use_id=call.id,
-                            content=result.content,
-                            is_error=result.is_error,
+                            tool_use_id=r.tool_call_id,
+                            content=r.result.content,
+                            is_error=r.result.is_error,
                         )
-                        for call, result in zip(outcome.calls, results, strict=True)
+                        for r in results
                     ],
                 )
             )

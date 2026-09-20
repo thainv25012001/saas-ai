@@ -19,6 +19,7 @@ Plus: usage sums across steps rather than being overwritten by the last one.
 """
 
 import uuid
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
@@ -32,8 +33,23 @@ from app.agents.runner import (
     AgentToolCallStart,
     AgentUsage,
 )
+from app.llm.base import LLMProvider, ModelCapabilities
 from app.llm.fake_provider import FakeProvider, FakeToolCall
-from app.llm.types import Message, ToolResultBlock, ToolUseBlock, Usage
+from app.llm.types import (
+    CompletionRequest,
+    CompletionResponse,
+    Message,
+    MessageEndEvent,
+    MessageStartEvent,
+    StreamEvent,
+    TextBlock,
+    TextDeltaEvent,
+    ToolResultBlock,
+    ToolUseBlock,
+    ToolUseEvent,
+    Usage,
+    UsageEvent,
+)
 from app.tools.base import AgentTool, ToolContext, ToolResult
 from app.tools.registry import ToolRegistry
 
@@ -87,7 +103,7 @@ def _registry(*tools: AgentTool) -> ToolRegistry:
     return registry
 
 
-def _runner(provider: FakeProvider, registry: ToolRegistry, *, max_steps: int = 5) -> AgentRunner:
+def _runner(provider: LLMProvider, registry: ToolRegistry, *, max_steps: int = 5) -> AgentRunner:
     return AgentRunner(
         provider,
         registry,
@@ -186,9 +202,14 @@ async def test_two_parallel_calls_both_return_distinct_results() -> None:
 
     [end] = [e for e in events if isinstance(e, AgentToolCallEnd)]
     assert len(end.results) == 2
-    contents = {r.content for r in end.results}
+    contents = {r.result.content for r in end.results}
     assert contents == {"result for a", "result for b"}
-    assert all(not r.is_error for r in end.results)
+    assert all(not r.result.is_error for r in end.results)
+    # Each result carries the id of the call it belongs to, inline -- a
+    # consumer must not have to zip this list against `AgentToolCallStart`
+    # by position to know which call produced which result.
+    by_id = {r.tool_call_id: r.result.content for r in end.results}
+    assert by_id == {"c1": "result for a", "c2": "result for b"}
 
 
 async def test_one_of_two_parallel_calls_raising_does_not_abort_the_other(
@@ -224,11 +245,13 @@ async def test_one_of_two_parallel_calls_raising_does_not_abort_the_other(
 
     [end] = [e for e in events if isinstance(e, AgentToolCallEnd)]
     assert len(end.results) == 2
-    ok_results = [r for r in end.results if not r.is_error]
-    error_results = [r for r in end.results if r.is_error]
+    ok_results = [r for r in end.results if not r.result.is_error]
+    error_results = [r for r in end.results if r.result.is_error]
     assert len(ok_results) == 1
-    assert ok_results[0].content == "result for ok"
+    assert ok_results[0].tool_call_id == "c1"
+    assert ok_results[0].result.content == "result for ok"
     assert len(error_results) == 1
+    assert error_results[0].tool_call_id == "c2"
 
     # Both calls produced a tool_result block fed back to the model -- a
     # missing one is a protocol error real providers reject outright.
@@ -287,6 +310,120 @@ async def test_usage_sums_across_steps_rather_than_being_overwritten() -> None:
     # instead of summing would report 10/5 here, not 20/10.
     assert final.input_tokens == 20
     assert final.output_tokens == 10
+
+
+class _FillerThenToolProvider:
+    """A minimal `LLMProvider` test double whose first `stream()` call
+    emits BOTH filler text and a `tool_use` block in the same step -- a
+    shape `FakeProvider`'s `turns=` form cannot script (a scripted turn is
+    prose OR calls, never both), but one real providers routinely produce
+    ("Let me check that for you," followed by the call). Exists solely to
+    make step one's text non-empty, so the claim under test -- that it is
+    carried into step two's history rather than dropped -- is falsifiable.
+    `FakeProvider`'s tool-only turns can't distinguish "text correctly
+    carried through" from "there was never any text to lose" in the first
+    place, since `outcome.text` is already `""` in every other test.
+    """
+
+    name = "filler-then-tool"
+
+    def __init__(self) -> None:
+        self.last_request: CompletionRequest | None = None
+        self._step = 0
+
+    def capabilities(self, model: str) -> ModelCapabilities:
+        return ModelCapabilities(
+            supports_sampling=True,
+            supports_thinking=False,
+            thinking_style="none",
+            supports_effort=False,
+            max_output_tokens=4096,
+        )
+
+    async def generate(self, request: CompletionRequest) -> CompletionResponse:
+        raise NotImplementedError("AgentRunner only calls stream()")
+
+    async def generate_structured(self, request: CompletionRequest, schema: Any) -> Any:
+        raise NotImplementedError("AgentRunner only calls stream()")
+
+    def stream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+        self.last_request = request
+        step, self._step = self._step, self._step + 1
+        return self._stream(step)
+
+    async def _stream(self, step: int) -> AsyncIterator[StreamEvent]:
+        usage = Usage(input_tokens=1, output_tokens=1)
+        yield MessageStartEvent(model=self.name)
+        if step == 0:
+            yield TextDeltaEvent(text="Let me check that for you.")
+            yield ToolUseEvent(block=ToolUseBlock(id="call_1", name="search", input={"q": "shoes"}))
+            yield UsageEvent(usage=usage)
+            yield MessageEndEvent(stop_reason="tool_use", usage=usage, model=self.name)
+        else:
+            yield TextDeltaEvent(text="Found some shoes for you.")
+            yield UsageEvent(usage=usage)
+            yield MessageEndEvent(stop_reason="end_turn", usage=usage, model=self.name)
+
+
+async def test_step_ones_text_alongside_a_tool_call_reaches_step_twos_history() -> None:
+    """§5.1's pseudocode only ever appends `tool_call` blocks to the
+    assistant message it builds (`blocks.append(ev.block)` runs solely on
+    that branch), so read literally, a step that both talks *and* calls a
+    tool has its text silently dropped from history -- and on the final
+    step, where `blocks` holds no tool calls either, that reduces to an
+    *empty* assistant message appended (and, per the spec, persisted). This
+    pins the untested half of that deviation: replacing `if outcome.text:`
+    with `if False:` must redden this test, not just be true by
+    construction."""
+    provider = _FillerThenToolProvider()
+    runner = _runner(provider, _registry(_SearchTool()))
+
+    async for _ in runner.run("system", [], ["search"], _ctx()):
+        pass
+
+    second_request = provider.last_request
+    assert second_request is not None
+    text_blocks = [
+        block
+        for message in second_request.messages
+        for block in message.content
+        if isinstance(block, TextBlock)
+    ]
+    assert len(text_blocks) == 1
+    assert text_blocks[0].text == "Let me check that for you."
+
+
+async def test_duplicate_tool_names_are_deduped_before_reaching_the_provider() -> None:
+    """Two `agent_tools` rows resolving to the same name (an org-scoped
+    tool shadowing a builtin, Task 3's schema leaves that legal) must not
+    reach the provider as two identically-named tool specs -- Anthropic
+    rejects that with a 400."""
+    provider = FakeProvider(turns=["no tools needed"])
+    runner = _runner(provider, _registry(_SearchTool()))
+
+    async for _ in runner.run("system", [], ["search", "search"], _ctx()):
+        pass
+
+    request = provider.last_request
+    assert request is not None
+    assert request.tools is not None
+    assert [t.name for t in request.tools] == ["search"]
+
+
+def test_max_steps_below_one_is_rejected() -> None:
+    """`max_steps` is read off a database column (Task 7); a `0` there must
+    fail loudly at construction, not silently emit `AgentStepLimit` without
+    ever calling the provider -- indistinguishable, from the event stream
+    alone, from a real step-limit hit on a turn that actually ran."""
+    registry = _registry(_SearchTool())
+    with pytest.raises(ValueError, match="max_steps"):
+        AgentRunner(
+            FakeProvider(turns=["unused"]),
+            registry,
+            model="fake-1",
+            max_tokens=100,
+            max_steps=0,
+        )
 
 
 async def test_an_unregistered_tool_name_is_skipped_not_a_crash() -> None:
