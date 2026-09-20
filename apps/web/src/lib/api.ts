@@ -7,6 +7,75 @@ export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000
 
 export type ApiError = { code: string; message: string };
 
+const GENERIC_ERROR_MESSAGE = "Something went wrong. Please try again.";
+
+/**
+ * The API's `{error: {code, message}}` envelope, parsed once.
+ *
+ * `fallbackCode` is the caller's, because what a malformed or non-JSON error
+ * body *means* depends on who asked: for `apiFetch`'s same-origin auth routes
+ * it is most likely the proxy or the network, while a direct call to the API
+ * that returns an unparseable error has reached the server and failed there.
+ * Everything else about the shape is identical, so it lives here rather than
+ * being re-derived per module -- the two copies this replaced had already
+ * drifted to different fallback codes for no reasoned difference.
+ */
+export async function parseErrorEnvelope(
+  response: Response,
+  fallbackCode: string,
+): Promise<ApiError> {
+  const body: unknown = await response.json().catch(() => null);
+  const error =
+    body && typeof body === "object" && "error" in body
+      ? (body as { error?: unknown }).error
+      : null;
+  if (error && typeof error === "object" && "code" in error && "message" in error) {
+    const { code, message } = error as { code: unknown; message: unknown };
+    return {
+      code: typeof code === "string" ? code : fallbackCode,
+      message: typeof message === "string" ? message : GENERIC_ERROR_MESSAGE,
+    };
+  }
+  return { code: fallbackCode, message: GENERIC_ERROR_MESSAGE };
+}
+
+/**
+ * One request with a Bearer token, refreshed and retried exactly once on a
+ * 401.
+ *
+ * GraphQL recovers from an expired access token silently through urql's
+ * `authExchange`; the calls that bypass urql -- the SSE chat stream and the
+ * multipart document uploads -- would otherwise be the only actions in the
+ * dashboard that fail in a tab left open past the token's lifetime.
+ *
+ * ONE retry, never a loop: retrying a refresh that keeps coming back 401 is
+ * how you build one. If the refresh itself fails there is no session left to
+ * salvage, so the original 401 is returned untouched, which is what moves the
+ * user back to /login.
+ */
+export async function fetchWithRefresh(
+  send: (token: string) => Promise<Response>,
+  accessToken: string,
+  onAccessToken?: (token: string) => void,
+): Promise<Response> {
+  const response = await send(accessToken);
+  if (response.status !== 401) return response;
+
+  let refreshed: string | null = null;
+  try {
+    const tokens = await apiFetch<{ access_token: string }>("/api/v1/auth/refresh", {
+      method: "POST",
+    });
+    refreshed = tokens.access_token;
+  } catch {
+    refreshed = null;
+  }
+  if (refreshed === null) return response;
+
+  onAccessToken?.(refreshed);
+  return send(refreshed);
+}
+
 /**
  * The client for the auth routes, and only the auth routes.
  *
@@ -29,12 +98,7 @@ export async function apiFetch<T>(
   });
 
   if (!response.ok) {
-    const body = await response.json().catch(() => null);
-    const error: ApiError = body?.error ?? {
-      code: "network_error",
-      message: "Something went wrong. Please try again.",
-    };
-    throw error;
+    throw await parseErrorEnvelope(response, "network_error");
   }
 
   return response.status === 204 ? (undefined as T) : ((await response.json()) as T);

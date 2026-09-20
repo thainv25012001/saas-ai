@@ -163,6 +163,14 @@ def extract(data: bytes, mime_type: str, filename: str | None = None) -> Extract
     # `filename` is not only for the error message below: it is also what
     # `resolve_mime_type` uses when the caller has nothing better than `""`
     # or `application/octet-stream` to offer.
+    #
+    # No current caller passes it, and that is not an oversight: the one
+    # production path (`ingest_document`) reads a `mime_type` that
+    # `upload_document` already resolved against the filename and stored on
+    # the row, so by then there is nothing left to resolve. It stays for a
+    # caller that reaches `extract()` with raw bytes and no prior
+    # resolution -- with `filename=None` the call below returns `mime_type`
+    # unchanged, so it costs nothing in the meantime.
     mime_type = resolve_mime_type(mime_type, filename)
     if mime_type not in SUPPORTED_MIME_TYPES:
         suffix = f" ({filename})" if filename else ""
