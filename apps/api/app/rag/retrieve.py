@@ -91,6 +91,37 @@ class RetrievedChunk:
 
 
 @dataclass(frozen=True, slots=True)
+class CitationPayload:
+    """One retrieved passage's SSE- and tool-facing shape.
+
+    Deliberately narrower than `RetrievedChunk`: `excerpt` is a short
+    preview (see `app/chat/service.py`'s `_excerpt`), not the full chunk
+    `content`, which would double the bytes of every grounded turn on the
+    wire for no benefit the UI needs -- it already has `chunk_id` to fetch
+    the rest on demand.
+
+    Lives here rather than in `app/chat/service.py` (where it originated)
+    because `app/tools/base.py`'s `ToolResult.citations` also needs it: a
+    tool result and an SSE turn should report a grounding chunk identically
+    rather than through two shapes that drift, and `app/chat/service.py` is
+    expected to import `app/tools` in a later Phase-4 task, so the reverse
+    import would cycle.
+    """
+
+    chunk_id: uuid.UUID
+    document_id: uuid.UUID
+    document_title: str
+    rank: int
+    score: float
+    excerpt: str
+    # `None` for a non-paginated source (plain text, Markdown, HTML) --
+    # `RetrievedChunk.page` is `None` there too, since `_page_for_offset` in
+    # `app/rag/chunk.py` only ever gets a page list from `extract()` for a
+    # PDF. Absent is the honest state, not a value to fake as `1`.
+    page: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class _CandidateInfo:
     """Everything about a chunk *except* its fused score/rank -- captured
     once, from whichever candidate list first produced this chunk, since

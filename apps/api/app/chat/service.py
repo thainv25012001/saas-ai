@@ -34,7 +34,7 @@ from app.llm.types import Message as LLMMessage
 from app.prompts.context import assemble_context
 from app.prompts.defaults import DEFAULT_SALES_SYSTEM_PROMPT
 from app.prompts.service import PromptService
-from app.rag.retrieve import RetrievalService, RetrievedChunk
+from app.rag.retrieve import CitationPayload, RetrievalService, RetrievedChunk
 
 logger = get_logger(__name__)
 
@@ -86,29 +86,6 @@ class ChatMessageStart:
     #: it to decide whether to ask for a title. Defaulted, so nothing that
     #: constructs a `ChatMessageStart` without it has to change.
     created: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class CitationPayload:
-    """One retrieved passage's SSE-facing shape.
-
-    Deliberately narrower than `RetrievedChunk`: `excerpt` is a short
-    preview (see `_excerpt`), not the full chunk `content`, which would
-    double the bytes of every grounded turn on the wire for no benefit the
-    UI needs -- it already has `chunk_id` to fetch the rest on demand.
-    """
-
-    chunk_id: uuid.UUID
-    document_id: uuid.UUID
-    document_title: str
-    rank: int
-    score: float
-    excerpt: str
-    # `None` for a non-paginated source (plain text, Markdown, HTML) --
-    # `RetrievedChunk.page` is `None` there too, since `_page_for_offset` in
-    # `app/rag/chunk.py` only ever gets a page list from `extract()` for a
-    # PDF. Absent is the honest state, not a value to fake as `1`.
-    page: int | None
 
 
 @dataclass(frozen=True, slots=True)
