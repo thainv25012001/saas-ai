@@ -19,10 +19,8 @@
 
 // Relative, not the `@/` alias the rest of the app uses: this module is
 // exercised directly by `sse.test.ts` under vitest, which resolves without
-// Next.js's tsconfig path mapping. `./auth` is a type-only import, so the
-// React module it lives in is erased at compile time and never loaded here.
-import { apiFetch } from "./api";
-import type { TokenResponse } from "./auth";
+// Next.js's tsconfig path mapping.
+import { fetchWithRefresh } from "./api";
 
 export type ChatUsage = {
   input_tokens: number;
@@ -324,32 +322,10 @@ export async function streamChat(params: StreamChatParams): Promise<void> {
 
   let response: Response;
   try {
-    response = await send(accessToken);
-
-    // GraphQL refreshes silently on a 401 via urql's `authExchange`, so a
-    // dashboard tab left open past the access token's lifetime keeps
-    // working -- except here, where a 401 used to render a red error bubble
-    // with no retry at all. Same recovery, through the same single
-    // `/api/v1/auth/refresh` call the exchange uses (the refresh token is an
-    // httpOnly cookie, so `apiFetch` needs nothing from this module), and
-    // ONE retry only: retrying a refresh that keeps coming back 401 is how
-    // you build a refresh loop.
-    if (response.status === 401) {
-      let refreshed: string | null = null;
-      try {
-        const tokens = await apiFetch<TokenResponse>("/api/v1/auth/refresh", { method: "POST" });
-        refreshed = tokens.access_token;
-      } catch {
-        // The refresh token itself is gone or invalid -- there is no session
-        // left to salvage. Fall through and surface the original 401 exactly
-        // as before, which is what moves the user back to /login.
-        refreshed = null;
-      }
-      if (refreshed !== null) {
-        onAccessToken?.(refreshed);
-        response = await send(refreshed);
-      }
-    }
+    // A 401 here used to render a red error bubble with no retry at all, in a
+    // dashboard where GraphQL recovers silently. `fetchWithRefresh` owns that
+    // recovery now, for this stream and for document uploads both.
+    response = await fetchWithRefresh(send, accessToken, onAccessToken);
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") return;
     onEvent({

@@ -19,13 +19,20 @@ class Chunk:
     metadata: dict[str, Any]
 
 
+def _tokens_for(word_count: int) -> int:
+    # Deliberate approximation, not real tokenization: word count * 1.3 tracks
+    # subword-token counts closely enough to size chunks, without pulling in
+    # tiktoken just for a packing heuristic that never needs to match any
+    # specific model's actual tokenizer.
+    #
+    # Split from `_approx_tokens` so the packing loop can accumulate word
+    # counts (exact and additive) and apply the factor once, rather than
+    # re-splitting text it has already counted.
+    return round(word_count * 1.3)
+
+
 def _approx_tokens(text: str) -> int:
-    # Deliberate approximation, not real tokenization: whitespace-split word
-    # count * 1.3 tracks subword-token counts closely enough to size chunks,
-    # without pulling in tiktoken just for a packing heuristic that never
-    # needs to match any specific model's actual tokenizer.
-    words = text.split()
-    return round(len(words) * 1.3)
+    return _tokens_for(len(text.split()))
 
 
 _HEADING_LINE = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$", re.MULTILINE)
@@ -122,15 +129,32 @@ def _pack_sentences(
     """
     spans: list[tuple[int, int]] = []
     n = len(sentences)
+
+    # Each sentence's own *word* count, computed once. Both loops below used to
+    # call `_approx_tokens` on the whole span built so far, re-splitting every
+    # word already counted -- O(k^2) splits to pack k sentences, paid again for
+    # every chunk in the document, which is real work on exactly the 200-page
+    # PDF this module exists to handle.
+    #
+    # Words, not tokens, because `_approx_tokens` rounds: summing per-sentence
+    # *token* counts would not equal the token count of the joined span (three
+    # one-word sentences give 1+1+1, the joined span gives round(3 * 1.3) = 4),
+    # and that would quietly move chunk boundaries. Word counts are exact and
+    # additive -- a sentence span never ends mid-word -- so accumulating them
+    # and applying the 1.3 factor once at comparison time is identical to what
+    # the slicing version computed.
+    words = [len(text[s:e].split()) for s, e in sentences]
+
     idx = 0
     while idx < n:
         start = sentences[idx][0]
         end = sentences[idx][1]
         j = idx
+        packed = 0
         while j < n:
-            candidate_end = sentences[j][1]
-            if j == idx or _approx_tokens(text[start:candidate_end]) <= target_tokens:
-                end = candidate_end
+            if j == idx or _tokens_for(packed + words[j]) <= target_tokens:
+                packed += words[j]
+                end = sentences[j][1]
                 j += 1
             else:
                 break
@@ -140,7 +164,9 @@ def _pack_sentences(
 
         overlap_target = overlap_ratio * target_tokens
         back = j
-        while back > idx and _approx_tokens(text[sentences[back][0] : end]) < overlap_target:
+        trailing = 0
+        while back > idx and _tokens_for(trailing) < overlap_target:
+            trailing += words[back - 1]
             back -= 1
         idx = back if back > idx else j
     return spans

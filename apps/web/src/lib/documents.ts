@@ -9,8 +9,7 @@
  * cross-origin multipart POST.
  */
 
-import { apiFetch, type ApiError } from "./api";
-import type { TokenResponse } from "./auth";
+import { type ApiError, fetchWithRefresh, parseErrorEnvelope } from "./api";
 import type { DocumentStatus } from "@/graphql/generated";
 
 /**
@@ -76,12 +75,10 @@ export function resolveDocumentType(reported: string, filename?: string): string
   return EXTENSION_MIME_TYPES[suffix] ?? reported;
 }
 
-/** `1536` -> `"1.5 KB"`, `20971520` -> `"20 MB"`. Whole numbers past 10 units
- * skip the decimal -- "20 MB" reads better than "20.0 MB" for describing an
- * arbitrary file's actual size, where rounding either way is harmless. NOT
- * for stating a *limit* -- see `formatByteLimit`. */
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
+/** Steps a byte count up to the largest unit it fills, so the two formatters
+ * below share one unit table and one stepping rule and can only differ in the
+ * thing they actually differ in: which way they round. */
+function stepToUnit(bytes: number): { value: number; unit: string } {
   const units = ["KB", "MB", "GB"];
   let value = bytes / 1024;
   let unitIndex = 0;
@@ -89,8 +86,18 @@ export function formatBytes(bytes: number): string {
     value /= 1024;
     unitIndex += 1;
   }
+  return { value, unit: units[unitIndex] };
+}
+
+/** `1536` -> `"1.5 KB"`, `20971520` -> `"20 MB"`. Whole numbers past 10 units
+ * skip the decimal -- "20 MB" reads better than "20.0 MB" for describing an
+ * arbitrary file's actual size, where rounding either way is harmless. NOT
+ * for stating a *limit* -- see `formatByteLimit`. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const { value, unit } = stepToUnit(bytes);
   const rounded = value >= 10 ? Math.round(value) : Math.round(value * 10) / 10;
-  return `${rounded} ${units[unitIndex]}`;
+  return `${rounded} ${unit}`;
 }
 
 /**
@@ -106,15 +113,8 @@ export function formatBytes(bytes: number): string {
  */
 export function formatByteLimit(bytes: number): string {
   if (bytes < 1024) return `${Math.floor(bytes)} B`;
-  const units = ["KB", "MB", "GB"];
-  let value = bytes / 1024;
-  let unitIndex = 0;
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-  const floored = Math.floor(value * 10) / 10;
-  return `${floored} ${units[unitIndex]}`;
+  const { value, unit } = stepToUnit(bytes);
+  return `${Math.floor(value * 10) / 10} ${unit}`;
 }
 
 /**
@@ -183,21 +183,10 @@ function toDocumentUploadResponse(raw: unknown): DocumentUploadResponse {
   };
 }
 
-async function parseApiError(response: Response): Promise<ApiError> {
-  const body: unknown = await response.json().catch(() => null);
-  const error =
-    body && typeof body === "object" && "error" in body
-      ? (body as { error?: unknown }).error
-      : null;
-  if (error && typeof error === "object" && "code" in error && "message" in error) {
-    const { code, message } = error as { code: unknown; message: unknown };
-    return {
-      code: typeof code === "string" ? code : "internal_error",
-      message: typeof message === "string" ? message : "Something went wrong. Please try again.",
-    };
-  }
-  return { code: "internal_error", message: "Something went wrong. Please try again." };
-}
+/** These calls go straight to the API rather than through the Next proxy, so
+ * an error body we cannot parse means the server answered and failed. */
+const parseApiError = (response: Response): Promise<ApiError> =>
+  parseErrorEnvelope(response, "internal_error");
 
 export type DocumentAuth = {
   accessToken: string;
@@ -207,40 +196,18 @@ export type DocumentAuth = {
   onAccessToken?: (token: string) => void;
 };
 
-/**
- * One request with a Bearer token, refreshed and retried exactly once on a
- * 401. The dashboard's GraphQL traffic already recovers from an expired
- * access token silently via urql's `authExchange`; without this, uploading
- * or retrying a document from a tab left open past the token's lifetime
- * would be the one action on this page that fails instead.
- */
-async function authorizedFetch(
-  url: string,
-  init: RequestInit,
-  auth: DocumentAuth,
-): Promise<Response> {
-  const send = (token: string) =>
-    fetch(url, {
-      ...init,
-      headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` },
-    });
-
-  let response = await send(auth.accessToken);
-  if (response.status === 401) {
-    let refreshed: string | null = null;
-    try {
-      const tokens = await apiFetch<TokenResponse>("/api/v1/auth/refresh", { method: "POST" });
-      refreshed = tokens.access_token;
-    } catch {
-      refreshed = null;
-    }
-    if (refreshed !== null) {
-      auth.onAccessToken?.(refreshed);
-      response = await send(refreshed);
-    }
-  }
-  return response;
-}
+/** See `fetchWithRefresh` in `api.ts` for why the retry exists and why there
+ * is exactly one of it. */
+const authorizedFetch = (url: string, init: RequestInit, auth: DocumentAuth): Promise<Response> =>
+  fetchWithRefresh(
+    (token) =>
+      fetch(url, {
+        ...init,
+        headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` },
+      }),
+    auth.accessToken,
+    auth.onAccessToken,
+  );
 
 export async function uploadDocument(
   file: File,

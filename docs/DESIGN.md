@@ -222,6 +222,45 @@ is the worked example.
 - **The toggle says what it does.** `aria-expanded`, plus an `aria-label` and a
   `title` that name the outcome (`Show conversations`), not the icon.
 
+## Polling
+
+Some state changes on the server with nothing to push it — a document being
+chunked and embedded by a worker. The Knowledge page polls for it, and
+[`lib/use-document-polling.ts`](../apps/web/src/lib/use-document-polling.ts) is
+the worked example. Polling, not a websocket: this is a handful of rows and a
+3s interval, and a socket would be more moving parts for the same answer.
+
+- **Stop when there is nothing left to learn.** The hook polls only while some
+  row is in a non-terminal state. A loop that keeps asking after every document
+  is `ready` or `failed` is pure load with no possible new answer.
+- **Stop when the tab is hidden.** Nobody is reading it, and a backgrounded tab
+  polling every 3s for an afternoon is the version of this bug that nobody
+  notices.
+- **The interval is the hook's to clear.** Returning the cleanup from the effect
+  is the whole contract — a leaked `setInterval` survives the unmount and keeps
+  hitting the API for the life of the page.
+- **Test the timer, not just the predicate.** A predicate saying "stop" is not
+  the same as an interval that stopped. This hook's three conditions each have
+  their own fake-timer test asserting the call count stops rising; before they
+  existed, deleting the cleanup left the entire suite green.
+
+The predicate lives apart from the effect (`shouldPollDocuments`) so it can be
+tested as a pure function, and the effect's callback is memoised so a re-render
+does not tear down and re-arm the interval.
+
+## Status as a tone
+
+A lifecycle column (`pending` → `processing` → `ready` | `failed`) becomes a
+`Badge` through one lookup — see
+[`lib/document-status.ts`](../apps/web/src/lib/document-status.ts). Keep the
+mapping in one place rather than inline in the table: the table, the retry
+button's enabled state and the polling predicate all read the same status, and
+inline `status === "FAILED"` checks in three components are how they disagree.
+
+A terminal state is not automatically a *good* state. A document that processed
+with nothing extractable is `ready` with zero chunks, and the label says so
+rather than showing a green badge beside a document the assistant cannot use.
+
 ## Adding a component
 
 1. Does a primitive already do it? Extend that one instead — a second thing
