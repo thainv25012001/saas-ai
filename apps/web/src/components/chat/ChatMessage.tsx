@@ -1,7 +1,10 @@
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { cn } from "@/components/ui/cn";
+import { ToolCall, type ToolCallData } from "@/components/chat/ToolCall";
 import type { ChatUsage } from "@/lib/sse";
+
+export type { ToolCallData } from "@/components/chat/ToolCall";
 
 export type ChatMessageMeta = {
   model: string;
@@ -41,10 +44,18 @@ export type ChatMessageData = {
   status: "streaming" | "done" | "error";
   error?: ChatMessageError;
   meta?: ChatMessageMeta;
-  /** Arrives via the `citations` SSE event, before the first `text_delta` --
-   * present (possibly empty) as soon as that event has been seen, `undefined`
-   * before it (or for a user message, which never gets one). */
+  /** Arrives via the `citations` SSE event. Phase 3 guaranteed this before
+   * the first `text_delta`; Phase 4 makes retrieval a tool the model can
+   * call after already speaking, so citations may now land mid-stream, or
+   * even after the visible answer, and this must not be read as "arrives
+   * early" any more. Present (possibly empty) as soon as any `citations`
+   * event has been seen, `undefined` before that (or for a user message,
+   * which never gets one). */
   citations?: ChatCitation[];
+  /** Every `tool_call_start`/`tool_call_end` pair seen this turn, in the
+   * order the calls started -- `undefined` for a turn (or a user message)
+   * that never called one. */
+  toolCalls?: ToolCallData[];
 };
 
 /** `cost_usd` is `null` whenever the model isn't in the pricing table (see
@@ -119,6 +130,42 @@ function Citations({ citations }: { citations: ChatCitation[] }) {
   );
 }
 
+/** The turn's tool-call trace, one card per call in the order it started.
+ * Kept as its own section (like `Citations`) rather than spliced into the
+ * text at the token position it happened: the SSE stream does not report
+ * where within the answer's text a call fell, only that it did, and a
+ * section that is honest about that is better than one that guesses. */
+function ToolCalls({ toolCalls }: { toolCalls: ToolCallData[] }) {
+  if (toolCalls.length === 0) return null;
+  return (
+    <div className="mt-2.5 space-y-1.5 border-t border-line pt-2.5">
+      {toolCalls.map((call) => (
+        <ToolCall key={call.id} data={call} />
+      ))}
+    </div>
+  );
+}
+
+/** `step_limit_reached` is the one `error` code with its own copy and tone:
+ * the agent stopped at a configured boundary having possibly already said
+ * something and possibly already called tools, which is a real outcome a
+ * user can act on (ask a narrower question), not a crash to apologise for.
+ * Every other code keeps the generic danger treatment. */
+function TurnError({ error }: { error: ChatMessageError }) {
+  if (error.code === "step_limit_reached") {
+    return (
+      <Alert tone="warn" title="Reached its step limit" className="mt-2.5">
+        {error.message}
+      </Alert>
+    );
+  }
+  return (
+    <Alert tone="danger" className="mt-2.5">
+      {error.message}
+    </Alert>
+  );
+}
+
 export function ChatMessage({ message }: { message: ChatMessageData }) {
   const isUser = message.role === "user";
   // An assistant turn stopped (via the Stop button, or a dropped connection)
@@ -151,11 +198,9 @@ export function ChatMessage({ message }: { message: ChatMessageData }) {
           </p>
         )}
 
-        {message.status === "error" && message.error ? (
-          <Alert tone="danger" className="mt-2.5">
-            {message.error.message}
-          </Alert>
-        ) : null}
+        {message.status === "error" && message.error ? <TurnError error={message.error} /> : null}
+
+        {message.toolCalls ? <ToolCalls toolCalls={message.toolCalls} /> : null}
 
         {message.citations ? <Citations citations={message.citations} /> : null}
 

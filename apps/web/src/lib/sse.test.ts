@@ -220,6 +220,46 @@ describe("parseSSEStream", () => {
     expect(events).toEqual([{ type: "text_delta", text: "ok" }]);
   });
 
+  it("parses a tool_call_start event with its calls' id, name and arguments", async () => {
+    const call = { id: "call_1", name: "retrieve_knowledge", arguments: { query: "pricing" } };
+    const events = await collect(chunksOf(frame({ type: "tool_call_start", calls: [call] })));
+    expect(events).toEqual([{ type: "tool_call_start", calls: [call] }]);
+  });
+
+  it("drops a tool_call_start event where one call is missing arguments", async () => {
+    // Same all-or-nothing reasoning as a malformed citations entry: a call
+    // the UI cannot render correctly (no arguments to summarise) is worse
+    // to show partially than to drop.
+    const events = await collect(
+      chunksOf(
+        frame({ type: "tool_call_start", calls: [{ id: "call_1", name: "retrieve_knowledge" }] }) +
+          frame({ type: "text_delta", text: "ok" }),
+      ),
+    );
+    expect(events).toEqual([{ type: "text_delta", text: "ok" }]);
+  });
+
+  it("parses a tool_call_end event, including a failed call's is_error flag", async () => {
+    const results = [
+      { tool_call_id: "call_1", tool_name: "retrieve_knowledge", result: "3 chunks found", is_error: false },
+      { tool_call_id: "call_2", tool_name: "create_lead", result: "invalid arguments", is_error: true },
+    ];
+    const events = await collect(chunksOf(frame({ type: "tool_call_end", results })));
+    expect(events).toEqual([{ type: "tool_call_end", results }]);
+  });
+
+  it("drops a tool_call_end event where one result is missing is_error", async () => {
+    const events = await collect(
+      chunksOf(
+        frame({
+          type: "tool_call_end",
+          results: [{ tool_call_id: "call_1", tool_name: "retrieve_knowledge", result: "ok" }],
+        }) + frame({ type: "text_delta", text: "ok" }),
+      ),
+    );
+    expect(events).toEqual([{ type: "text_delta", text: "ok" }]);
+  });
+
   it("parses an error event and preserves its code and message", async () => {
     const events = await collect(
       chunksOf(frame({ type: "error", code: "llm_rate_limited", message: "Too many requests" })),

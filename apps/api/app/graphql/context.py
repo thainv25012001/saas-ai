@@ -12,6 +12,7 @@ from app.core.errors import AuthenticationError
 from app.core.tenancy import TenantContext, tenant_session
 from app.db.models import (
     AgentConfig,
+    Conversation,
     ConversationMessage,
     DocumentChunk,
     MessageCitation,
@@ -56,6 +57,9 @@ class Context(BaseContext):
         )
         self.messages_loader: DataLoader[uuid.UUID, list[ConversationMessage]] | None = (
             DataLoader(load_fn=self._load_messages) if session is not None else None
+        )
+        self.conversation_loader: DataLoader[uuid.UUID, Conversation | None] | None = (
+            DataLoader(load_fn=self._load_conversations) if session is not None else None
         )
 
     async def _load_messages(
@@ -162,6 +166,30 @@ class Context(BaseContext):
         # matches results to keys positionally, so a message with no
         # citations must still contribute an (empty) slot.
         return [by_message.get(message_id, []) for message_id in message_ids]
+
+    async def _load_conversations(
+        self, conversation_ids: Sequence[uuid.UUID]
+    ) -> list[Conversation | None]:
+        """Batches `Lead.conversation` (Task 8) into one query instead of one
+        per lead row, the same reasoning as `_load_configs` below.
+
+        `organization_id` is checked explicitly for the same reason every
+        other loader's predicate is: Layer 1 tenant filtering admits no
+        exceptions, RLS or not. A conversation id with no matching row --
+        deleted since, or (should it ever happen) not this tenant's --
+        resolves to `None` rather than being silently absent from the
+        dict, via the trailing `.get(conversation_id)` below.
+        """
+        assert self.session is not None
+        assert self.tenant is not None
+        result = await self.session.execute(
+            select(Conversation).where(
+                Conversation.id.in_(list(conversation_ids)),
+                Conversation.organization_id == self.tenant.organization_id,
+            )
+        )
+        by_id = {conversation.id: conversation for conversation in result.scalars().all()}
+        return [by_id.get(conversation_id) for conversation_id in conversation_ids]
 
     async def _load_configs(self, agent_ids: Sequence[uuid.UUID]) -> list[AgentConfig | None]:
         """Batches `agents { config { ... } }` into one query instead of one

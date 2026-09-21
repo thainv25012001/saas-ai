@@ -59,3 +59,30 @@ class LeadService:
         self.session.add(lead)
         await self.session.flush()
         return lead
+
+    async def list_for_agent(
+        self, agent_id: uuid.UUID, *, limit: int = 50, offset: int = 0
+    ) -> list[Lead]:
+        """Most recently captured first -- the same ordering `conversations`
+        uses for the same reason: whoever opens the dashboard's Leads page
+        wants to see what just came in, not the oldest row first.
+
+        Scoped by `organization_id`, matching `ConversationService.
+        list_for_agent`'s own explicit predicate rather than relying on RLS
+        alone (Layer 1 of `docs/ARCHITECTURE.md` §2.3's two-layer model). An
+        `agent_id` belonging to another organization's agent -- or one that
+        does not exist at all -- returns an empty list rather than a 404: the
+        two are indistinguishable from outside the tenant, and the caller
+        (`Query.leads`) leans on that the same way `conversations` does.
+        """
+        result = await self.session.execute(
+            select(Lead)
+            .where(
+                Lead.agent_id == agent_id,
+                Lead.organization_id == self.tenant.organization_id,
+            )
+            .order_by(Lead.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars().all())

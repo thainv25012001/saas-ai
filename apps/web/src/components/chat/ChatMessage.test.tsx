@@ -152,6 +152,92 @@ describe("ChatMessage", () => {
     expect(container.querySelector("b")).toBeNull();
   });
 
+  it("renders a tool call inline, with its name and a readable argument summary", () => {
+    render(
+      <ChatMessage
+        message={assistant({
+          toolCalls: [
+            {
+              id: "call_1",
+              name: "retrieve_knowledge",
+              arguments: { query: "starter plan pricing" },
+              status: "done",
+              result: "Found 2 chunks.",
+              isError: false,
+            },
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByText("retrieve_knowledge")).toBeInTheDocument();
+    expect(screen.getByText(/starter plan pricing/)).toBeInTheDocument();
+  });
+
+  it("renders an errored tool call as visibly distinct, not an empty success", () => {
+    render(
+      <ChatMessage
+        message={assistant({
+          toolCalls: [
+            {
+              id: "call_1",
+              name: "create_lead",
+              arguments: { name: "Jamie" },
+              status: "done",
+              result: "invalid arguments: at least one of 'email' or 'phone' is required",
+              isError: true,
+            },
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(screen.queryByText("Done")).not.toBeInTheDocument();
+  });
+
+  it("renders a <script> payload in a tool call's arguments as literal text, never markup", () => {
+    const { container } = render(
+      <ChatMessage
+        message={assistant({
+          toolCalls: [
+            {
+              id: "call_1",
+              name: "create_lead",
+              arguments: { name: "<script>alert(1)</script>" },
+              status: "done",
+              result: "<script>alert(2)</script>",
+              isError: false,
+            },
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByText(/<script>alert\(1\)<\/script>/)).toBeInTheDocument();
+    expect(screen.getByText("<script>alert(2)</script>")).toBeInTheDocument();
+    expect(container.querySelector("script")).toBeNull();
+  });
+
+  it("shows a step-limit turn as a distinct, named outcome rather than a generic failure", () => {
+    render(
+      <ChatMessage
+        message={assistant({
+          text: "Let me check a few things.",
+          status: "error",
+          error: {
+            code: "step_limit_reached",
+            message: "The assistant reached its step limit (6) while still requesting tools.",
+          },
+        })}
+      />,
+    );
+    // A status, not an alert -- see Alert.test.tsx's own reasoning: this
+    // outcome must not interrupt a screen reader the way a real failure does.
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Reached its step limit");
+    expect(status).toHaveTextContent(/while still requesting tools/);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(status).not.toHaveClass("border-danger-line");
+  });
+
   it("shows a turn error as an alert while keeping the partial text", () => {
     render(
       <ChatMessage

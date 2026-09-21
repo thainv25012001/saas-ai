@@ -141,7 +141,7 @@ for one of these before writing markup.
 | `Card` + `CardHeader` / `CardBody` / `CardFooter` | every panel | `tone="danger"` for destructive sections. Put the submit in `CardFooter`: a confirmation there does not shift the form under the cursor the way an inserted banner does. |
 | `Field` | every labelled control | Owns the generated id, `aria-describedby`, `aria-invalid` and the required marker. Takes a render prop: `{(control) => <Input {...control} />}`. Never hand-wire a `<label htmlFor>`. |
 | `Input` / `Textarea` / `Select` | text, long text, choice | See Dropdowns below. |
-| `Alert` | a message about the page | `danger` gets `role="alert"` (interrupts a screen reader); `success` and `info` get `role="status"` (waits its turn). A save confirmation is not worth an interruption; a failure is. |
+| `Alert` | a message about the page | `danger` gets `role="alert"` (interrupts a screen reader); `success`, `info` and `warn` get `role="status"` (waits its turn). A save confirmation is not worth an interruption; a failure is — but so is a real, named non-fatal outcome (`step_limit_reached`), which is exactly what `warn` is for. |
 | `Badge` | a small status fact | `neutral` \| `success` \| `warn` \| `info`. |
 | `EmptyState` | a list with nothing in it | Icon, title, description, one action. |
 | `PageHeader` | the top of a page | Title, breadcrumb, meta, actions. |
@@ -260,6 +260,84 @@ inline `status === "FAILED"` checks in three components are how they disagree.
 A terminal state is not automatically a *good* state. A document that processed
 with nothing extractable is `ready` with zero chunks, and the label says so
 rather than showing a green badge beside a document the assistant cannot use.
+
+A second worked example, added for leads (Phase 4 Task 8):
+[`lib/lead-status.ts`](../apps/web/src/lib/lead-status.ts). Same one-lookup
+shape, but note it does *not* reuse `document-status.ts`'s tone assignments —
+a lead's `warn` means "an in-progress state, not a settled one"
+(`QUALIFIED`), which is a different reason from a DRAFT agent's `warn`
+("configured but not live") even though both draw on the same token. The
+tone's *meaning* is local to what it is describing; only the four tones
+themselves, and the rule that a status becomes exactly one of them, are
+shared.
+
+## Untrusted text, beyond citations
+
+Phase 3 established the rule for citations: `document_title` and `excerpt`
+are copied from an uploaded file with no server-side escaping, so rendering
+is what has to hold the line — plain JSX text children only, never
+`dangerouslySetInnerHTML` or a markdown pass. Phase 4 (Task 8) adds two more
+sources under the same rule, because both are model output that can itself
+be quoting a document or a visitor's own typed text:
+
+- **A tool call's `arguments` and result**
+  ([`components/chat/ToolCall.tsx`](../apps/web/src/components/chat/ToolCall.tsx)).
+  A `create_lead` call's arguments *are* the visitor's own name/email/interest,
+  typed back verbatim; a `retrieve_knowledge` result is an excerpt of a
+  document's own content, exactly like a citation's excerpt. `summarizeArguments`
+  stringifies each value into a one-line summary and the result sits behind a
+  native `<details>`, but both are still JSX text children only.
+- **A lead's own fields**
+  ([`components/leads/LeadsTable.tsx`](../apps/web/src/components/leads/LeadsTable.tsx)).
+  Same data, one hop further downstream: what `create_lead` captured is what
+  the Leads page later lists.
+
+The test shape this earns is the same one `ChatMessage.test.tsx` already
+used for citations: render a `<script>` payload in the untrusted field and
+assert `container.querySelector("script")` is `null` while
+`screen.getByText(...)` still finds the literal string. A test that only
+asserts the text is present would pass even if the component were rewritten
+around `dangerouslySetInnerHTML` — the query selector is what actually pins
+"never becomes markup".
+
+## Tool calls in the transcript
+
+A tool call is rendered as its own section under a message
+(`ChatMessage`'s `ToolCalls`), not spliced into the answer text at the token
+position it happened. The SSE stream (`tool_call_start`/`tool_call_end`,
+`docs/PHASE-4.md` §4) reports *that* a call happened and its outcome, never
+*where* within the surrounding text it fell — Phase 4 also removed the
+Phase 3 guarantee that citations arrive before the first `text_delta`, since
+retrieval is now a tool the model can call after already speaking. A section
+that shows every call in the order it started is honest about what the wire
+actually promises; guessing an inline position from delta counts would not
+be.
+
+`is_error` is the one signal a failed call has, and it must read as failed,
+not as an empty success: `ToolCall` gives a failed call both a different
+label (`Failed` vs. `Done`) and a different tone (`border-danger-line`
+instead of `border-line`), because a state that only changes a text label
+is too easy to miss scanning a transcript full of calls.
+
+`step_limit_reached` arrives as an in-band `error` event (no `message_end`
+for that turn) and gets its own `Alert tone="warn"` rather than the generic
+`danger` treatment (`ChatMessage`'s `TurnError`) — see the `Alert` row above
+and "Status as a tone" for why `warn`, specifically, is the tone for "a real,
+named outcome, not a crash".
+
+## A toggle without a new primitive
+
+The agent Tools card
+([`components/agents/AgentToolsCard.tsx`](../apps/web/src/components/agents/AgentToolsCard.tsx))
+needed an enable/disable control and there is no dedicated switch in `ui/`.
+Rather than add one, each row uses a plain `Button` whose label and variant
+already encode the state (`Enable` / `primary` when off, `Disable` /
+`secondary` when on) plus a `Badge` naming the current state next to it —
+the same `loading` + `loadingLabel` pattern `DocumentsTable`'s Retry/Delete
+buttons already use, scoped to one row at a time via a `togglingId` prop so
+flipping one tool does not freeze the whole card. Reached for the existing
+primitive per "Adding a component" below, rather than writing a second
+control that would need its own focus ring and its own tests.
 
 ## Adding a component
 

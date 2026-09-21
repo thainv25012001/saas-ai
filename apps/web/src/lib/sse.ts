@@ -49,10 +49,35 @@ export type Citation = {
   page: number | null;
 };
 
+export type ToolCall = {
+  id: string;
+  name: string;
+  /** Untrusted: the model's own tool-call arguments, per `ChatToolCall`'s
+   * docstring in `apps/api/app/chat/service.py`. Bounded by the tool's
+   * `args_model` schema, but the *values* inside it can still be arbitrary
+   * text a visitor typed (a `create_lead` call quotes their own
+   * name/email/interest back). Rendering it must go through JSX text
+   * interpolation only -- never `dangerouslySetInnerHTML` or a markdown
+   * pass -- see `ToolCall.tsx`. */
+  arguments: Record<string, unknown>;
+};
+
+export type ToolCallResult = {
+  tool_call_id: string;
+  tool_name: string;
+  /** Untrusted for the same reason `Citation.excerpt` is: an excerpt of
+   * whatever the tool returned, which for `retrieve_knowledge` is drawn
+   * from an uploaded document's own content. */
+  result: string;
+  is_error: boolean;
+};
+
 export type SSEEvent =
   | { type: "message_start"; conversation_id: string; message_id: string }
   | { type: "citations"; citations: Citation[] }
   | { type: "text_delta"; text: string }
+  | { type: "tool_call_start"; calls: ToolCall[] }
+  | { type: "tool_call_end"; results: ToolCallResult[] }
   | {
       type: "message_end";
       usage: ChatUsage;
@@ -107,6 +132,55 @@ function toCitations(value: unknown): Citation[] | null {
   return citations;
 }
 
+function toToolCall(value: unknown): ToolCall | null {
+  if (!isRecord(value)) return null;
+  // Destructured as `args`, not `arguments`: an ES module runs in strict
+  // mode, where `arguments` is a reserved binding name and this would be a
+  // SyntaxError, not just a shadowing warning.
+  const { id, name, arguments: args } = value;
+  if (typeof id !== "string" || typeof name !== "string" || !isRecord(args)) return null;
+  return { id, name, arguments: args };
+}
+
+/** Same all-or-nothing shape as `toCitations`, for the same reason: a tool
+ * call the UI cannot show correctly is worse to show partially than not at
+ * all. */
+function toToolCalls(value: unknown): ToolCall[] | null {
+  if (!Array.isArray(value)) return null;
+  const calls: ToolCall[] = [];
+  for (const item of value) {
+    const call = toToolCall(item);
+    if (call === null) return null;
+    calls.push(call);
+  }
+  return calls;
+}
+
+function toToolCallResult(value: unknown): ToolCallResult | null {
+  if (!isRecord(value)) return null;
+  const { tool_call_id, tool_name, result, is_error } = value;
+  if (
+    typeof tool_call_id !== "string" ||
+    typeof tool_name !== "string" ||
+    typeof result !== "string" ||
+    typeof is_error !== "boolean"
+  ) {
+    return null;
+  }
+  return { tool_call_id, tool_name, result, is_error };
+}
+
+function toToolCallResults(value: unknown): ToolCallResult[] | null {
+  if (!Array.isArray(value)) return null;
+  const results: ToolCallResult[] = [];
+  for (const item of value) {
+    const result = toToolCallResult(item);
+    if (result === null) return null;
+    results.push(result);
+  }
+  return results;
+}
+
 /** Narrows a parsed JSON value into a known `SSEEvent`, or `null` if it does
  * not match any known shape (a forward-compatible unknown event type, or a
  * malformed payload). Never throws. */
@@ -128,6 +202,16 @@ function toSSEEvent(value: unknown): SSEEvent | null {
       const { text } = value;
       if (typeof text !== "string") return null;
       return { type: "text_delta", text };
+    }
+    case "tool_call_start": {
+      const calls = toToolCalls(value.calls);
+      if (calls === null) return null;
+      return { type: "tool_call_start", calls };
+    }
+    case "tool_call_end": {
+      const results = toToolCallResults(value.results);
+      if (results === null) return null;
+      return { type: "tool_call_end", results };
     }
     case "message_end": {
       const usage = toChatUsage(value.usage);

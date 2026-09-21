@@ -305,6 +305,51 @@ function PlaygroundContent() {
                 ),
               );
               break;
+            case "tool_call_start":
+              // Appended in the order the calls started; `tool_call_end`
+              // below matches each one back by id, so two calls in the same
+              // step (a step can gather more than one) never get mixed up.
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId
+                    ? {
+                        ...m,
+                        toolCalls: [
+                          ...(m.toolCalls ?? []),
+                          ...event.calls.map((call) => ({
+                            id: call.id,
+                            name: call.name,
+                            arguments: call.arguments,
+                            status: "running" as const,
+                          })),
+                        ],
+                      }
+                    : m,
+                ),
+              );
+              break;
+            case "tool_call_end":
+              setMessages((prev) =>
+                prev.map((m) => {
+                  if (m.id !== assistantId || !m.toolCalls) return m;
+                  const byId = new Map(event.results.map((result) => [result.tool_call_id, result]));
+                  return {
+                    ...m,
+                    toolCalls: m.toolCalls.map((call) => {
+                      const result = byId.get(call.id);
+                      return result
+                        ? {
+                            ...call,
+                            status: "done" as const,
+                            result: result.result,
+                            isError: result.is_error,
+                          }
+                        : call;
+                    }),
+                  };
+                }),
+              );
+              break;
             case "message_end":
               sawMessageEnd = true;
               setMessages((prev) =>

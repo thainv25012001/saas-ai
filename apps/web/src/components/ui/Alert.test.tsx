@@ -15,6 +15,17 @@ describe("Alert", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("announces warn politely, as a status distinct from danger", () => {
+    // Added for `step_limit_reached` (Phase 4 Task 8): a real, named outcome
+    // -- not a crash -- so it must not interrupt a screen reader the way
+    // `danger` does, and it must not carry danger's own visual tone either.
+    render(<Alert tone="warn">Reached its step limit.</Alert>);
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Reached its step limit.");
+    expect(status).not.toHaveClass("border-danger-line");
+    expect(status).toHaveClass("border-warn-line");
+  });
+
   it("renders its title above the message", () => {
     render(
       <Alert tone="danger" title="Could not save">
