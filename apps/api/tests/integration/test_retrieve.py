@@ -806,3 +806,98 @@ async def test_bare_leading_hyphen_query_does_not_match_the_whole_corpus(tenant_
         results = await RetrievalService(session, tenant_a).retrieve("-cat", max_distance=-1.0)
 
     assert results == []
+
+
+async def test_single_term_keyword_query_still_matches_its_chunk(tenant_a):
+    """The regression a review round caught: fixing the bare-negation hole
+    by reusing `settings.retrieval_min_keyword_rank` (0.15) on the strict
+    arm silently broke exactly what the strict arm exists for. A single
+    matched lexeme scores `ts_rank_cd` ~0.1 (measured directly against
+    Postgres: `ts_rank_cd(to_tsvector(...'warranty'...), websearch_to_tsquery
+    ('english', 'warranty')) = 0.1`) -- below 0.15, so `>= 0.15` on the AND
+    arm rejected every genuine single-word match, including the short exact
+    queries (a product code, a proper noun) `docs/ARCHITECTURE.md` §6.2
+    names as the whole reason a keyword arm exists. The fix is `> 0`, which
+    a bare negation (scored exactly 0.0) never clears but a real match
+    (never scored zero) always does.
+
+    Isolates the keyword arm (`max_distance=-1.0`) so a coincidental vector
+    hit cannot hide a still-broken floor.
+    """
+    async with tenant_session(tenant_a) as session:
+        document = await _document(session, tenant_a)
+        await _seed(
+            session,
+            tenant_a,
+            document.id,
+            [
+                (
+                    "The powertrain warranty covers the engine and transmission.",
+                    await _embed("unrelated filler"),
+                )
+            ],
+        )
+
+    async with tenant_session(tenant_a) as session:
+        results = await RetrievalService(session, tenant_a).retrieve("warranty", max_distance=-1.0)
+
+    assert results, "a single-term query must still match a chunk that genuinely contains it"
+    assert "warranty" in results[0].content
+
+
+async def test_negated_term_alongside_a_real_term_still_matches_on_the_real_term(tenant_a):
+    """`-cat report` parses to `!'cat' & 'report'` -- a real positive term
+    combined with a negation, not a bare negation. Measured directly: this
+    scores `ts_rank_cd` = 0.1 against a chunk containing "report" (never
+    "cat"), so it clears the `> 0` floor through the *strict* arm itself
+    without ever needing the OR fallback. This is the multi-term case Phase
+    3 had already reasoned through (see the module's `_KEYWORD_ALL_TERMS_SQL`
+    comment); asserted here rather than left to that reasoning alone.
+    """
+    async with tenant_session(tenant_a) as session:
+        document = await _document(session, tenant_a)
+        await _seed(
+            session,
+            tenant_a,
+            document.id,
+            [
+                (
+                    "This report is due at the end of the year.",
+                    await _embed("unrelated filler"),
+                )
+            ],
+        )
+
+    async with tenant_session(tenant_a) as session:
+        results = await RetrievalService(session, tenant_a).retrieve(
+            "-cat report", max_distance=-1.0
+        )
+
+    assert results, "'report' should still match despite the unrelated negated term"
+    assert "report" in results[0].content
+
+
+@pytest.mark.parametrize(
+    ("query", "content"),
+    [
+        ("covid-19", "Proof of a negative covid-19 test is required for travel."),
+        ("t-shirt", "Employees get a free company t-shirt after one year."),
+        ("self-service", "The self-service kiosk is open 24 hours."),
+    ],
+)
+async def test_hyphenated_real_world_terms_still_match(tenant_a, query, content):
+    """Regression guard for the same fix: `covid-19` in particular scores
+    `ts_rank_cd` = 0.05 against its own matching chunk (measured directly),
+    *below* the old, wrongly-reused 0.15 floor -- so this specific case
+    would have silently broken under the bug the previous test pins, even
+    though nothing about it involves negation at all. `> 0` passes all
+    three.
+    """
+    async with tenant_session(tenant_a) as session:
+        document = await _document(session, tenant_a)
+        await _seed(session, tenant_a, document.id, [(content, await _embed("unrelated filler"))])
+
+    async with tenant_session(tenant_a) as session:
+        results = await RetrievalService(session, tenant_a).retrieve(query, max_distance=-1.0)
+
+    assert results, f"{query!r} should still match its own chunk"

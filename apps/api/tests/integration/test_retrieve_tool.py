@@ -177,6 +177,42 @@ async def test_top_k_is_clamped_to_a_sane_maximum(tenant_a):
     assert len(result.citations) == _MAX_TOP_K
 
 
+@pytest.mark.parametrize("top_k", [0, -5])
+async def test_top_k_is_clamped_to_a_lower_bound_of_one(tenant_a, top_k):
+    """The other end of the clamp: `max(1, min(args.top_k, _MAX_TOP_K))`
+    guards `top_k=0` or negative, which nothing else in this tool would --
+    `RetrievalService.retrieve`'s own `if len(results) >= top_k: break`
+    check is satisfied immediately at `len(results) == 0` when `top_k <= 0`,
+    so an implementation that simplified the clamp to `min(args.top_k,
+    _MAX_TOP_K)` alone (dropping the `max(1, ...)` half) would silently
+    turn a `top_k=0` call into the empty-result path even though the corpus
+    has a real match, with nothing to distinguish that from a genuine "no
+    relevant knowledge" case on the model's side. The corpus here matches
+    strongly enough that a passing result *must* mean the lower clamp is
+    doing its job, not that nothing would have been found anyway.
+    """
+    query = "annual maintenance inspection schedule"
+    query_vector = await _embed(query)
+
+    async with tenant_session(tenant_a) as session:
+        document = await _document(session, tenant_a)
+        await _seed(
+            session,
+            tenant_a,
+            document.id,
+            [("Annual maintenance inspection schedule details.", query_vector)],
+        )
+
+    async with tenant_session(tenant_a) as session:
+        tool = RetrieveKnowledgeTool(session, embedder=_embedder)
+        result = await tool.execute(
+            RetrieveKnowledgeTool.args_model(query=query, top_k=top_k), _ctx(tenant_a)
+        )
+
+    assert len(result.citations) == 1
+    assert result.content != _NO_RESULTS_MESSAGE
+
+
 async def test_cross_tenant_isolation_via_tool_context(tenant_a, tenant_b, owner_connection):
     """The tool takes tenancy only from `ToolContext.organization_id` --
     there is no argument through which a model could ask for another

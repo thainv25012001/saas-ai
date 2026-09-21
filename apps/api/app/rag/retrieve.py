@@ -56,8 +56,18 @@ do with. The two arms carry their own, differently-shaped floors:
   embedder change.
 - keyword: the `@@` match itself for the strict (AND) form -- a lexical
   match on *every* content word is already a relevance predicate, which is
-  what the vector arm was missing. The OR fallback, which requires only one
-  of them, additionally needs `ts_rank_cd >= :min_rank`.
+  what the vector arm was missing -- plus a bare `ts_rank_cd > 0`, which
+  exists only to reject a *bare negation* ("-cat" -> `!'cat'`, matched by
+  `@@` against the whole corpus at rank exactly 0.0; see `_KEYWORD_ALL_
+  TERMS_SQL`'s comment) and costs nothing against a genuine match, which is
+  never scored zero. The OR fallback, which requires only one word of
+  several rather than all of them, is a much weaker predicate and needs a
+  real, calibrated floor: `ts_rank_cd >= :min_rank`
+  (`settings.retrieval_min_keyword_rank`). The two floors are not
+  interchangeable -- a single matched lexeme scores `ts_rank_cd` ~0.1, under
+  that OR-arm floor, so reusing it on the AND arm would reject genuine
+  single-term matches (a product code, a proper noun) that arm exists to
+  catch.
 """
 
 import uuid
@@ -240,33 +250,48 @@ _KEYWORD_SQL_TEMPLATE = (
     "LIMIT :candidates"
 )
 
-# Both keyword forms now carry the same `ts_rank_cd` floor -- see
-# `settings.retrieval_min_keyword_rank`. The OR form has always needed one:
-# "at least one content word is present" is a weak relevance predicate on
-# its own. The AND form used to ship with none, on the reasoning that "every
-# content word is present" already *is* a relevance predicate -- true for an
-# ordinary match, but false for the one shape that reaches this arm without
-# ever having matched anything: a **bare negation**. `websearch_to_tsquery`
-# reads a leading hyphen as negation, so "-cat" parses to `!'cat'`, which
-# `@@` matches against every chunk that merely lacks the word "cat" -- i.e.
-# the entire corpus -- with `ts_rank_cd` scoring every one of those matches
-# 0.0. Without a floor here, that satisfies `WHERE ... @@ {tsquery}` and
-# returns up to `candidates` rows from a query that named no positive term
-# at all, and the OR fallback below (guarded by `if not keyword_rows`) never
-# even runs because the AND form did not return zero rows. Phase 3 had
-# already reasoned through the *multi-term* case ("-cat dog" -> `!'cat' &
-# 'dog'` -> zero AND rows -> the OR fallback -> `!'cat' | 'dog'`, matches
-# everything without "cat", caught by the OR form's own floor) but not this
-# one, single-term case, where the AND form itself is the whole match and
-# has no floor to catch it. Adding the identical floor here closes it the
-# same way, and costs nothing on a genuine multi-word match: real lexical
-# coverage produces a strictly positive `ts_rank_cd`.
+# The AND form used to ship with no floor at all, on the reasoning that
+# "every content word is present" already *is* a relevance predicate -- true
+# for an ordinary match, but false for the one shape that reaches this arm
+# without ever having matched anything: a **bare negation**.
+# `websearch_to_tsquery` reads a leading hyphen as negation, so "-cat" parses
+# to `!'cat'`, which `@@` matches against every chunk that merely lacks the
+# word "cat" -- i.e. the entire corpus -- with `ts_rank_cd` scoring every one
+# of those matches exactly 0.0. Without a floor here, that satisfies
+# `WHERE ... @@ {tsquery}` and returns up to `candidates` rows from a query
+# that named no positive term at all, and the OR fallback below (guarded by
+# `if not keyword_rows`) never even runs because the AND form did not return
+# zero rows. Phase 3 had already reasoned through the *multi-term* case
+# ("-cat dog" -> `!'cat' & 'dog'` -> zero AND rows -> the OR fallback ->
+# `!'cat' | 'dog'`, matches everything without "cat", caught by the OR
+# form's own floor) but not this one, single-term case, where the AND form
+# itself is the whole match and has no floor to catch it.
+#
+# The fix is `> 0`, not `>= settings.retrieval_min_keyword_rank`. An earlier
+# version of this reused that setting here and it was a real regression, not
+# a stricter version of the same fix: `retrieval_min_keyword_rank` (0.15) is
+# calibrated for the OR arm's own failure mode, where its docstring says the
+# floor exists because "at least one content word is present" is a *weak*
+# predicate -- a single incidental shared word scores ~0.1 there and must be
+# rejected. The AND arm's predicate is the opposite strength: reaching this
+# arm at all already means *every* content word matched. A short, exact
+# query -- a single product code, a proper noun, the "-cat"-shaped case
+# apart -- is exactly the case this arm exists to catch (see the module
+# docstring and `docs/ARCHITECTURE.md` §6.2), and `ts_rank_cd` for a single
+# matched lexeme is ~0.1: below 0.15, so reusing that constant here silently
+# dropped every genuine single-term AND match, which is worse than the bug
+# it fixed. A bare negation scores *exactly* 0.0 -- never positive, because
+# `ts_rank_cd` cannot reward matching the absence of a word -- so `> 0` is
+# the precise boundary between "matched nothing positive" and "matched
+# something", with no collateral damage to a real one-word hit.
 _KEYWORD_ALL_TERMS_SQL = text(
     _KEYWORD_SQL_TEMPLATE.format(
         tsquery=_AND_TSQUERY,
-        rank_floor=f"AND ts_rank_cd(dc.content_tsv, {_AND_TSQUERY}) >= :min_rank ",
+        rank_floor=f"AND ts_rank_cd(dc.content_tsv, {_AND_TSQUERY}) > 0 ",
     )
 )
+# The OR form keeps `settings.retrieval_min_keyword_rank` -- this is the
+# floor that setting was actually calibrated against (see its docstring).
 _KEYWORD_ANY_TERM_SQL = text(
     _KEYWORD_SQL_TEMPLATE.format(
         tsquery=_OR_TSQUERY,
