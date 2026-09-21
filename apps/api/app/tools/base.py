@@ -37,6 +37,31 @@ class ToolContext(BaseModel):
     request_id: str
     visitor_id: str | None = None
 
+    def log_fields(self) -> dict[str, str]:
+        """Correlation fields for every tool-layer log line (whole-branch
+        review, Minor 7).
+
+        The tool layer used to log `tool_name` and nothing else, though this
+        object -- with all three ids on it -- has been in scope at every one
+        of those call sites since Task 1. An operator watching
+        `tool_call_invalid_args` spike could not tell which tenant or which
+        conversation it was happening in, while `agent_step_limit_reached`
+        one layer up already carried `agent_id`/`conversation_id`. Defined
+        here rather than in either caller so `app/tools/registry.py` and
+        `app/chat/service.py` cannot drift into two dialects of the same
+        four fields. Stringified ids, matching the dialect already in use.
+
+        `visitor_id` is deliberately omitted: it is caller-supplied and
+        optional, so it is neither a reliable key nor something to put in
+        every log line by default.
+        """
+        return {
+            "organization_id": str(self.organization_id),
+            "agent_id": str(self.agent_id),
+            "conversation_id": str(self.conversation_id),
+            "request_id": self.request_id,
+        }
+
 
 class ToolResult(BaseModel):
     """What a tool hands back: to the model, on its next turn, and to the

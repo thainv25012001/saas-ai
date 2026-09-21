@@ -53,6 +53,17 @@ async def enforce_rate_limit(key: str, *, limit: int, window_seconds: int) -> No
         # that is entirely unavailable because its rate limiter's backing
         # store blipped is a worse outage than briefly-unthrottled auth -
         # passwords are still Argon2-verified regardless of this branch.
+        #
+        # Since Phase 4 this is no longer only an auth argument: the same
+        # branch also un-throttles `create_lead` (`app/tools/leads.py`), the
+        # one tool in the system that writes, callable by an anonymous chat
+        # widget visitor. The trade still holds, but for a different reason
+        # there: `POST /chat/stream` carries its own per-user limit, a lead
+        # row is inert until a human acts on it, and -- since the
+        # whole-branch review's Critical 1 fix -- `create_lead` runs at all
+        # only for an agent an operator explicitly granted it to. A Redis
+        # outage therefore widens the window on a tool most agents cannot
+        # call, rather than on every conversation in the deployment.
         # Only genuine Redis/connection errors land here; RateLimitError
         # itself is raised below, outside this try block, and must never
         # be caught by it.

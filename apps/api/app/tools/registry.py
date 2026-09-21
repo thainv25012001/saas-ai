@@ -202,13 +202,18 @@ class ToolRegistry:
         """
         tool = self._tools.get(call.name)
         if tool is None:
-            logger.warning("tool_call_unknown_name", tool_name=call.name)
+            logger.warning("tool_call_unknown_name", tool_name=call.name, **ctx.log_fields())
             return ToolResult(content=f"unknown tool '{call.name}'", is_error=True)
 
         try:
             args = tool.args_model.model_validate(call.input)
         except PydanticValidationError as exc:
-            logger.info("tool_call_invalid_args", tool_name=call.name, errors=exc.errors())
+            logger.info(
+                "tool_call_invalid_args",
+                tool_name=call.name,
+                errors=exc.errors(),
+                **ctx.log_fields(),
+            )
             return ToolResult(
                 content=f"invalid arguments for '{call.name}': "
                 f"{format_validation_errors(exc.errors())}",
@@ -220,10 +225,23 @@ class ToolRegistry:
                 return await tool.execute(args, ctx)
         except TimeoutError:
             logger.warning(
-                "tool_call_timed_out", tool_name=call.name, timeout_seconds=tool.timeout_seconds
+                "tool_call_timed_out",
+                tool_name=call.name,
+                timeout_seconds=tool.timeout_seconds,
+                **ctx.log_fields(),
             )
+            # The number is deliberately NOT in the message. `tool.
+            # timeout_seconds` here is the OUTER bound, which
+            # `_LockedSessionTool` widens by `_LOCK_WAIT_BUDGET_SECONDS` to
+            # allow for queueing -- so this path used to tell the model (and
+            # whoever read the transcript) that a tool "timed out after 40.0s"
+            # against a configured budget of 10s, a figure that appears in no
+            # configuration file anywhere. This path only fires when something
+            # is structurally wrong (a leaked lock, a hung sibling), which is
+            # exactly when a misleading number costs the most diagnostic time.
+            # The real figure is on the log line above, where it belongs.
             return ToolResult(
-                content=f"'{call.name}' timed out after {tool.timeout_seconds}s", is_error=True
+                content=f"'{call.name}' did not finish in time and was stopped.", is_error=True
             )
         except Exception:
             # Deliberately broad: this is the boundary between "a tool's
@@ -232,5 +250,5 @@ class ToolRegistry:
             # call) may propagate past it. `logger.exception` captures the
             # traceback for operators; the model only ever sees the plain
             # message §7.3 asks for.
-            logger.exception("tool_call_raised", tool_name=call.name)
+            logger.exception("tool_call_raised", tool_name=call.name, **ctx.log_fields())
             return ToolResult(content=f"'{call.name}' failed unexpectedly", is_error=True)

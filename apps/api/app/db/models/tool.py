@@ -19,8 +19,16 @@ class ToolType(enum.StrEnum):
 
 class Tool(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """A registry row for something an agent can call. The behaviour lives in
-    code (`app/tools/builtin/`) or behind an external endpoint described by
+    code (`app/tools/`) or behind an external endpoint described by
     `config`; this row is only what makes it discoverable and toggleable.
+
+    **`config` is reserved, not yet read.** Nothing in `app/` reads it as of
+    Phase 4: `ChatService._build_registry` constructs each builtin from its
+    Python class alone. It exists for the `http`/`mcp` tool types this
+    schema declares and Phase 4 ships no adapter for (`docs/ARCHITECTURE.md`
+    §8 -- MCP is Phase 6), and for per-organization builtin settings, which
+    is Phase 5 at the earliest. Recorded plainly here rather than left to be
+    inferred, per `docs/PHASE-4.md`'s not-delivered section.
 
     `organization_id` is deliberately nullable and this table deliberately
     does not use `TenantMixin`: NULL means a global builtin every
@@ -74,8 +82,14 @@ class Tool(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class AgentToolLink(TenantMixin, TimestampMixin, Base):
-    """Which tools an agent may call, and per-agent overrides (e.g. a
-    narrower `top_k`, a different confirmation threshold).
+    """Which tools an agent may call.
+
+    **`overrides` is reserved, not yet read.** The column is intended for
+    per-agent settings (a narrower `top_k`, a different confirmation
+    threshold), but nothing in `app/` reads it as of Phase 4 and no API
+    writes it -- `is_enabled` is the whole of what this row currently
+    decides. Stated as reserved rather than described as behaviour, so the
+    docstring does not promise what the code does not do.
 
     Composite primary key rather than a surrogate id: the row's whole
     identity is "this agent, this tool", so the key states that directly

@@ -13,6 +13,7 @@ from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.runner import (
+    AgentFinish,
     AgentRunner,
     AgentStepLimit,
     AgentTextDelta,
@@ -120,21 +121,6 @@ _STATEMENT_TIMEOUT_SQLSTATE = "57014"
 _PERSISTENCE_FAILED_MESSAGE = (
     "The assistant answered, but this turn could not be saved. Please try again."
 )
-
-
-def _tool_log_context(ctx: ToolContext) -> dict[str, str]:
-    """Correlation fields every tool-layer log line carries (whole-branch
-    review, Minor 7). `tool_name` alone cannot tell an operator watching
-    `tool_call_invalid_args` spike which tenant or which conversation it is
-    happening in, though `ToolContext` has carried all three since Task 1.
-    Matches the dialect `app/chat/service.py`'s own `agent_step_limit_reached`
-    already uses: stringified ids, not UUID objects."""
-    return {
-        "organization_id": str(ctx.organization_id),
-        "agent_id": str(ctx.agent_id),
-        "conversation_id": str(ctx.conversation_id),
-        "request_id": ctx.request_id,
-    }
 
 
 def _is_statement_timeout(exc: DBAPIError) -> bool:
@@ -287,6 +273,10 @@ ChatEvent = (
 #: id, the model picks the name -- so neither is bounded by anything this
 #: codebase controls.
 _TOOL_CALL_FIELD_MAX_CHARS = 100
+
+#: `messages.finish_reason` is `String(50)` (`app/db/models/conversation.py`),
+#: and a provider's `stop_reason` is as model-derived as anything else here.
+_FINISH_REASON_MAX_CHARS = 50
 
 
 def _strip_nulls(value: Any) -> Any:
@@ -531,7 +521,7 @@ class _LockedSessionTool(AgentTool):
                     "tool_call_waited_for_shared_session",
                     tool_name=self.name,
                     wait_ms=wait_ms,
-                    **_tool_log_context(ctx),
+                    **ctx.log_fields(),
                 )
             result = await self._run_bounded(args, ctx)
         duration_ms = int((time.monotonic() - started) * 1000)
@@ -614,7 +604,7 @@ class _LockedSessionTool(AgentTool):
                 tool_name=self.name,
                 timeout_seconds=self._own_timeout_seconds,
                 bound="event_loop",
-                **_tool_log_context(ctx),
+                **ctx.log_fields(),
             )
             return self._timeout_result()
         except DBAPIError as exc:
@@ -630,7 +620,7 @@ class _LockedSessionTool(AgentTool):
                 tool_name=self.name,
                 timeout_seconds=self._own_timeout_seconds,
                 bound="statement_timeout",
-                **_tool_log_context(ctx),
+                **ctx.log_fields(),
             )
             return self._timeout_result()
         finally:
@@ -839,6 +829,11 @@ class ChatService:
         tool_call_records: list[_ToolCallRecord] = []
         citations: list[CitationPayload] = []
         step_limit_hit = False
+        # The provider's own `stop_reason` for the step that ended the turn,
+        # via `AgentFinish`. `None` until one arrives, and `None` afterwards
+        # if the provider sent none -- "it did not say", which is a different
+        # fact from the `None` this column used to carry unconditionally.
+        stop_reason: str | None = None
         chat_error: ChatError | None = None
         started_at = time.monotonic()
 
@@ -910,6 +905,8 @@ class ChatService:
                     # summing) is correct here for the same reason: the value
                     # already *is* the cumulative total as of this step.
                     usage = event.usage
+                elif isinstance(event, AgentFinish):
+                    stop_reason = event.stop_reason
                 elif isinstance(event, AgentStepLimit):
                     # Surfaced, not swallowed (docs/PHASE-4.md §7's risk
                     # table): logged here, and recorded on the persisted
@@ -974,7 +971,20 @@ class ChatService:
                         output_tokens=usage.output_tokens,
                         cost_usd=cost,
                         latency_ms=latency_ms,
-                        finish_reason="step_limit_reached" if step_limit_hit else None,
+                        # `step_limit_reached` wins: the loop's own verdict
+                        # is the more important fact, and the provider's
+                        # `stop_reason` for the last step it managed to run
+                        # ("tool_use") would be actively misleading there.
+                        # `String(50)`, so a provider inventing a long one is
+                        # truncated rather than allowed to fail the write --
+                        # the same rule as `_ToolCallRecord.build`.
+                        finish_reason=(
+                            "step_limit_reached"
+                            if step_limit_hit
+                            else _strip_nulls(stop_reason)[:_FINISH_REASON_MAX_CHARS]
+                            if stop_reason
+                            else None
+                        ),
                     ),
                 )
                 # Same transaction as the assistant message above.

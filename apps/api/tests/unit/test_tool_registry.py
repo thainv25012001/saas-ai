@@ -236,7 +236,10 @@ async def test_a_tool_that_exceeds_its_timeout_is_an_error_and_does_not_hang() -
         result = await registry.execute(call, _ctx())
 
     assert result.is_error is True
-    assert "timed out" in result.content.lower()
+    assert "did not finish in time" in result.content.lower()
+    # The widened OUTER bound must not be quoted at the model as if it were
+    # the tool's own configured budget -- whole-branch review, carried item.
+    assert "0.05" not in result.content
 
 
 async def test_a_tool_that_raises_is_an_error_result_not_a_crash() -> None:

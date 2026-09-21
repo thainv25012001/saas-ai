@@ -38,6 +38,7 @@ from app.llm.types import (
     ContentBlock,
     Effort,
     Message,
+    MessageEndEvent,
     TextBlock,
     TextDeltaEvent,
     ToolResultBlock,
@@ -98,6 +99,25 @@ class AgentUsage:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentFinish:
+    """The provider's own `stop_reason` for the step that ended the turn.
+
+    Yielded exactly once, and only when the loop stops because the model
+    stopped asking for tools -- a step-limit cutoff has `AgentStepLimit` to
+    say so, and that is not the model's own reason for stopping.
+
+    Restored in the fix wave, from the whole-branch review's carried list:
+    every provider already yields `MessageEndEvent(stop_reason=...)` and
+    `_run_step` simply dropped it, so `messages.finish_reason` -- a Phase 2
+    column -- was `None` on every normal completion. `None` here is still
+    possible and still means "the provider did not say", which is a
+    different fact from "nobody looked".
+    """
+
+    stop_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class AgentStepLimit:
     """Emitted instead of a silent stop when `max_steps` is exhausted while
     the model was still asking for tools. Carries the limit that was hit so
@@ -106,7 +126,14 @@ class AgentStepLimit:
     max_steps: int
 
 
-AgentEvent = AgentTextDelta | AgentToolCallStart | AgentToolCallEnd | AgentUsage | AgentStepLimit
+AgentEvent = (
+    AgentTextDelta
+    | AgentToolCallStart
+    | AgentToolCallEnd
+    | AgentUsage
+    | AgentFinish
+    | AgentStepLimit
+)
 
 
 def _sum_usage(a: Usage, b: Usage) -> Usage:
@@ -121,6 +148,9 @@ class _StepOutcome:
     text: str = ""
     calls: list[ToolUseBlock] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
+    #: The provider's own `stop_reason` for this step, `None` if it sent
+    #: none. See `AgentFinish`.
+    stop_reason: str | None = None
 
 
 class AgentRunner:
@@ -240,15 +270,20 @@ class AgentRunner:
         `response.content` -- a provider (the fake included, for tool-only
         turns) is not required to emit a filler `TextBlock` alongside tool
         calls, so every block is identified by its event *type*, never by
-        position. `MessageEndEvent`/`ErrorEvent` are unhandled here for the
-        same reason `ChatService.send` leaves them unhandled: no provider
-        today signals failure via an in-band `ErrorEvent`, and this loop's
-        "keep going or stop" decision is the presence of `tool_use` blocks,
-        never a `stop_reason` string.
+        position. `ErrorEvent` is unhandled here for the same reason
+        `ChatService.send` leaves it unhandled: no provider today signals
+        failure via an in-band `ErrorEvent`.
+
+        `MessageEndEvent` IS read now, but only for its `stop_reason`, which
+        is carried out on `_StepOutcome` for the caller to persist. It stays
+        out of every control-flow decision: this loop's "keep going or stop"
+        test is the presence of `tool_use` blocks, never a `stop_reason`
+        string, because each provider words that string its own way.
         """
         text_parts: list[str] = []
         calls: list[ToolUseBlock] = []
         usage = Usage()
+        stop_reason: str | None = None
         async for event in self.provider.stream(request):
             if isinstance(event, TextDeltaEvent):
                 text_parts.append(event.text)
@@ -257,7 +292,11 @@ class AgentRunner:
                 calls.append(event.block)
             elif isinstance(event, UsageEvent):
                 usage = event.usage
-        yield _StepOutcome(text="".join(text_parts), calls=calls, usage=usage)
+            elif isinstance(event, MessageEndEvent):
+                stop_reason = event.stop_reason
+        yield _StepOutcome(
+            text="".join(text_parts), calls=calls, usage=usage, stop_reason=stop_reason
+        )
 
     async def run(
         self,
@@ -327,6 +366,7 @@ class AgentRunner:
                 # one). Both end the turn here: with no `tool_use` block in
                 # the assistant message just appended, there is nothing for a
                 # further step to respond to.
+                yield AgentFinish(stop_reason=outcome.stop_reason)
                 break
 
             yield AgentToolCallStart(calls=calls)

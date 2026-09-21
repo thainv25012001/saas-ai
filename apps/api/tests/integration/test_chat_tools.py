@@ -1145,3 +1145,62 @@ async def test_oversized_and_nul_bearing_tool_call_fields_do_not_destroy_the_tur
     # And the turn itself survived, which is the whole point.
     assert [row.role.value for row in history] == ["user", "assistant"]
     assert history[1].content == "Handled."
+
+
+async def test_finish_reason_records_the_providers_own_stop_reason(tenant_a, owner_connection):
+    """Whole-branch review, carried item: `messages.finish_reason` -- a Phase
+    2 column -- was `None` on every normal completion, because
+    `AgentRunner._run_step` dropped the `MessageEndEvent.stop_reason` every
+    provider already yields. Restored here, through the real persistence
+    path, and asserted after a TOOL-using turn so the value recorded is the
+    last step's ("end_turn"), not the first's ("tool_use").
+    """
+    query = "warranty coverage duration"
+    query_vector = await _embed(query)
+    async with tenant_session(tenant_a) as session:
+        await _ready_document_with_chunks(
+            session, tenant_a, [(f"{query} is explained here.", query_vector)], title="Warranty"
+        )
+        agent = await _agent(session, tenant_a)
+        agent_id = agent.id
+    await enable_builtin_tool(owner_connection, tenant_a, agent_id)
+
+    provider = FakeProvider(
+        turns=[
+            [FakeToolCall(id="c1", name="retrieve_knowledge", input={"query": query})],
+            "Two years.",
+        ]
+    )
+    async with tenant_session(tenant_a) as session:
+        service = ChatService(session, tenant_a, provider_override=provider)
+        events = [event async for event in service.send(agent_id, query)]
+
+    conversation_id = next(e.conversation_id for e in events if isinstance(e, ChatMessageStart))
+    async with tenant_session(tenant_a) as session:
+        history = await ConversationService(session, tenant_a).history(conversation_id)
+    assert history[1].finish_reason == "end_turn"
+
+
+async def test_a_step_limit_still_wins_over_the_providers_stop_reason(tenant_a, owner_connection):
+    """The loop's own verdict is the more important fact: a turn cut off
+    mid-thought must not record the last step's `tool_use` as if the model
+    had chosen to stop."""
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+        agent_id = agent.id
+        await AgentService(session, tenant_a).update_config(
+            agent_id, UpdateAgentConfigInput(max_agent_steps=1)
+        )
+    await enable_builtin_tool(owner_connection, tenant_a, agent_id)
+
+    provider = FakeProvider(
+        turns=[[FakeToolCall(id="c1", name="retrieve_knowledge", input={"query": "anything"})]]
+    )
+    async with tenant_session(tenant_a) as session:
+        service = ChatService(session, tenant_a, provider_override=provider)
+        events = [event async for event in service.send(agent_id, "hello")]
+
+    conversation_id = next(e.conversation_id for e in events if isinstance(e, ChatMessageStart))
+    async with tenant_session(tenant_a) as session:
+        history = await ConversationService(session, tenant_a).history(conversation_id)
+    assert history[1].finish_reason == "step_limit_reached"
