@@ -38,6 +38,8 @@ from app.chat.service import (
     ChatMessageStart,
     ChatService,
     ChatTextDelta,
+    ChatToolCallEnd,
+    ChatToolCallStart,
 )
 from app.conversations.queue import enqueue_title, should_title
 from app.core.logging import get_logger
@@ -171,6 +173,24 @@ def _event_payload(event: ChatEvent) -> dict[str, object]:
         }
     if isinstance(event, ChatTextDelta):
         return {"type": "text_delta", "text": event.text}
+    if isinstance(event, ChatToolCallStart):
+        return {
+            "type": "tool_call_start",
+            "calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in event.calls],
+        }
+    if isinstance(event, ChatToolCallEnd):
+        return {
+            "type": "tool_call_end",
+            "results": [
+                {
+                    "tool_call_id": r.tool_call_id,
+                    "tool_name": r.tool_name,
+                    "result": r.result,
+                    "is_error": r.is_error,
+                }
+                for r in event.results
+            ],
+        }
     if isinstance(event, ChatMessageEnd):
         return {
             "type": "message_end",

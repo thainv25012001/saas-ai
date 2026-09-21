@@ -143,3 +143,75 @@ async def _make_tenant(
     await owner_connection.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": org_id})
     await owner_connection.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_id})
     await owner_connection.commit()
+
+
+async def enable_builtin_tool(
+    owner_connection: "AsyncConnection",
+    tenant: "TenantContext",
+    agent_id: object,
+    tool_name: str = "retrieve_knowledge",
+    *,
+    is_enabled: bool = True,
+) -> object:
+    """Give `agent_id` an org-scoped `tools` row named `tool_name`, linked
+    through `agent_tools` -- the DB-backed shape `ChatService.
+    _resolve_enabled_tool_names` (Task 7) actually reads, since Phase 4
+    ships no dashboard UI to do this by hand yet.
+
+    Deliberately org-scoped (`organization_id = tenant.organization_id`),
+    never the global (`organization_id IS NULL`) builtin row a real
+    deployment would seed once: `uq_tool_global_name` is a single shared
+    namespace, so two tests both inserting a global `retrieve_knowledge` row
+    back to back would collide on the unique index, or on this shared
+    database's already-seeded row if `app.db.seed` or a migration data-seed
+    ever adds one. An org-scoped row needs no such coordination -- it is
+    unique to this org's tests, matching `uq_tool_org_name`'s own scope --
+    and resolves identically: the Python `ToolRegistry` a real chat turn
+    consults is keyed by `Tool.name` alone, never by which of the two scopes
+    the enabling DB row came from.
+
+    Idempotent per `(organization_id, name)`: `uq_tool_org_name` means a
+    second call for the same org and tool name (e.g. linking `create_lead`
+    to two different agents in the same test) would otherwise collide on
+    the unique constraint, so an existing row is reused via `ON CONFLICT DO
+    NOTHING` + a follow-up `SELECT` rather than assumed not to exist yet.
+
+    No explicit teardown: both `tools.organization_id` and
+    `agent_tools.organization_id` are `ON DELETE CASCADE` to
+    `organizations.id` (migration 0008), so the `tenant_a`/`tenant_b`/
+    `clean_users` fixtures' own organization deletes already remove these
+    rows for free.
+    """
+    from sqlalchemy import text as _text
+
+    from app.core.ids import uuid7
+
+    candidate_id = uuid7()
+    await owner_connection.execute(
+        _text(
+            "INSERT INTO tools (id, organization_id, name, type, config, is_enabled) "
+            "VALUES (:id, :org, :name, 'builtin', '{}', true) "
+            "ON CONFLICT ON CONSTRAINT uq_tool_org_name DO NOTHING"
+        ),
+        {"id": candidate_id, "org": tenant.organization_id, "name": tool_name},
+    )
+    tool_id = (
+        await owner_connection.execute(
+            _text("SELECT id FROM tools WHERE organization_id = :org AND name = :name"),
+            {"org": tenant.organization_id, "name": tool_name},
+        )
+    ).scalar_one()
+    await owner_connection.execute(
+        _text(
+            "INSERT INTO agent_tools (agent_id, tool_id, organization_id, is_enabled, overrides) "
+            "VALUES (:agent_id, :tool_id, :org, :is_enabled, '{}')"
+        ),
+        {
+            "agent_id": agent_id,
+            "tool_id": tool_id,
+            "org": tenant.organization_id,
+            "is_enabled": is_enabled,
+        },
+    )
+    await owner_connection.commit()
+    return tool_id
