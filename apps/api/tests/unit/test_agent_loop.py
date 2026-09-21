@@ -445,3 +445,75 @@ async def test_an_unregistered_tool_name_is_skipped_not_a_crash() -> None:
     assert request is not None
     assert request.tools is not None
     assert [t.name for t in request.tools] == ["search"]
+
+
+async def test_two_calls_in_one_step_sharing_an_id_run_once_and_history_stays_valid() -> None:
+    """Whole-branch review, Important 2. Everything below this loop keys a
+    call by its id -- `ChatService.send`'s `tool_calls_by_id`, the
+    `message_tool_calls` row, the playground's React key -- and a provider
+    that reuses one silently corrupts all three: both persisted rows took
+    the SECOND call's arguments, and the model received two
+    `ToolResultBlock`s sharing one `tool_use_id`, which Anthropic 400s.
+
+    Asserted on the request handed to the provider on step two, not on a
+    call count: the history that reaches the model must contain exactly one
+    `tool_use` for the id and exactly one matching `tool_result`, and the
+    surviving pair must be the FIRST call's -- the one the model asked for
+    first, with its own arguments intact.
+    """
+    provider = FakeProvider(
+        turns=[
+            [
+                FakeToolCall(id="same", name="search", input={"q": "first"}),
+                FakeToolCall(id="same", name="search", input={"q": "second"}),
+            ],
+            "Done.",
+        ]
+    )
+    runner = _runner(provider, _registry(_SearchTool()))
+
+    events = [
+        event
+        async for event in runner.run("system", [Message.text("user", "hi")], ["search"], _ctx())
+    ]
+
+    start = next(e for e in events if isinstance(e, AgentToolCallStart))
+    assert [c.input["q"] for c in start.calls] == ["first"]
+    end = next(e for e in events if isinstance(e, AgentToolCallEnd))
+    assert [r.tool_call_id for r in end.results] == ["same"]
+    assert end.results[0].result.content == "result for first"
+
+    request = provider.last_request
+    assert request is not None
+    assistant = request.messages[-2]
+    tool_uses = [b for b in assistant.content if isinstance(b, ToolUseBlock)]
+    assert [b.id for b in tool_uses] == ["same"]
+    tool_results = [b for b in request.messages[-1].content if isinstance(b, ToolResultBlock)]
+    assert [b.tool_use_id for b in tool_results] == ["same"]
+
+
+async def test_an_id_reused_on_a_later_step_is_dropped_too() -> None:
+    """The guard is turn-wide, not per-step: `ChatService.send` accumulates
+    `tool_calls_by_id` across every step of the turn, and a `message` has one
+    set of `message_tool_calls` rows for the whole turn -- so an id reused
+    two steps apart collides exactly as hard as one reused within a step."""
+    provider = FakeProvider(
+        turns=[
+            [FakeToolCall(id="dup", name="search", input={"q": "first"})],
+            [FakeToolCall(id="dup", name="search", input={"q": "later"})],
+            "Done.",
+        ]
+    )
+    runner = _runner(provider, _registry(_SearchTool()))
+
+    events = [
+        event
+        async for event in runner.run("system", [Message.text("user", "hi")], ["search"], _ctx())
+    ]
+
+    starts = [e for e in events if isinstance(e, AgentToolCallStart)]
+    assert len(starts) == 1
+    assert [c.input["q"] for c in starts[0].calls] == ["first"]
+    # The second step produced nothing executable, so the turn ends there
+    # rather than looping on an assistant message with no tool_use in it.
+    assert not any(isinstance(e, AgentStepLimit) for e in events)

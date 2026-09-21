@@ -34,6 +34,15 @@ class FakeToolCall:
     assigned when omitted, since a scripted test usually cares about the
     name and arguments a tool receives, not the literal id later round-
     tripped back on a `ToolResultBlock`.
+
+    The counter runs across the WHOLE scripted conversation, not per turn.
+    It used to restart each turn, so a two-step script with one call in each
+    step handed both of them `call_1` -- which no real provider does, and
+    which `AgentRunner` now (correctly) treats as a duplicate and drops,
+    since the accumulated history of a multi-step turn goes to the provider
+    as ONE request and Anthropic rejects two `tool_use` blocks sharing an id
+    inside it. A fake that can only produce wire format a real provider
+    would be 400-ed for is not a useful fake.
     """
 
     name: str
@@ -99,6 +108,9 @@ class FakeProvider:
             raise ValueError("fail_with requires a non-empty script")
         self._fail_with = fail_with
         self.last_request: CompletionRequest | None = None
+        #: Monotonic across every turn of this instance's script -- see
+        #: `FakeToolCall`'s docstring.
+        self._calls_issued = 0
 
     def _next_turn(self) -> FakeTurn:
         assert self._turns is not None
@@ -118,15 +130,17 @@ class FakeProvider:
             content = [TextBlock(text=turn)]
             stop_reason = "end_turn"
         else:
-            content = [self._tool_use_block(call, index) for index, call in enumerate(turn)]
+            content = [self._tool_use_block(call) for call in turn]
             stop_reason = "tool_use"
         return CompletionResponse(
             content=content, usage=self._usage, model=request.model, stop_reason=stop_reason
         )
 
-    @staticmethod
-    def _tool_use_block(call: FakeToolCall, index: int) -> ToolUseBlock:
-        return ToolUseBlock(id=call.id or f"call_{index + 1}", name=call.name, input=call.input)
+    def _tool_use_block(self, call: FakeToolCall) -> ToolUseBlock:
+        self._calls_issued += 1
+        return ToolUseBlock(
+            id=call.id or f"call_{self._calls_issued}", name=call.name, input=call.input
+        )
 
     def capabilities(self, model: str) -> ModelCapabilities:
         return ModelCapabilities(
@@ -163,8 +177,8 @@ class FakeProvider:
                 yield TextDeltaEvent(text=turn)
                 stop_reason = "end_turn"
             else:
-                for index, call in enumerate(turn):
-                    yield ToolUseEvent(block=self._tool_use_block(call, index))
+                for call in turn:
+                    yield ToolUseEvent(block=self._tool_use_block(call))
                 stop_reason = "tool_use"
             yield UsageEvent(usage=self._usage)
             yield MessageEndEvent(stop_reason=stop_reason, usage=self._usage, model=request.model)

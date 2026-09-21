@@ -189,6 +189,47 @@ class AgentRunner:
                 logger.warning("agent_tool_unknown_name", tool_name=name)
         return specs
 
+    @staticmethod
+    def _unique_calls(calls: list[ToolUseBlock], seen: set[str]) -> list[ToolUseBlock]:
+        """`calls` with any id already issued this turn dropped, `seen`
+        updated in place.
+
+        A provider is supposed to mint a distinct id per `tool_use` block;
+        one that does not is a protocol violation, and every layer below
+        this one assumes the id is a key. Reproduced before this guard: two
+        calls in one step sharing `id="same"` with different arguments wrote
+        **both** `message_tool_calls` rows with the *second* call's
+        arguments, because `ChatService.send` keys the calls it has seen by
+        id and the second overwrote the first -- so the table whose whole
+        reason for existing is post-hoc answerability recorded something the
+        model never asked. The same id also reached the playground as two
+        React keys, and the model as two `ToolResultBlock`s sharing one
+        `tool_use_id`, which Anthropic rejects with a 400.
+
+        **Dropped, not disambiguated, and not executed-then-failed.**
+        Rewriting the duplicate to a synthetic id would keep both calls
+        running, but `create_lead` is a write: a model that emitted the same
+        id twice has given no evidence it meant two distinct writes, and
+        inventing an id to make a malformed pair executable is how one
+        confused turn becomes two real rows. Returning an error result for
+        the duplicate instead is no better -- it would still carry the
+        colliding id downstream, which is the defect itself. Dropping keeps
+        every invariant below intact: one `tool_use` per id in history, one
+        matching `tool_result`, one SSE card, one row -- each carrying the
+        arguments that actually ran. The dropped call is preserved where it
+        belongs, in the log.
+        """
+        unique: list[ToolUseBlock] = []
+        for call in calls:
+            if call.id in seen:
+                logger.warning(
+                    "agent_duplicate_tool_call_id", tool_call_id=call.id, tool_name=call.name
+                )
+                continue
+            seen.add(call.id)
+            unique.append(call)
+        return unique
+
     async def _run_step(
         self, request: CompletionRequest
     ) -> AsyncIterator[AgentEvent | _StepOutcome]:
@@ -232,6 +273,11 @@ class AgentRunner:
         history = list(messages)
         specs = self._resolve_specs(tool_names)
         total_usage = Usage()
+        # Turn-wide, not per-step: everything downstream correlates a call to
+        # its result by id, for the whole turn -- `ChatService.send`'s
+        # `tool_calls_by_id`, `message_tool_calls.tool_call_id`, and the
+        # playground's React key on `ToolCall`. See `_unique_calls`.
+        seen_call_ids: set[str] = set()
 
         for _step in range(self.max_steps):
             request = CompletionRequest(
@@ -261,27 +307,40 @@ class AgentRunner:
             total_usage = _sum_usage(total_usage, outcome.usage)
             yield AgentUsage(usage=total_usage)
 
+            calls = self._unique_calls(outcome.calls, seen_call_ids)
+
             assistant_blocks: list[ContentBlock] = []
             if outcome.text:
                 assistant_blocks.append(TextBlock(text=outcome.text))
-            assistant_blocks.extend(outcome.calls)
-            history.append(Message(role="assistant", content=assistant_blocks))
+            assistant_blocks.extend(calls)
+            if assistant_blocks:
+                # Skipped, never appended empty: an assistant turn with no
+                # content at all is invalid wire format for Anthropic, and
+                # `docs/ARCHITECTURE.md` §5.1's note says the same. Only
+                # reachable now that `_unique_calls` can empty a step that
+                # produced calls but no text.
+                history.append(Message(role="assistant", content=assistant_blocks))
 
-            if not outcome.calls:
-                break  # the model is done talking -- no tools requested
+            if not calls:
+                # Either the model is done talking, or every call it made
+                # this step was a duplicate id (`_unique_calls` logged each
+                # one). Both end the turn here: with no `tool_use` block in
+                # the assistant message just appended, there is nothing for a
+                # further step to respond to.
+                break
 
-            yield AgentToolCallStart(calls=outcome.calls)
+            yield AgentToolCallStart(calls=calls)
             # Isolation: `return_exceptions=True` means one call's exception
             # (e.g. a bug in the registry itself, not just in a tool body --
             # `ToolRegistry.execute` already turns a tool's own failure into
             # `ToolResult(is_error=True)`, so this is a second, independent
             # safety net) is captured per-call and never aborts its siblings.
             raw_results = await asyncio.gather(
-                *(self.registry.execute(call, ctx) for call in outcome.calls),
+                *(self.registry.execute(call, ctx) for call in calls),
                 return_exceptions=True,
             )
             results: list[AgentToolResult] = []
-            for call, raw in zip(outcome.calls, raw_results, strict=True):
+            for call, raw in zip(calls, raw_results, strict=True):
                 if isinstance(raw, BaseException):
                     logger.exception("agent_tool_call_raised", tool_name=call.name, exc_info=raw)
                     tool_result = ToolResult(
