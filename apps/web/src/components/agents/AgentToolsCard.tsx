@@ -38,7 +38,7 @@ export function AgentToolsCard({
     <Card>
       <CardHeader
         title="Tools"
-        description="What this agent may call mid-answer. Off until you turn it on here."
+        description="What this agent may call mid-answer. A disabled tool never runs, even if the model asks for it."
       />
       <CardBody className="space-y-0">
         {tools.length === 0 ? (

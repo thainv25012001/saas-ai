@@ -32,10 +32,13 @@ from collections.abc import Sequence
 # lead. (It will also matter for the reason this comment used to give as
 # the present-tense one -- an anonymous, unauthenticated visitor -- once a
 # public channel exists; that is a Phase 7 concern, not a current one.)
-# Phase 4 ships no dashboard/GraphQL surface yet to review or disable it
-# per-agent, so it stays reachable (the same `agent_tools` insert
-# `tests/conftest.py::enable_builtin_tool` already uses) but off by
-# default.
+# Task 8 ships the surface for turning it on per agent (the agent detail
+# page's Tools card and the `setAgentToolEnabled` mutation behind it), so
+# "off by default" is now a switch an operator flips deliberately rather
+# than a state only a raw `agent_tools` insert could leave. Since the
+# whole-branch review's Critical 1 fix that default is genuinely enforced:
+# the per-turn tool registry is built from these links, so a tool the agent
+# is not linked to cannot run even if the model names it.
 DEFAULT_ENABLED_TOOL_NAMES: Sequence[str] = ("retrieve_knowledge",)
 
 

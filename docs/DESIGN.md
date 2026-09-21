@@ -339,6 +339,14 @@ flipping one tool does not freeze the whole card. Reached for the existing
 primitive per "Adding a component" below, rather than writing a second
 control that would need its own focus ring and its own tests.
 
+The card's own description says what the toggle *means*, not what the
+defaults happen to be: "A disabled tool never runs, even if the model asks
+for it." It used to read "Off until you turn it on here", which was wrong
+twice over — `retrieve_knowledge` is on by default for every new agent, and
+until the whole-branch review's Critical 1 fix a disabled tool ran anyway.
+Copy that describes a guarantee ages better than copy that describes a
+default, and this one is now true.
+
 ## Adding a component
 
 1. Does a primitive already do it? Extend that one instead — a second thing

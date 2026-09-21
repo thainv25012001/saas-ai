@@ -48,9 +48,10 @@ Task 8 is about to present to that same org as its customer pipeline --
 test-data pollution indistinguishable from a real lead. (The anonymous-
 visitor concern is real too, but only once a public channel ships in a
 later phase -- it does not describe the system as it exists now.) It stays
-off until an agent's `agent_tools` rows are edited directly; see
-`app/db/builtin_tools.py`'s module-level comment and task-7b-report.md for
-the full argument.
+off until an operator turns it on for that agent, which Task 8's agent
+detail page (and the `setAgentToolEnabled` mutation behind it) is the
+supported way to do; see `app/db/builtin_tools.py`'s module-level comment
+and task-7b-report.md for the full argument.
 
 **Tool descriptions are copied here as literal text**, not imported from
 `app.tools.retrieve`/`app.tools.leads` (the code `RetrieveKnowledgeTool`/

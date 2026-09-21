@@ -162,6 +162,25 @@ Three debts, each recorded there as a Phase 4 prerequisite:
 | The model never calls `retrieve_knowledge` and answers from parametric memory | The prompt requires grounding for company-specific questions, and `retrieve_knowledge` returning an explicit "nothing relevant found" is what stops a silent fallback. Evaluation (Phase 6) is what would actually measure it; until then this is asserted, not proven. |
 | A scripted fake makes loop tests that cannot fail | Stated in §3; every loop test must be shown red under a mutation of the behaviour it claims to test |
 | The step cap hides a prompt problem | `step_limit_reached` is surfaced, logged and visible in the UI rather than swallowed |
-| Tool latency stacks — five steps of 10s each is a 50s turn | Per-tool timeout (default 10s), and the step cap bounds the total. Streaming means the user sees progress throughout. |
+| Tool latency stacks | Two budgets, not one (§7.3 of `docs/ARCHITECTURE.md`). A tool's own work is bounded at `timeout_seconds` (default 10s), enforced by `SET LOCAL statement_timeout` for its database work so an overrun arrives as an ordinary statement error rather than a cancelled connection. The registry's outer bound is `timeout_seconds + 30s`, a deliberately soft allowance for a call queued behind siblings sharing the turn's session. Because a step dispatches all its calls together and all outer budgets expire together, a step's tool time is bounded near 40s **plus one tool budget regardless of how many calls it gathers** — so a 5-step turn is bounded nearer 250s than the 50s an earlier draft of this row claimed. Provider streaming time sits on top of that and is unbounded, which is pre-existing. A genuine whole-turn budget is Phase 5 (§8). Streaming means the user sees progress throughout. |
 | `create_lead` abused to spam | Per-conversation rate limit, and it is the only write tool |
 | Tool arguments are model output reaching a real service | Pydantic validation at the boundary; tenancy never comes from arguments; every tool body uses the existing two-layer-scoped services |
+
+---
+
+## 8. Not delivered
+
+Recorded here rather than left to be discovered, per the plan's Final
+Verification. None of these is a defect; each is a boundary drawn
+deliberately.
+
+| Not delivered | Why, and where it goes |
+|---|---|
+| **Reopening a conversation does not replay its tool calls.** The `message_tool_calls` rows exist and are correct; no GraphQL field exposes them, so the transcript a returning user sees shows the answer without the calls that produced it. | The transcript is still accurate without them, and the shape of "replay a tool call in history" is bound up with the bounded tool-result replay `docs/ARCHITECTURE.md` §5.3 describes and Phase 4 does not attempt. Phase 5. |
+| **`tools.config` and `agent_tools.overrides` are reserved and read by nothing.** No code path reads either column, and no API writes them. `is_enabled` is the whole of what an `agent_tools` row currently decides. | `config` exists for the `http`/`mcp` tool types this schema declares and Phase 4 ships no adapter for; `overrides` for per-agent tuning there is no UI to express yet. Both docstrings now say "reserved", rather than describing behaviour the code does not have. |
+| **Products, and the `search_products`/`get_product` tools.** `docs/ARCHITECTURE.md` names them as builtins; Phase 4 ships `retrieve_knowledge` and `create_lead` only. | Products are a Phase 5 domain with no table yet. A tool over a table that does not exist is not a smaller version of the feature, it is a different one. |
+| **No whole-turn time budget.** Per-tool and per-step budgets exist (§7); nothing bounds a turn end to end, and provider streaming time is unbounded. | Pre-existing since Phase 2, and a real turn budget needs a cancellation story for the SSE stream and the open transaction, which is a design item rather than a constant. Phase 5. |
+| **No HTTP or MCP tool adapter.** `ToolType` declares `http` and `mcp`; only `builtin` resolves. | MCP is explicitly Phase 6 (`docs/ARCHITECTURE.md` §8). `_resolve_enabled_tool_names` filters to `builtin` in SQL so a stray row of either type is never even considered. |
+| **Evaluation of whether the model calls `retrieve_knowledge` when it should.** §7's first risk is asserted, not measured. | Phase 6 is the phase that can measure it. |
+| **History compaction / bounded tool-result replay in history.** A turn's tool results reach the next step in full; nothing truncates them across a long conversation. | `docs/ARCHITECTURE.md` §5.3 describes the intent; no phase has scheduled it. |
+| **Duplicate provider tool-call ids are dropped, not disambiguated.** If a provider ever reuses an id within one turn, the second call does not run. | A protocol violation with no sound recovery: the model cannot tell two results with one id apart, and `create_lead` writes. Logged as `agent_duplicate_tool_call_id`; see `AgentRunner._unique_calls`. |

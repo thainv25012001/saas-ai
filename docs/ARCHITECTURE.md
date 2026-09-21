@@ -354,9 +354,9 @@ builtins (`app/db/builtin_tools.DEFAULT_ENABLED_TOOL_NAMES`) in the same
 flush as its `AgentConfig` row, so a normally-created agent is never
 offered nothing. Only `retrieve_knowledge` is on by default — a pure read
 with no risk. `create_lead` writes a real `leads` row every time it runs,
-and stays off until an agent's `agent_tools` rows are edited directly
-(Phase 4 ships no dashboard/GraphQL surface for that yet — Task 8 makes
-this a hard requirement). The risk that matters *today* is not an
+and stays off until it is turned on for that agent — from the agent detail
+page's Tools card, or the `setAgentToolEnabled` mutation behind it, both
+shipped by Task 8. The risk that matters *today* is not an
 anonymous public visitor: no public channel exists yet (`POST
 /api/v1/chat/stream` requires an authenticated bearer token; `widget`/`api`
 are unused enum values), so the only thing that can call it right now is
@@ -521,32 +521,40 @@ async def run(self, ctx: AgentContext) -> AsyncIterator[AgentEvent]:
     version  = await self.prompts.active_version(agent.prompt_id)
     system   = render(version.system_prompt, self.build_variables(ctx, agent))
     names    = await self.resolve_enabled_tool_names(agent.id)   # agent_tools ⋈ tools, §3.6
-    tools    = self.registry.specs_for(names)
+    registry = self.build_registry(names)               # ONLY the granted tools — §7.2
+    tools    = registry.specs_for(names)
     messages = await self.history.build(ctx.conversation_id, ctx.user_message)
+    seen_ids = set()
 
     for step in range(config.max_agent_steps):          # hard cap, default 5
-        blocks, usage = [], None
+        text, calls, usage = "", [], None
         async for ev in self.llm.stream(system, messages, tools):
             match ev.type:
-                case "text_delta": yield TextDelta(ev.text)
-                case "tool_call":  blocks.append(ev.block)
+                case "text_delta": text += ev.text; yield TextDelta(ev.text)
+                case "tool_call":  calls.append(ev.block)
                 case "usage":      usage = ev.usage
+                case "message_end": stop_reason = ev.stop_reason
 
-        messages.append(Assistant(blocks))
-        calls = [b for b in blocks if b.kind == "tool_use"]
-        if not calls:
-            break                                        # the model is done talking
+        calls  = [c for c in calls if c.id not in seen_ids]   # duplicate ids are dropped
+        seen_ids |= {c.id for c in calls}
+        blocks = ([Text(text)] if text else []) + calls
+        if blocks:
+            messages.append(Assistant(blocks))          # text AND tool calls — never just
+        if not calls:                                   # the calls, or the answer is lost;
+            break                                       # an EMPTY assistant turn is skipped,
+                                                        # not appended
 
         yield ToolCallStart(calls)
         results = await asyncio.gather(*[
-            self.registry.execute(c, ctx) for c in calls   # dispatched together, each isolated
+            registry.execute(c, ctx) for c in calls        # dispatched together, each isolated
         ])                                                 # -- see §7.3: execution may still serialise
         yield ToolCallEnd(results)
         messages.append(ToolResults(results))
     else:
         yield Error("step_limit_reached")
+        stop_reason = "step_limit_reached"
 
-    await self.persist(ctx, messages, usage, version.id)
+    await self.persist(ctx, messages, usage, version.id, stop_reason)
 ```
 
 **Tool resolution.** `resolve_enabled_tool_names` (`ChatService.
@@ -555,7 +563,18 @@ _resolve_enabled_tool_names` in the actual implementation) is a join of
 (§2.3), not a read of a config column: an agent may call a builtin only if
 an enabled `agent_tools` row links it there, and an org-scoped `tools` row
 fully shadows a global builtin of the same name for that agent — see that
-method's own docstring for the shadowing rule and why it exists. An
+method's own docstring for the shadowing rule and why it exists.
+
+**Where that "only if" is enforced.** In the registry, not in the prompt.
+`ChatService._build_registry(names)` constructs *only* the granted tools, so
+a name the agent was not granted is not in the registry at all and
+`ToolRegistry.execute` returns its ordinary unknown-name error result
+without running anything. Restricting the advertised `ToolSpec` list alone
+is not enforcement: a model can name a tool it was never shown — by
+hallucination, or on an instruction smuggled into a document that
+`retrieve_knowledge` fed back as tool-result content — and for most of Phase
+4 that call ran. `tools.is_enabled = false` is a platform kill switch for
+the same reason: the name stops resolving, so the tool stops being built. An
 earlier draft of this section named `agent_configs.enabled_tool_names` as
 the resolution source instead; that column was never read by anything,
 Task 7b's review caught it, and the column has since been dropped rather
@@ -743,9 +762,9 @@ drops in on both sides without a rewrite.
 
 ```text
                     ┌──────────────────┐
-    Agent  ───────▶ │   ToolRegistry   │
-                    └────────┬─────────┘
-                             │  resolves by `tools.type`
+    Agent  ───────▶ │   ToolRegistry   │  built per turn from the agent's
+                    └────────┬─────────┘  GRANTED tools only (§7.2)
+                             │  each entry constructed by `tools.type`
               ┌──────────────┼──────────────┐
               ▼              ▼              ▼
         LocalTool      MCPToolAdapter    HttpToolAdapter
