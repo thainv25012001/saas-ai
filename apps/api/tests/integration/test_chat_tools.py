@@ -867,3 +867,281 @@ async def test_a_slow_sibling_holding_the_lock_does_not_fabricate_a_timeout_for_
     assert results_by_id["fast"].is_error is False, results_by_id["fast"].result
     assert "timed out" not in results_by_id["fast"].result
     assert "took longer" not in results_by_id["fast"].result
+
+
+async def test_an_ungranted_builtin_named_by_the_model_never_runs_and_writes_nothing(
+    tenant_a, owner_connection
+):
+    """Whole-branch review, Critical 1. `_build_registry` used to register
+    every builtin unconditionally and hand `_resolve_enabled_tool_names`'
+    output to `AgentRunner` only to decide what the model is *shown*, so
+    the `agent_tools` grant was advisory: a model that simply NAMED
+    `create_lead` on an agent with no link to it -- a hallucination, or an
+    instruction smuggled into an uploaded document and fed back as
+    `retrieve_knowledge` tool-result content -- got it executed, writing a
+    real `Lead` row with `is_error=False`.
+
+    The agent here is created the normal way and never granted
+    `create_lead` (Task 7b links only `retrieve_knowledge` by default), so
+    the grant is the ONLY thing standing between the model's call and the
+    write. Asserted on the `leads` table, not on the event stream alone:
+    the point is that nothing ran, not merely that the stream said so.
+    """
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+        agent_id = agent.id
+        names = await ChatService(session, tenant_a)._resolve_enabled_tool_names(agent_id)
+    assert names == ["retrieve_knowledge"], "precondition: create_lead is NOT granted"
+
+    provider = FakeProvider(
+        turns=[
+            [
+                FakeToolCall(
+                    id="smuggled",
+                    name="create_lead",
+                    input={
+                        "name": "Mallory",
+                        "email": "mallory@example.com",
+                        "interest": "pwn",
+                    },
+                )
+            ],
+            "All set.",
+        ]
+    )
+    async with tenant_session(tenant_a) as session:
+        service = ChatService(session, tenant_a, provider_override=provider)
+        events = [event async for event in service.send(agent_id, "sign me up")]
+
+    # The model was never offered it either -- the pre-existing half of the
+    # guarantee, asserted here so a regression in EITHER half fails.
+    assert provider.last_request is not None
+    assert provider.last_request.tools is not None
+    assert [t.name for t in provider.last_request.tools] == ["retrieve_knowledge"]
+
+    tool_end = next(e for e in events if isinstance(e, ChatToolCallEnd))
+    assert [r.tool_call_id for r in tool_end.results] == ["smuggled"]
+    assert tool_end.results[0].is_error is True
+    assert any(isinstance(e, ChatMessageEnd) for e in events)
+
+    conversation_id = next(e.conversation_id for e in events if isinstance(e, ChatMessageStart))
+    async with tenant_session(tenant_a) as session:
+        leads = (
+            (await session.execute(select(Lead).where(Lead.conversation_id == conversation_id)))
+            .scalars()
+            .all()
+        )
+        tool_call_rows = (
+            (
+                await session.execute(
+                    select(MessageToolCall).where(
+                        MessageToolCall.tool_name == "create_lead",
+                        MessageToolCall.tool_call_id == "smuggled",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert leads == [], "an ungranted tool must not write"
+    assert len(tool_call_rows) == 1
+    assert tool_call_rows[0].is_error is True
+
+
+async def test_a_tool_whose_sql_outruns_its_budget_still_lets_the_turn_persist(
+    tenant_a, owner_connection, monkeypatch
+):
+    """Whole-branch review, Critical 2, reproduced exactly as reported.
+
+    `_LockedSessionTool` used to wrap the tool call in a bare
+    `asyncio.timeout`. Firing it while an asyncpg statement was in flight on
+    the turn's SHARED session cancelled that statement mid-flight and
+    SQLAlchemy invalidated the connection -- and a savepoint cannot recover
+    a *cancelled* statement the way it recovers a failed one. The next
+    statement `ChatService.send` ran (`append_message`) then raised
+    `PendingRollbackError`, which is a `SQLAlchemyError` and not an
+    `AppError`, so it escaped `send()` uncaught and the entire turn rolled
+    back -- the user's message, the answer already on screen, the tool rows,
+    the citations and the usage row.
+
+    `pg_sleep(5)` on the caller's own session under a 0.5s budget is what a
+    genuinely slow hybrid retrieval looks like to this layer; at a default
+    budget of 10s and an unbounded corpus it is an ordinary bad day. The
+    assertions are on the DATABASE, not the event stream: the point is that
+    the turn survived, not merely that something said `is_error`.
+    """
+    monkeypatch.setattr(RetrieveKnowledgeTool, "timeout_seconds", 0.5)
+
+    async def _sleepy_retrieve(self, query, **kwargs):  # type: ignore[no-untyped-def]
+        await self.session.execute(text("SELECT pg_sleep(5)"))
+        raise AssertionError("unreachable: the statement above must be cancelled first")
+
+    monkeypatch.setattr(RetrievalService, "retrieve", _sleepy_retrieve)
+
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+        agent_id = agent.id
+    await enable_builtin_tool(owner_connection, tenant_a, agent_id)
+
+    provider = FakeProvider(
+        turns=[
+            [FakeToolCall(id="slow_sql", name="retrieve_knowledge", input={"query": "anything"})],
+            "I could not look that up in time.",
+        ]
+    )
+    async with tenant_session(tenant_a) as session:
+        service = ChatService(session, tenant_a, provider_override=provider)
+        events = [event async for event in service.send(agent_id, "Tell me something")]
+
+    tool_end = next(e for e in events if isinstance(e, ChatToolCallEnd))
+    assert tool_end.results[0].is_error is True
+    assert "took longer than" in tool_end.results[0].result
+    assert any(isinstance(e, ChatMessageEnd) for e in events)
+    assert not any(isinstance(e, ChatError) for e in events)
+
+    conversation_id = next(e.conversation_id for e in events if isinstance(e, ChatMessageStart))
+    message_id = next(e.message_id for e in events if isinstance(e, ChatMessageStart))
+    async with tenant_session(tenant_a) as session:
+        history = await ConversationService(session, tenant_a).history(conversation_id)
+        tool_call_rows = (
+            (
+                await session.execute(
+                    select(MessageToolCall).where(MessageToolCall.message_id == message_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    # The user's own message AND the assistant's answer both survived.
+    assert [row.role.value for row in history] == ["user", "assistant"]
+    assert history[1].content == "I could not look that up in time."
+    assert len(tool_call_rows) == 1
+    assert tool_call_rows[0].is_error is True
+
+
+async def test_the_session_is_still_usable_for_the_rest_of_the_turn_after_a_tool_timeout(
+    tenant_a, owner_connection, monkeypatch
+):
+    """The general form of Critical 2's requirement: no tool failure of any
+    kind may leave the caller's session unusable. A timed-out call is
+    followed, in the SAME turn and on the SAME session, by a second tool
+    call that does real database work -- `create_lead`, a write -- which can
+    only succeed if the timeout left the session fully intact rather than
+    merely "not crashing immediately".
+    """
+    monkeypatch.setattr(RetrieveKnowledgeTool, "timeout_seconds", 0.5)
+
+    async def _sleepy_retrieve(self, query, **kwargs):  # type: ignore[no-untyped-def]
+        await self.session.execute(text("SELECT pg_sleep(5)"))
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(RetrievalService, "retrieve", _sleepy_retrieve)
+
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+        agent_id = agent.id
+    await enable_builtin_tool(owner_connection, tenant_a, agent_id, tool_name="retrieve_knowledge")
+    await enable_builtin_tool(owner_connection, tenant_a, agent_id, tool_name="create_lead")
+
+    provider = FakeProvider(
+        turns=[
+            [FakeToolCall(id="slow_sql", name="retrieve_knowledge", input={"query": "anything"})],
+            [
+                FakeToolCall(
+                    id="after",
+                    name="create_lead",
+                    input={
+                        "name": "Still Working",
+                        "email": "still@example.com",
+                        "interest": "widgets",
+                    },
+                )
+            ],
+            "Done.",
+        ]
+    )
+    async with tenant_session(tenant_a) as session:
+        service = ChatService(session, tenant_a, provider_override=provider)
+        events = [event async for event in service.send(agent_id, "help")]
+
+    ends = [e for e in events if isinstance(e, ChatToolCallEnd)]
+    assert len(ends) == 2
+    assert ends[0].results[0].is_error is True
+    assert ends[1].results[0].is_error is False, ends[1].results[0].result
+
+    conversation_id = next(e.conversation_id for e in events if isinstance(e, ChatMessageStart))
+    async with tenant_session(tenant_a) as session:
+        lead = (
+            await session.execute(select(Lead).where(Lead.conversation_id == conversation_id))
+        ).scalar_one_or_none()
+    assert lead is not None
+    assert lead.email == "still@example.com"
+
+
+async def test_oversized_and_nul_bearing_tool_call_fields_do_not_destroy_the_turn(
+    tenant_a, owner_connection
+):
+    """Whole-branch review, Important 1. All three shapes below were
+    reproduced as an uncaught `DBAPIError` out of `send()` AFTER the answer
+    had streamed, rolling the turn back entirely: a 150-character
+    hallucinated tool name and a 150-character provider `tool_call_id`
+    (`message_tool_calls.tool_name`/`.tool_call_id` are both `varchar(100)`),
+    and a NUL byte in the arguments, which JSONB rejects outright.
+
+    `ToolRegistry.execute` already degrades the hallucinated NAME to an
+    error result exactly as §7.3 requires -- so this is specifically about
+    the layer after it: persistence must not be able to kill a turn the
+    model, the registry and the stream all handled correctly.
+    """
+    long_name = "x" * 150
+    long_id = "i" * 150
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+        agent_id = agent.id
+    await enable_builtin_tool(owner_connection, tenant_a, agent_id)
+
+    provider = FakeProvider(
+        turns=[
+            [
+                FakeToolCall(id=long_id, name=long_name, input={"query": "a"}),
+                FakeToolCall(
+                    id="nul", name="retrieve_knowledge", input={"query": "a" + chr(0) + "b"}
+                ),
+            ],
+            "Handled.",
+        ]
+    )
+    async with tenant_session(tenant_a) as session:
+        service = ChatService(session, tenant_a, provider_override=provider)
+        events = [event async for event in service.send(agent_id, "go")]
+
+    assert not any(isinstance(e, ChatError) for e in events)
+    assert any(isinstance(e, ChatMessageEnd) for e in events)
+
+    message_id = next(e.message_id for e in events if isinstance(e, ChatMessageStart))
+    async with tenant_session(tenant_a) as session:
+        rows = (
+            (
+                await session.execute(
+                    select(MessageToolCall).where(MessageToolCall.message_id == message_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        history = await ConversationService(session, tenant_a).history(
+            next(e.conversation_id for e in events if isinstance(e, ChatMessageStart))
+        )
+    by_name = {row.tool_name: row for row in rows}
+    assert len(rows) == 2
+    # Truncated to the column width rather than rejected -- the row is the
+    # audit record of what the model actually did, and 100 characters of an
+    # absurd name identify it perfectly well.
+    assert long_name[:100] in by_name
+    assert by_name[long_name[:100]].tool_call_id == long_id[:100]
+    assert by_name[long_name[:100]].is_error is True
+    nul_row = by_name["retrieve_knowledge"]
+    assert nul_row.arguments == {"query": "ab"}
+    # And the turn itself survived, which is the whole point.
+    assert [row.role.value for row in history] == ["user", "assistant"]
+    assert history[1].content == "Handled."

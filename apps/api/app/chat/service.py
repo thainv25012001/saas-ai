@@ -8,7 +8,8 @@ from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.runner import (
@@ -87,6 +88,68 @@ DEFAULT_HISTORY_WINDOW = 20
 # its own inner timeout), which is exactly the case this outer bound
 # exists to still catch.
 _LOCK_WAIT_BUDGET_SECONDS = 30.0
+
+# Every builtin `_build_registry` knows how to construct, keyed implicitly by
+# each class's own `name`. A tuple, not a dict, so the class stays the single
+# source of the name it registers under -- the same name
+# `_resolve_enabled_tool_names` reads out of `tools.name`, and the same one
+# `app/db/builtin_tools.py` seeds. A `tools` row naming something not listed
+# here resolves to no Python class and is skipped (logged by
+# `AgentRunner._resolve_specs`), exactly as a stale row always was.
+_BUILTIN_TOOL_CLASSES: tuple[type[AgentTool], ...] = (RetrieveKnowledgeTool, CreateLeadTool)
+
+# How much longer than a tool's OWN budget the event-loop net in
+# `_LockedSessionTool._run_bounded` is allowed to run. Deliberately small,
+# and deliberately NOT the thing that bounds database work -- see that
+# method's docstring: `SET LOCAL statement_timeout` is what stops a slow
+# query, so by the time this fires the tool is provably not blocked in a
+# statement, which is exactly the condition under which cancelling it is
+# safe for the caller's session.
+_NON_DB_GRACE_SECONDS = 5.0
+
+#: Postgres SQLSTATE `query_canceled` -- what `statement_timeout` raises, and
+#: what `_is_statement_timeout` recognises so an overrun still reads to the
+#: model as a timeout rather than as an unexplained failure.
+_STATEMENT_TIMEOUT_SQLSTATE = "57014"
+
+# Yielded in place of a `ChatMessageEnd` when the turn's own persistence
+# fails. Deliberately generic, and deliberately the same shape every other
+# in-band failure uses: the user has already seen the answer stream, and the
+# only honest thing left to say is that it was not saved. The real exception
+# goes to the log, never to the wire.
+_PERSISTENCE_FAILED_MESSAGE = (
+    "The assistant answered, but this turn could not be saved. Please try again."
+)
+
+
+def _tool_log_context(ctx: ToolContext) -> dict[str, str]:
+    """Correlation fields every tool-layer log line carries (whole-branch
+    review, Minor 7). `tool_name` alone cannot tell an operator watching
+    `tool_call_invalid_args` spike which tenant or which conversation it is
+    happening in, though `ToolContext` has carried all three since Task 1.
+    Matches the dialect `app/chat/service.py`'s own `agent_step_limit_reached`
+    already uses: stringified ids, not UUID objects."""
+    return {
+        "organization_id": str(ctx.organization_id),
+        "agent_id": str(ctx.agent_id),
+        "conversation_id": str(ctx.conversation_id),
+        "request_id": ctx.request_id,
+    }
+
+
+def _is_statement_timeout(exc: DBAPIError) -> bool:
+    """Whether `exc` is Postgres cancelling a statement that outran
+    `statement_timeout`, as opposed to any other DBAPI-level failure.
+
+    Reads `sqlstate` off the driver's own exception (asyncpg's
+    `QueryCanceledError` carries it) rather than matching on the message
+    text, and via `getattr` rather than an `isinstance` check against
+    `asyncpg.exceptions.QueryCanceledError`, so this module does not have to
+    import the driver to recognise a condition the SQL standard already
+    names.
+    """
+    return getattr(exc.orig, "sqlstate", None) == _STATEMENT_TIMEOUT_SQLSTATE
+
 
 _VARIABLE_PATTERN = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 
@@ -219,6 +282,37 @@ ChatEvent = (
 )
 
 
+#: `MessageToolCall.tool_call_id` and `.tool_name` are both `varchar(100)`
+#: (`app/db/models/tool.py`). Both are model-derived -- the provider mints the
+#: id, the model picks the name -- so neither is bounded by anything this
+#: codebase controls.
+_TOOL_CALL_FIELD_MAX_CHARS = 100
+
+
+def _strip_nulls(value: Any) -> Any:
+    r"""Remove NUL (byte 0) from every string reachable in `value`.
+
+    Postgres rejects NUL in `text` AND inside a `jsonb` document -- it is not
+    a representable character in either, and asyncpg surfaces the refusal as
+    a `DBAPIError` at flush time, i.e. long after the answer has streamed.
+    Tool arguments come from model output, so a NUL escape inside a JSON
+    string argument is a thing a model can simply emit; a tool result's
+    content can inherit one from the document it was assembled from.
+
+    Recursive over dicts and lists because `arguments` is arbitrary JSON
+    shaped by each tool's own `args_model`, not a flat mapping -- a NUL
+    nested three levels down is rejected exactly as hard as one at the top.
+    Keys are cleaned as well as values, for the same reason.
+    """
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {_strip_nulls(k): _strip_nulls(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_strip_nulls(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class _ToolCallRecord:
     """Everything `_record_tool_calls` needs to persist one `MessageToolCall`
@@ -232,6 +326,47 @@ class _ToolCallRecord:
     tool_name: str
     arguments: dict[str, Any]
     result: ToolResult
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result: ToolResult,
+    ) -> "_ToolCallRecord":
+        """The only way `send()` constructs one -- so every model-derived
+        field is made storable at the point it enters this record, not left
+        to be discovered at flush time (whole-branch review, Important 1).
+
+        Three shapes were reproduced as an uncaught `DBAPIError` out of
+        `send()` *after* the answer had streamed, each rolling the whole turn
+        back: a 150-character hallucinated tool name, a 150-character
+        provider `tool_call_id` (both columns are `varchar(100)`), and a NUL
+        byte anywhere in the arguments. `ToolRegistry.execute` already
+        degrades a hallucinated NAME to an error result exactly as
+        `docs/ARCHITECTURE.md` §7.3 requires -- and then persistence killed
+        the turn anyway, so the "degrade, not crash" guarantee held at two
+        layers of three.
+
+        Truncated rather than rejected: this row is an audit record of what
+        the model actually did, and the first 100 characters of an absurd
+        name identify it perfectly well for anyone reading the table later.
+        Rejecting the row would throw away the evidence of the very thing it
+        is recording.
+        """
+        return cls(
+            tool_call_id=_strip_nulls(tool_call_id)[:_TOOL_CALL_FIELD_MAX_CHARS],
+            tool_name=_strip_nulls(tool_name)[:_TOOL_CALL_FIELD_MAX_CHARS],
+            arguments=_strip_nulls(arguments),
+            result=result.model_copy(
+                update={
+                    "content": _strip_nulls(result.content),
+                    "data": _strip_nulls(result.data),
+                }
+            ),
+        )
 
 
 def _serialize_tool_result(result: ToolResult) -> dict[str, Any]:
@@ -376,6 +511,7 @@ class _LockedSessionTool(AgentTool):
         # no `__init__` at all, a tool's construction requirements being
         # its own business and not the interface's.
         self._inner = tool_cls(session)  # type: ignore[call-arg]
+        self._session = session
         self._lock = lock
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolResult:
@@ -395,26 +531,130 @@ class _LockedSessionTool(AgentTool):
                     "tool_call_waited_for_shared_session",
                     tool_name=self.name,
                     wait_ms=wait_ms,
+                    **_tool_log_context(ctx),
                 )
-            try:
-                async with asyncio.timeout(self._own_timeout_seconds):
-                    result = await self._inner.execute(args, ctx)
-            except TimeoutError:
-                logger.warning(
-                    "tool_call_execution_timed_out",
-                    tool_name=self.name,
-                    timeout_seconds=self._own_timeout_seconds,
-                )
-                result = ToolResult(
-                    content=(
-                        f"'{self.name}' took longer than {self._own_timeout_seconds}s to "
-                        "run (not counting time spent waiting for another tool call in "
-                        "this turn) and was stopped."
-                    ),
-                    is_error=True,
-                )
+            result = await self._run_bounded(args, ctx)
         duration_ms = int((time.monotonic() - started) * 1000)
         return result.model_copy(update={"duration_ms": duration_ms})
+
+    def _timeout_result(self) -> ToolResult:
+        return ToolResult(
+            content=(
+                f"'{self.name}' took longer than {self._own_timeout_seconds}s to "
+                "run (not counting time spent waiting for another tool call in "
+                "this turn) and was stopped."
+            ),
+            is_error=True,
+        )
+
+    async def _run_bounded(self, args: BaseModel, ctx: ToolContext) -> ToolResult:
+        """Run the wrapped tool under its own budget, in a way that cannot
+        leave the caller's session unusable for the rest of the turn --
+        whatever the outcome (whole-branch review, Critical 2).
+
+        **The bug this shape exists to prevent.** The previous version put
+        `asyncio.timeout(self._own_timeout_seconds)` straight around
+        `self._inner.execute`. When that fired while an asyncpg statement
+        was in flight on the shared session -- a 10s hybrid retrieval on a
+        large corpus, which `docs/PHASE-4.md` §7 treats as an ordinary bad
+        day, not an exotic input -- the task was cancelled mid-statement and
+        SQLAlchemy invalidated the connection. A savepoint is no help: it
+        recovers a transaction from a *statement error*, not from a
+        cancelled, still-in-flight statement on an invalidated connection.
+        `ChatService.send` then died on its very next statement with
+        `PendingRollbackError` -- not an `AppError`, so it escaped as an
+        uncaught exception and the whole turn rolled back, losing the user's
+        message, the answer the browser had already rendered, the tool rows,
+        the citations and the usage row. `app/api/chat.py::_pump`'s own
+        docstring describes this exact hazard and solves it for the
+        heartbeat; the tool timeout reintroduced it a layer down.
+
+        **The shape.** Three things, in this order:
+
+        1. `SET LOCAL statement_timeout` bounds the tool's *database* work
+           at the database, at the tool's own budget. An overrun therefore
+           arrives as an ordinary `QueryCanceledError` (SQLSTATE 57014) --
+           a statement error, which savepoints recover from perfectly -- and
+           never as an event-loop cancellation. `SET LOCAL` is
+           transaction-scoped, so it is undone automatically when the
+           savepoint below rolls back, and cleared explicitly in the
+           `finally` when it does not (a released savepoint does NOT undo a
+           `SET LOCAL`, and the caller's own later writes must not inherit a
+           tool's budget).
+        2. A savepoint around the whole call, so even a tool that opens none
+           of its own (`RetrieveKnowledgeTool` and `CreateLeadTool` both do;
+           a future one might not) cannot abort the turn's transaction.
+        3. `asyncio.timeout` is kept, but only as the net for work that is
+           NOT a database statement -- a future tool's HTTP call, a
+           pure-Python loop -- and widened by `_NON_DB_GRACE_SECONDS` so
+           that step 1 always fires first for DB work. By the time this one
+           fires, the tool is provably not blocked in a statement, which is
+           exactly the condition under which cancelling it is safe.
+
+        The residual case is a tool that runs *many* statements, each inside
+        its own `statement_timeout` but summing past the grace: the net then
+        fires, possibly mid-statement, and the session can still be lost.
+        That is why `ChatService.send` additionally treats a failed
+        persistence as a first-class in-band failure (see its own
+        `except SQLAlchemyError` there) rather than letting it escape --
+        containment behind prevention, because no tool failure of any kind
+        may cost a turn that already reached the user.
+        """
+        statement_timeout_ms = max(1, int(self._own_timeout_seconds * 1000))
+        try:
+            async with self._session.begin_nested():
+                await self._session.execute(
+                    text(f"SET LOCAL statement_timeout = {statement_timeout_ms}")
+                )
+                async with asyncio.timeout(self._own_timeout_seconds + _NON_DB_GRACE_SECONDS):
+                    return await self._inner.execute(args, ctx)
+        except TimeoutError:
+            logger.warning(
+                "tool_call_execution_timed_out",
+                tool_name=self.name,
+                timeout_seconds=self._own_timeout_seconds,
+                bound="event_loop",
+                **_tool_log_context(ctx),
+            )
+            return self._timeout_result()
+        except DBAPIError as exc:
+            if not _is_statement_timeout(exc):
+                # Any other DBAPI failure is the tool's own to report --
+                # `ToolRegistry.execute` already turns it into
+                # `ToolResult(is_error=True)` with the traceback logged, and
+                # the savepoint above has already rolled back, so the
+                # caller's session is usable either way.
+                raise
+            logger.warning(
+                "tool_call_execution_timed_out",
+                tool_name=self.name,
+                timeout_seconds=self._own_timeout_seconds,
+                bound="statement_timeout",
+                **_tool_log_context(ctx),
+            )
+            return self._timeout_result()
+        finally:
+            await self._clear_statement_timeout()
+
+    async def _clear_statement_timeout(self) -> None:
+        """Undo this call's `SET LOCAL statement_timeout` for the rest of the
+        turn's transaction.
+
+        Needed only on the paths where the savepoint was *released* rather
+        than rolled back (a successful call, mostly): Postgres undoes a
+        `SET LOCAL` when the savepoint it was issued inside rolls back, but
+        not when it is released, and the caller's own later writes must not
+        silently inherit a tool's budget. Issuing it on the rollback paths
+        too is harmless and keeps this one line rather than a state flag.
+
+        Best-effort by design: if the session is already unusable there is
+        nothing left for this to fix, and raising here would replace a
+        reportable tool failure with an unreportable one.
+        """
+        try:
+            await self._session.execute(text("SET LOCAL statement_timeout = DEFAULT"))
+        except SQLAlchemyError:  # pragma: no cover - only on an already-lost session
+            logger.warning("tool_statement_timeout_reset_failed", tool_name=self.name)
 
 
 class ChatService:
@@ -583,7 +823,7 @@ class ChatService:
             visitor_id=conversation.visitor_id,
         )
         tool_names = await self._resolve_enabled_tool_names(agent_id)
-        registry = self._build_registry()
+        registry = self._build_registry(tool_names)
         runner = AgentRunner(
             provider,
             registry,
@@ -639,7 +879,7 @@ class ChatService:
                         tool_name = matching_call.name if matching_call is not None else "unknown"
                         arguments = matching_call.input if matching_call is not None else {}
                         tool_call_records.append(
-                            _ToolCallRecord(
+                            _ToolCallRecord.build(
                                 tool_call_id=result.tool_call_id,
                                 tool_name=tool_name,
                                 arguments=arguments,
@@ -702,102 +942,143 @@ class ChatService:
         # per-step model field for `send()` to read instead.)
         model_used = model_name
 
-        if chat_error is None:
-            cost = estimate_cost(model_used, usage)
-            await self._conversations.append_message(
-                conversation.id,
-                AppendMessageInput(
-                    id=message_id,
-                    role=MessageRole.ASSISTANT,
-                    content=final_text,
-                    prompt_version_id=prompt_version_id,
-                    provider=provider_name,
-                    model=model_used,
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    cost_usd=cost,
-                    latency_ms=latency_ms,
-                    finish_reason="step_limit_reached" if step_limit_hit else None,
-                ),
-            )
-            # Same transaction as the assistant message above.
-            await self._record_tool_calls(message_id, tool_call_records)
-            await self._record_citations(message_id, citations)
-            await self._conversations.record_usage(
-                RecordUsageInput(
-                    agent_id=agent.id,
-                    conversation_id=conversation.id,
-                    kind=UsageKind.LLM,
-                    provider=provider_name,
-                    model=model_used,
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    cost_usd=cost,
-                )
-            )
-            if step_limit_hit:
-                # §5.1's pseudocode: `yield Error("step_limit_reached")`.
-                # Review round 1, Important finding 4: an earlier version of
-                # this method treated a step-limit hit as an ordinary
-                # success -- everything above (message, tool calls,
-                # citations, usage) is still persisted, because it is all
-                # real, but the client received a normal `message_end` for
-                # what could be a completely empty assistant message, with
-                # nothing on the wire distinguishing "the model finished"
-                # from "the loop gave up mid-thought". Yielding `ChatError`
-                # instead of `ChatMessageEnd` here is the explicit,
-                # in-band signal §4/§5.1 both call for; `finish_reason` on
-                # the persisted message (set above) is the same fact for
-                # anything reading history afterward.
-                yield ChatError(
-                    code="step_limit_reached",
-                    message=(
-                        f"The assistant reached its step limit "
-                        f"({config.max_agent_steps}) while still requesting "
-                        "tools and could not finish answering."
+        # Everything below writes. Wrapped, because a turn that already
+        # reached the user must not be lost to an exception raised while
+        # saving it (whole-branch review, Criticals 2 and Important 1):
+        # model-derived tool-call fields are sanitised at
+        # `_ToolCallRecord` construction, and a tool timeout can no longer
+        # cancel an in-flight statement on this session -- but neither
+        # guarantee is worth betting the turn on, and before this the
+        # entire block after `except AppError` closed was unprotected: any
+        # `SQLAlchemyError` here escaped `send()` uncaught, `_pump` turned
+        # it into a generic internal-error SSE event, and the transaction
+        # rolled back -- the user's message, the streamed answer, the tool
+        # rows, the citations and the usage row all gone AFTER the answer
+        # was on screen. `final_event` is computed inside and yielded
+        # after, so the failure path replaces the terminal event rather
+        # than arriving alongside one already sent.
+        final_event: ChatEvent
+        try:
+            if chat_error is None:
+                cost = estimate_cost(model_used, usage)
+                await self._conversations.append_message(
+                    conversation.id,
+                    AppendMessageInput(
+                        id=message_id,
+                        role=MessageRole.ASSISTANT,
+                        content=final_text,
+                        prompt_version_id=prompt_version_id,
+                        provider=provider_name,
+                        model=model_used,
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        cost_usd=cost,
+                        latency_ms=latency_ms,
+                        finish_reason="step_limit_reached" if step_limit_hit else None,
                     ),
                 )
-            else:
-                yield ChatMessageEnd(
-                    usage=usage,
-                    cost_usd=cost,
-                    latency_ms=latency_ms,
-                    model=model_used,
-                    prompt_version_id=prompt_version_id,
+                # Same transaction as the assistant message above.
+                await self._record_tool_calls(message_id, tool_call_records)
+                await self._record_citations(message_id, citations)
+                await self._conversations.record_usage(
+                    RecordUsageInput(
+                        agent_id=agent.id,
+                        conversation_id=conversation.id,
+                        kind=UsageKind.LLM,
+                        provider=provider_name,
+                        model=model_used,
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        cost_usd=cost,
+                    )
                 )
-        else:
-            # Do not discard the partial reply: some of it already reached
-            # the browser, so a history that disagrees with the screen is
-            # worse than an incomplete one. No usage_events row is written
-            # here -- there is no reliable usage figure for a stream that
-            # never reached its message_end/usage event.
-            await self._conversations.append_message(
-                conversation.id,
-                AppendMessageInput(
-                    id=message_id,
-                    role=MessageRole.ASSISTANT,
-                    content=final_text,
-                    prompt_version_id=prompt_version_id,
-                    provider=provider_name,
-                    model=model_used,
-                    latency_ms=latency_ms,
-                    error=chat_error.message,
-                ),
+                if step_limit_hit:
+                    # §5.1's pseudocode: `yield Error("step_limit_reached")`.
+                    # Review round 1, Important finding 4: an earlier version of
+                    # this method treated a step-limit hit as an ordinary
+                    # success -- everything above (message, tool calls,
+                    # citations, usage) is still persisted, because it is all
+                    # real, but the client received a normal `message_end` for
+                    # what could be a completely empty assistant message, with
+                    # nothing on the wire distinguishing "the model finished"
+                    # from "the loop gave up mid-thought". Yielding `ChatError`
+                    # instead of `ChatMessageEnd` here is the explicit,
+                    # in-band signal §4/§5.1 both call for; `finish_reason` on
+                    # the persisted message (set above) is the same fact for
+                    # anything reading history afterward.
+                    final_event = ChatError(
+                        code="step_limit_reached",
+                        message=(
+                            f"The assistant reached its step limit "
+                            f"({config.max_agent_steps}) while still requesting "
+                            "tools and could not finish answering."
+                        ),
+                    )
+                else:
+                    final_event = ChatMessageEnd(
+                        usage=usage,
+                        cost_usd=cost,
+                        latency_ms=latency_ms,
+                        model=model_used,
+                        prompt_version_id=prompt_version_id,
+                    )
+            else:
+                # Do not discard the partial reply: some of it already reached
+                # the browser, so a history that disagrees with the screen is
+                # worse than an incomplete one. No usage_events row is written
+                # here -- there is no reliable usage figure for a stream that
+                # never reached its message_end/usage event.
+                await self._conversations.append_message(
+                    conversation.id,
+                    AppendMessageInput(
+                        id=message_id,
+                        role=MessageRole.ASSISTANT,
+                        content=final_text,
+                        prompt_version_id=prompt_version_id,
+                        provider=provider_name,
+                        model=model_used,
+                        latency_ms=latency_ms,
+                        error=chat_error.message,
+                    ),
+                )
+                # Recorded here too, not just on the success path above: any
+                # tool call that already completed -- and the assistant message
+                # this turn produced, partial and marked `error=` but persisted
+                # -- happened before the failure, and per
+                # docs/PHASE-3.md §5 this table's whole reason for existing is
+                # to make "did it answer from the sources?" answerable after the
+                # fact. The identical reasoning now applies to
+                # `message_tool_calls`: a tool call that already ran and
+                # returned before a later step's provider failure is real
+                # information about this turn, not something the failure should
+                # erase.
+                await self._record_tool_calls(message_id, tool_call_records)
+                await self._record_citations(message_id, citations)
+                final_event = chat_error
+        except SQLAlchemyError:
+            # The one exception class that means "the database said no", as
+            # opposed to a provider or an application error: a constraint or
+            # column-width violation on a model-derived field, a JSONB value
+            # Postgres rejects, or a session already lost before this block
+            # began. Logged with the traceback, never interpolated into the
+            # wire message -- the same rule `app/api/chat.py`'s
+            # `_INTERNAL_ERROR_MESSAGE` states for the layer above.
+            #
+            # Nothing is re-raised: the caller's transaction is left for
+            # whoever owns it to roll back, and the client gets a terminal
+            # in-band event instead of a stream that just stops. This is the
+            # containment half of Critical 2 -- prevention (per-tool
+            # `statement_timeout`, see `_LockedSessionTool._run_bounded`) is
+            # what stops the session being lost in the first place.
+            logger.exception(
+                "chat_turn_persistence_failed",
+                agent_id=str(agent_id),
+                conversation_id=str(conversation.id),
+                message_id=str(message_id),
             )
-            # Recorded here too, not just on the success path above: any
-            # tool call that already completed -- and the assistant message
-            # this turn produced, partial and marked `error=` but persisted
-            # -- happened before the failure, and per
-            # docs/PHASE-3.md §5 this table's whole reason for existing is
-            # to make "did it answer from the sources?" answerable after the
-            # fact. The identical reasoning now applies to
-            # `message_tool_calls`: a tool call that already ran and
-            # returned before a later step's provider failure is real
-            # information about this turn, not something the failure should
-            # erase.
-            await self._record_tool_calls(message_id, tool_call_records)
-            await self._record_citations(message_id, citations)
-            yield chat_error
+            final_event = ChatError(code="internal_error", message=_PERSISTENCE_FAILED_MESSAGE)
+
+        yield final_event
 
     async def _resolve_enabled_tool_names(self, agent_id: uuid.UUID) -> list[str]:
         """Which tool names this agent may call, per `docs/ARCHITECTURE.md`
@@ -871,17 +1152,43 @@ class ChatService:
                 shadowed.add(name)
         return [name for name, enabled in resolved.items() if enabled]
 
-    def _build_registry(self) -> ToolRegistry:
-        """Every Phase 4 builtin, registered fresh per turn -- each wrapped
-        in `_LockedSessionTool`, sharing one `asyncio.Lock` created fresh
-        here, so no two calls this turn ever touch `self.session`
-        concurrently. See `_LockedSessionTool`'s docstring for why a lock,
-        not a session per call: `AsyncSession` is not safe for concurrent
-        use, `AgentRunner.run` gathers a step's calls with
-        `asyncio.gather`, and a genuinely independent per-call session
-        cannot see this same turn's own not-yet-committed writes (the
-        conversation `create_lead` needs to find on a visitor's very first
-        message).
+    def _build_registry(self, tool_names: list[str]) -> ToolRegistry:
+        """The builtins this agent is actually GRANTED -- and only those --
+        registered fresh per turn, each wrapped in `_LockedSessionTool`,
+        sharing one `asyncio.Lock` created fresh here, so no two calls this
+        turn ever touch `self.session` concurrently. See
+        `_LockedSessionTool`'s docstring for why a lock, not a session per
+        call: `AsyncSession` is not safe for concurrent use,
+        `AgentRunner.run` gathers a step's calls with `asyncio.gather`, and
+        a genuinely independent per-call session cannot see this same
+        turn's own not-yet-committed writes (the conversation `create_lead`
+        needs to find on a visitor's very first message).
+
+        **`tool_names` is the enforcement point, not a display list**
+        (whole-branch review, Critical 1). An earlier version registered
+        every builtin unconditionally and passed the resolved names to
+        `AgentRunner` only to decide which `ToolSpec`s the model is *shown*.
+        That made the `agent_tools` grant advisory: `ToolRegistry.execute`
+        looks a call's name up in the registry, so a model that named
+        `create_lead` without being offered it -- a hallucination, or an
+        instruction smuggled into a document that `retrieve_knowledge` fed
+        back as tool-result content (`app/tools/retrieve.py` names that
+        injection hazard in its own comment) -- ran the tool and wrote a
+        real `Lead` row. Task 7b's "off by default", Task 8's per-agent
+        toggle and `tools.is_enabled` as a platform kill switch were all
+        unenforced, and `docs/ARCHITECTURE.md` §7.2's "an agent may call a
+        builtin only if an enabled `agent_tools` row links it" was false.
+
+        Registering only what was resolved makes the registry itself the
+        authorization boundary: an ungranted name is simply not in the dict,
+        so `ToolRegistry.execute` returns its existing unknown-name
+        `ToolResult(is_error=True)` and nothing runs. That path already
+        degrades correctly (§7.3: a model naming a tool that does not exist
+        is its mistake to be told about, not a turn to end), so an
+        ungranted call is routed *there* rather than to a new refusal
+        branch of its own -- one fewer shape for the model to have to
+        understand, and the wording deliberately does not confirm that a
+        tool by that name exists elsewhere in the platform.
 
         One lock per turn, not one global lock: two DIFFERENT turns (two
         different `ChatService.send()` calls, each with its own session)
@@ -893,10 +1200,12 @@ class ChatService:
         at import time in practice, since Python caches the class object --
         this just re-runs it).
         """
+        granted = set(tool_names)
         lock = asyncio.Lock()
         registry = ToolRegistry()
-        registry.register(_LockedSessionTool(RetrieveKnowledgeTool, self.session, lock))
-        registry.register(_LockedSessionTool(CreateLeadTool, self.session, lock))
+        for tool_cls in _BUILTIN_TOOL_CLASSES:
+            if tool_cls.name in granted:
+                registry.register(_LockedSessionTool(tool_cls, self.session, lock))
         return registry
 
     async def _assert_message_belongs_to_tenant(self, message_id: uuid.UUID) -> None:
