@@ -18,6 +18,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.schemas import UpdateAgentConfigInput
 from app.agents.service import AgentService
 from app.chat.service import (
     ChatCitations,
@@ -30,6 +31,7 @@ from app.chat.service import (
     ChatToolCallStart,
 )
 from app.conversations.service import ConversationService
+from app.core.errors import NotFoundError
 from app.core.ids import uuid7
 from app.core.tenancy import TenantContext, tenant_session
 from app.db.models import Document, DocumentSourceType, Lead, MessageCitation, MessageToolCall
@@ -424,6 +426,10 @@ async def test_message_tool_calls_persist_with_arguments_and_result(tenant_a, ow
     assert row.organization_id == tenant_a.organization_id
     assert row.result is not None
     assert isinstance(row.result["content"], str) and row.result["content"]
+    # §3.6's declared column, populated now that each call is timed by
+    # `_LockedSessionTool.execute` -- previously always left `None`.
+    assert row.duration_ms is not None
+    assert row.duration_ms >= 0
     assert len(row.result["citations"]) >= 1
 
 
@@ -595,25 +601,31 @@ async def test_the_sse_tool_result_is_an_excerpt_never_the_full_payload(tenant_a
     assert row.result["content"].startswith(wire_result.removesuffix("..."))
 
 
-async def test_tool_context_agent_id_comes_from_the_conversation_not_the_request_parameter(
+async def test_a_conversation_id_naming_a_different_agent_than_the_request_is_rejected(
     tenant_a, owner_connection
 ):
-    """`ToolContext.agent_id` must be server-derived from the conversation's
-    own row -- `LeadService.create` (Task 6) deliberately skips re-checking
-    `agent_id` against the conversation it is handed, relying on that
-    invariant already holding by the time a `ToolContext` reaches it.
-    `ChatService.send` itself never validates that the `agent_id` parameter
-    a caller passes agrees with an existing `conversation_id`'s own agent,
-    so this constructs exactly that mismatch -- two agents in the same org,
-    a conversation that belongs to the first, a `send()` call naming the
-    second -- and proves the resulting `create_lead` row is attributed to
-    the conversation's own agent, not the mismatched request parameter.
+    """Review round 1, Important finding 2: `ChatService.send` used to
+    silently tolerate an `agent_id` parameter that disagreed with an
+    existing `conversation_id`'s own `agent_id` -- `agent`/`provider_name`/
+    `model_name`/`system_prompt`/`max_tokens`/`temperature` are all
+    resolved from the REQUEST's `agent_id`, while `ToolContext.agent_id`
+    (correctly) comes from `conversation.agent_id`, so a caller naming the
+    wrong agent got a real mix: the wrong agent's prompt/provider/model
+    answered, while any tool call that ran was attributed to (and could use
+    the grants of) the conversation's OWN agent -- including a tool
+    (`create_lead`) the request's named agent may never have been granted.
+
+    Constructs exactly that mismatch -- two agents in the same org, a
+    conversation belonging to the first, a `send()` call naming the second
+    -- and proves the whole request is now refused before anything (a
+    tool call, a persisted message) can happen, rather than silently
+    picking one agent's identity for some fields and the other's for
+    others.
     """
     async with tenant_session(tenant_a) as session:
         agent_one = await _agent(session, tenant_a, name="Agent One")
         agent_two = await _agent(session, tenant_a, name="Agent Two")
         agent_one_id, agent_two_id = agent_one.id, agent_two.id
-    await enable_builtin_tool(owner_connection, tenant_a, agent_one_id, tool_name="create_lead")
     await enable_builtin_tool(owner_connection, tenant_a, agent_two_id, tool_name="create_lead")
 
     # Turn 1: create the conversation under agent_one.
@@ -624,7 +636,10 @@ async def test_tool_context_agent_id_comes_from_the_conversation_not_the_request
         ]
         conversation_id = starts[0].conversation_id
 
-    # Turn 2: continue the SAME conversation, but naming agent_two.
+    # Turn 2: continue the SAME conversation, but naming agent_two -- must
+    # be rejected before the scripted create_lead call (which would
+    # otherwise succeed, since agent_two really does have it enabled) is
+    # ever reached.
     provider = FakeProvider(
         turns=[
             [
@@ -638,19 +653,142 @@ async def test_tool_context_agent_id_comes_from_the_conversation_not_the_request
     )
     async with tenant_session(tenant_a) as session:
         service = ChatService(session, tenant_a, provider_override=provider)
-        events = [
-            event
-            async for event in service.send(
-                agent_two_id, "sign me up", conversation_id=conversation_id
-            )
-        ]
-
-    tool_end = next(e for e in events if isinstance(e, ChatToolCallEnd))
-    assert tool_end.results[0].is_error is False
+        with pytest.raises(NotFoundError):
+            _ = [
+                event
+                async for event in service.send(
+                    agent_two_id, "sign me up", conversation_id=conversation_id
+                )
+            ]
 
     async with tenant_session(tenant_a) as session:
         lead = (
             await session.execute(select(Lead).where(Lead.conversation_id == conversation_id))
-        ).scalar_one()
-    assert lead.agent_id == agent_one_id
-    assert lead.agent_id != agent_two_id
+        ).scalar_one_or_none()
+    assert lead is None
+
+
+async def test_two_real_tool_calls_in_one_step_do_not_corrupt_each_other(
+    tenant_a, owner_connection
+):
+    """The concurrency hazard review round 1 found: `AgentRunner` gathers
+    every call in a step with `asyncio.gather`, and an `AsyncSession` is
+    not safe for concurrent use. Sharing one session across two tool
+    instances meant a SUCCEEDING call could corrupt its sibling's
+    `begin_nested()` savepoint, and `ToolRegistry.execute`'s generic
+    exception handler turned that corruption into a fabricated
+    `is_error=True` for a tool that never actually failed -- exactly
+    backwards from §7.3's "one failing tool must not abort its siblings".
+
+    Routed through `ChatService`, not a fake/in-memory registry: Task 4's
+    own parallel-isolation tests (`tests/unit/test_agent_loop.py`) use a
+    DB-free fake registry and could not have caught this -- the shared
+    session only arrives at this seam. Both calls do REAL database work
+    (one `retrieve_knowledge`, one `create_lead`), the shape that
+    reproduced the bug.
+    """
+    query = "annual maintenance inspection checklist"
+    query_vector = await _embed(query)
+    async with tenant_session(tenant_a) as session:
+        await _ready_document_with_chunks(
+            session, tenant_a, [(f"{query} details.", query_vector)], title="Maintenance Guide"
+        )
+        agent = await _agent(session, tenant_a)
+        agent_id = agent.id
+    await enable_builtin_tool(owner_connection, tenant_a, agent_id, tool_name="retrieve_knowledge")
+    await enable_builtin_tool(owner_connection, tenant_a, agent_id, tool_name="create_lead")
+
+    provider = FakeProvider(
+        turns=[
+            [
+                FakeToolCall(id="c1", name="retrieve_knowledge", input={"query": query}),
+                FakeToolCall(
+                    id="c2",
+                    name="create_lead",
+                    input={
+                        "name": "Parallel Visitor",
+                        "email": "parallel@example.com",
+                        "interest": "widgets",
+                    },
+                ),
+            ],
+            "Done.",
+        ]
+    )
+    async with tenant_session(tenant_a) as session:
+        service = ChatService(session, tenant_a, provider_override=provider)
+        events = [event async for event in service.send(agent_id, "help me")]
+
+    tool_end = next(e for e in events if isinstance(e, ChatToolCallEnd))
+    results_by_id = {r.tool_call_id: r for r in tool_end.results}
+    assert set(results_by_id) == {"c1", "c2"}
+    assert results_by_id["c1"].is_error is False, results_by_id["c1"].result
+    assert results_by_id["c2"].is_error is False, results_by_id["c2"].result
+
+    conversation_id = next(e.conversation_id for e in events if isinstance(e, ChatMessageStart))
+    async with tenant_session(tenant_a) as session:
+        lead = (
+            await session.execute(select(Lead).where(Lead.conversation_id == conversation_id))
+        ).scalar_one_or_none()
+    assert lead is not None
+    assert lead.email == "parallel@example.com"
+
+
+async def test_step_limit_reached_is_surfaced_as_an_in_band_error_not_a_silent_blank_message(
+    tenant_a, owner_connection
+):
+    """Review round 1, Important finding 4: §5.1's pseudocode is `yield
+    Error("step_limit_reached")`, but an earlier version of `ChatService.
+    send` silently treated exhausting `max_agent_steps` as an ordinary
+    success -- the client received a normal `message_end` carrying a
+    possibly-empty assistant message, indistinguishable on the wire from
+    the model genuinely finishing with nothing to say. `max_agent_steps=2`
+    and a model that asks for a tool on every step forces the cap; this
+    asserts the turn ends in `ChatError(code="step_limit_reached")`
+    instead of `ChatMessageEnd`, while everything real about the turn
+    (the two tool calls, usage) is still persisted.
+    """
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+        agent_id = agent.id
+        await AgentService(session, tenant_a).update_config(
+            agent_id, UpdateAgentConfigInput(max_agent_steps=2)
+        )
+    await enable_builtin_tool(owner_connection, tenant_a, agent_id)
+
+    provider = FakeProvider(
+        turns=[
+            [FakeToolCall(id="c1", name="retrieve_knowledge", input={"query": "x"})],
+            [FakeToolCall(id="c2", name="retrieve_knowledge", input={"query": "y"})],
+        ]
+    )
+    async with tenant_session(tenant_a) as session:
+        service = ChatService(session, tenant_a, provider_override=provider)
+        events = [event async for event in service.send(agent_id, "keep looking")]
+
+    assert not any(isinstance(e, ChatMessageEnd) for e in events)
+    error_events = [e for e in events if isinstance(e, ChatError)]
+    assert len(error_events) == 1
+    assert error_events[0].code == "step_limit_reached"
+    tool_ends = [e for e in events if isinstance(e, ChatToolCallEnd)]
+    assert len(tool_ends) == 2
+
+    conversation_id = next(e.conversation_id for e in events if isinstance(e, ChatMessageStart))
+    async with tenant_session(tenant_a) as session:
+        history = await ConversationService(session, tenant_a).history(conversation_id)
+    assert len(history) == 2
+    assert history[1].finish_reason == "step_limit_reached"
+    assert history[1].error is None  # not the AppError branch -- a real, if incomplete, turn
+
+    message_id = next(e.message_id for e in events if isinstance(e, ChatMessageStart))
+    async with tenant_session(tenant_a) as session:
+        tool_call_rows = (
+            (
+                await session.execute(
+                    select(MessageToolCall).where(MessageToolCall.message_id == message_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(tool_call_rows) == 2

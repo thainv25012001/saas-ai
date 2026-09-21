@@ -50,12 +50,20 @@ class ToolResult(BaseModel):
     `ChatService` already emits for RAG grounding, rather than a separate
     `CitationRef` type: a tool result and a chat turn report a grounding
     chunk identically, with nothing left to translate between them.
+
+    `duration_ms` is `None` from every tool's own `execute` -- no tool body
+    times itself. It is filled in by whatever dispatches the call (Task 7's
+    per-call session wrapper in `app/chat/service.py`, which already has to
+    open and close a dedicated `async with` block per call and so gets the
+    timing for free) and persisted onto `MessageToolCall.duration_ms`,
+    §3.6's declared column for it.
     """
 
     content: str
     data: dict[str, Any] | None = None
     citations: list[CitationPayload] = Field(default_factory=list)
     is_error: bool = False
+    duration_ms: int | None = None
 
 
 class AgentTool(ABC):

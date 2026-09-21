@@ -325,6 +325,67 @@ async def test_message_citations_are_persisted_with_sequential_ranks(tenant_a, o
     assert all(row.organization_id == tenant_a.organization_id for row in rows)
 
 
+async def test_citation_ranks_are_renumbered_sequentially_across_two_calls_in_one_turn(
+    tenant_a, owner_connection
+):
+    """Review round 1, Important finding 3: two `retrieve_knowledge` calls
+    in one turn used to persist ranks `[1, 1, 2, 2]` (each call's own
+    local rank, written through unchanged) rather than `[1, 2, 3, 4]`
+    (this message's citations, numbered by their position among
+    everything it cited). No unique constraint on `(message_id, rank)`
+    caught it -- this test scripts exactly that two-call turn and asserts
+    the renumbered, non-duplicated sequence directly.
+    """
+    query = "annual maintenance inspection checklist"
+    query_vector = await _embed(query)
+    entries = [
+        (f"Annual maintenance inspection checklist item number {i}.", query_vector)
+        for i in range(2)
+    ]
+
+    async with tenant_session(tenant_a) as session:
+        await _ready_document_with_chunks(session, tenant_a, entries, title="Maintenance Guide")
+        agent = await _agent(session, tenant_a)
+        agent_id = agent.id
+    await enable_builtin_tool(owner_connection, tenant_a, agent_id)
+
+    provider = FakeProvider(
+        turns=[
+            [FakeToolCall(name="retrieve_knowledge", input={"query": query})],
+            [FakeToolCall(name="retrieve_knowledge", input={"query": query})],
+            "ok",
+        ]
+    )
+    async with tenant_session(tenant_a) as session:
+        service = ChatService(session, tenant_a, provider_override=provider)
+        events = [event async for event in service.send(agent_id, query)]
+
+    citation_events = [e for e in events if isinstance(e, ChatCitations)]
+    assert len(citation_events) == 2
+    total_citations = sum(len(e.citations) for e in citation_events)
+    assert total_citations == 4  # 2 calls x 2 chunks each
+    # Each individual event still carries its OWN call's local rank
+    # (1, 2) -- unaffected by the turn-wide renumbering that only applies
+    # to what gets persisted.
+    for event in citation_events:
+        assert [c.rank for c in event.citations] == [1, 2]
+
+    message_id = next(e.message_id for e in events if isinstance(e, ChatMessageStart))
+    async with tenant_session(tenant_a) as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(MessageCitation)
+                    .where(MessageCitation.message_id == message_id)
+                    .order_by(MessageCitation.rank)
+                )
+            ).scalars()
+        )
+
+    assert len(rows) == 4
+    assert [row.rank for row in rows] == [1, 2, 3, 4]
+
+
 async def test_a_greeting_never_calls_retrieval_even_when_the_tool_is_available(
     tenant_a, owner_connection, monkeypatch
 ):
@@ -728,6 +789,13 @@ async def test_sse_stream_with_no_tool_call_has_no_citations_or_tool_call_events
     nothing is even offered without an `agent_tools` row), so this seeds the
     tool explicitly to prove the stronger claim -- the model's own choice,
     not the tool's absence, is what keeps the stream this short.
+
+    Review round 1, minor finding: an earlier version of this test asserted
+    only the event sequence, so mutating `ChatService.send` to always
+    resolve `tool_names=[]` (silently never offering ANY tool to ANY
+    turn) would still pass it -- indistinguishable from the model
+    choosing not to call an available tool. The `provider.last_request.
+    tools` assertion below is what tells those two apart.
     """
     token = await _register(api_client, "rag-no-call@example.com", "Ada Motors No Call")
     org_id = await _organization_id(api_client, token)
@@ -736,7 +804,8 @@ async def test_sse_stream_with_no_tool_call_has_no_citations_or_tool_call_events
         organization_id=org_id, user_id=None, role=MembershipRole.OWNER, request_id="test"
     )
     await enable_builtin_tool(owner_connection, tenant, agent_id)
-    app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(turns=["hi"])
+    provider = FakeProvider(turns=["hi"])
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: provider
 
     response = await api_client.post(
         CHAT_URL, json={"agent_id": str(agent_id), "message": "hello"}, headers=_auth(token)
@@ -744,3 +813,6 @@ async def test_sse_stream_with_no_tool_call_has_no_citations_or_tool_call_events
 
     events = _parse_events(response.text)
     assert [e["type"] for e in events] == ["message_start", "text_delta", "message_end"]
+    assert provider.last_request is not None
+    assert provider.last_request.tools is not None
+    assert [t.name for t in provider.last_request.tools] == ["retrieve_knowledge"]

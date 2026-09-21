@@ -96,14 +96,17 @@ class RetrieveKnowledgeTool(AgentTool):
             request_id=ctx.request_id,
         )
 
-        # See `app/chat/service.py::_retrieve_context`'s docstring for why
-        # this savepoint exists verbatim -- the same hazard, one layer
-        # further from whoever owns the session. Postgres aborts the whole
-        # surrounding transaction on any statement error, not just the
-        # failing one, so without this a single bad row (a wrong-dimension
-        # embedding, a momentarily-unavailable `vector` extension) would
-        # poison every later statement the *caller's* transaction runs --
-        # the conversation's own history/usage writes included -- over a
+        # `self.session` is `ChatService.session` -- shared across every
+        # tool call this whole turn makes (see `app/chat/service.py`'s
+        # `_LockedSessionTool`, which serializes concurrent access to it
+        # rather than giving each call its own session, precisely so a
+        # write earlier in this same turn stays visible to a later call).
+        # Postgres aborts the whole surrounding transaction on any
+        # statement error, not just the failing one, so without this
+        # savepoint a single bad row (a wrong-dimension embedding, a
+        # momentarily-unavailable `vector` extension) would poison every
+        # later statement the *caller's* transaction runs -- the
+        # conversation's own history/usage writes included -- over a
         # single tool call the model made. `begin_nested()` opens a SAVEPOINT
         # scoped to this block; SQLAlchemy rolls back to it automatically
         # when an exception propagates out of the `async with`, leaving the

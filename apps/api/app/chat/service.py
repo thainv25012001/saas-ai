@@ -1,3 +1,4 @@
+import asyncio
 import re
 import time
 import uuid
@@ -6,6 +7,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,28 +46,26 @@ from app.llm.types import Message as LLMMessage
 from app.llm.types import ToolUseBlock, Usage
 from app.prompts.defaults import DEFAULT_SALES_SYSTEM_PROMPT
 from app.prompts.service import PromptService
-from app.rag.retrieve import CitationPayload
-from app.tools.base import ToolContext, ToolResult
+from app.rag.retrieve import CitationPayload, _excerpt
+from app.tools.base import AgentTool, ToolContext, ToolResult
 from app.tools.leads import CreateLeadTool
 from app.tools.registry import ToolRegistry
 from app.tools.retrieve import RetrieveKnowledgeTool
 
 logger = get_logger(__name__)
 
-# A preview only -- the SSE `citations` payload deliberately does not carry
-# the full chunk (see `ChatCitations`'s docstring below), and `tool_call_end`
-# deliberately does not carry a tool's full result payload either, for the
-# same reason -- a tool result can be a multi-kilobyte assembled context
-# block (`assemble_context`'s whole output, for `retrieve_knowledge`), and
-# shipping that twice per turn (once as the model's own context, once again
-# over SSE for a UI card) buys nothing the UI needs beyond "did it work, and
-# roughly what came back". Mirrors `app/rag/retrieve.py`'s own
-# `_EXCERPT_MAX_CHARS`/`_excerpt` (used there for `CitationPayload.excerpt`)
-# rather than importing that module's private helper: the two operate on
-# different inputs (a tool's plain-text result vs. a `RetrievedChunk`) and
-# keeping this one local avoids a chat-module -> rag-module dependency for a
-# single integer and a slice.
-_EXCERPT_MAX_CHARS = 240
+# `tool_call_end` deliberately does not carry a tool's full result payload
+# on the wire, the same reason `ChatCitations` carries an excerpt rather
+# than a full chunk -- a tool result can be a multi-kilobyte assembled
+# context block (`assemble_context`'s whole output, for
+# `retrieve_knowledge`), and shipping that twice per turn (once as the
+# model's own context, once again over SSE for a UI card) buys nothing the
+# UI needs beyond "did it work, and roughly what came back". Reuses
+# `app/rag/retrieve.py`'s own `_EXCERPT_MAX_CHARS`/`_excerpt` directly
+# (imported above) rather than a second, byte-identical copy: both operate
+# on a plain `str` (one truncates `ToolResult.content`, the other
+# `RetrievedChunk.content`) and there is no reason for the bound or the
+# truncation shape to ever drift between the two call sites.
 
 # PHASE-2.md §6: "the last `history_window` turns (config, default 20)".
 # There is no dedicated schema column for this yet (see `agent_configs` in
@@ -96,12 +96,6 @@ def _render_template(template: str, variables: Mapping[str, str]) -> str:
         return variables.get(match.group(1), match.group(0))
 
     return _VARIABLE_PATTERN.sub(_substitute, template)
-
-
-def _excerpt(text: str) -> str:
-    if len(text) <= _EXCERPT_MAX_CHARS:
-        return text
-    return text[:_EXCERPT_MAX_CHARS].rstrip() + "..."
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +247,99 @@ def _serialize_tool_result(result: ToolResult) -> dict[str, Any]:
     }
 
 
+class _LockedSessionTool(AgentTool):
+    """Wraps a Phase 4 builtin so every call serializes its use of the
+    turn's shared session behind `lock`, instead of touching it with true,
+    unguarded concurrency.
+
+    This is the fix for a Critical finding in Task 7's first review round:
+    `_build_registry` used to hand `RetrieveKnowledgeTool`/`CreateLeadTool`
+    the same `AsyncSession` (`ChatService.session`) at construction, and
+    `AgentRunner.run` gathers every call within one step concurrently
+    (`asyncio.gather`). `AsyncSession` is not safe for concurrent use: two
+    tool bodies both opening `session.begin_nested()` on that one shared
+    session raced each other, and the loser corrupted -- sometimes
+    surfacing as a fabricated `is_error=True` for a tool that never
+    actually failed (`ToolRegistry.execute`'s generic exception handler
+    swallowing the SQLAlchemy state error), sometimes as a raw
+    `IllegalStateChangeError` escaping the whole turn.
+
+    **Why the fix is a lock, not a session per call.** The first attempt
+    gave each call an independent session opened fresh from the engine
+    (`tenant_session`, its own transaction). That closes the corruption bug
+    but breaks something else that was quietly relying on the shared
+    session: `create_lead` on a visitor's very first message needs to see
+    THIS turn's own just-created `conversations` row so
+    `LeadService.create`'s FK-bypass-guarding `SELECT` finds it -- and that
+    row is only `flush()`-ed, not committed, until the whole turn's
+    transaction (owned by whoever called `ChatService.send`) finishes. A
+    genuinely independent transaction cannot see it: Postgres has no way to
+    let one uncommitted transaction read another's uncommitted rows, so
+    "give each call its own session" and "a tool started this same turn can
+    read what an earlier tool/append_message call in this same turn just
+    wrote" are mutually exclusive -- confirmed the hard way, by running
+    exactly that scenario (a fresh conversation, `create_lead` called in
+    the very first turn) against the per-call-session version and watching
+    `LeadService.create` raise `NotFoundError` for a conversation that
+    unquestionably exists, just not yet committed.
+
+    A single shared connection cannot physically run two queries at once
+    either way, so "true" concurrent database access from two calls in the
+    same step was never achievable without one of them waiting -- the only
+    question was whether that wait was safe (a lock) or a race
+    (`begin_nested()` on a session with no serialization at all, the
+    original bug). Serializing access to the ONE genuinely shared,
+    non-concurrency-safe resource -- and only that -- preserves every
+    guarantee `docs/ARCHITECTURE.md` §7.3 actually names for the loop
+    itself, which `AgentRunner` still provides completely unmodified:
+    calls are still dispatched together via `asyncio.gather`, one call's
+    exception still cannot abort its sibling
+    (`return_exceptions=True`), and results are still correlated by id,
+    never position. What is serialized is purely how two tool bodies take
+    turns on one non-thread-safe database session -- an implementation
+    detail of talking to Postgres, not a property of the loop.
+
+    `name`/`description`/`args_model`/`timeout_seconds` are read straight
+    off the wrapped class -- every Phase 4 tool declares them as class
+    attributes (see e.g. `RetrieveKnowledgeTool.name`), not instance state,
+    so no instance is needed to know them. The wrapped tool itself is
+    constructed once, per turn (not per call): it is stateless beyond the
+    session and (for `RetrieveKnowledgeTool`) an optional embedder, and
+    reusing it holds no more risk than reusing the session it already
+    shares with every other call this turn makes.
+    """
+
+    def __init__(
+        self, tool_cls: type[AgentTool], session: AsyncSession, lock: asyncio.Lock
+    ) -> None:
+        self.name = tool_cls.name
+        self.description = tool_cls.description
+        self.args_model = tool_cls.args_model
+        self.timeout_seconds = tool_cls.timeout_seconds
+        # Every Phase 4 builtin's constructor takes the session as its sole
+        # required argument (see `RetrieveKnowledgeTool`/`CreateLeadTool`)
+        # -- not expressible on the `AgentTool` ABC itself, which declares
+        # no `__init__` at all, a tool's construction requirements being
+        # its own business and not the interface's.
+        self._inner = tool_cls(session)  # type: ignore[call-arg]
+        self._lock = lock
+
+    async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolResult:
+        # Holds the lock for the tool's ENTIRE execution, not just its
+        # database statements -- simpler and still correct, at the cost of
+        # serializing any non-DB work a future tool body might do (a
+        # rate-limit check, say) alongside its DB work too. `duration_ms`
+        # therefore measures this call's full wall-clock time including any
+        # wait for a sibling call already holding the lock, which is the
+        # honest figure for "how long did this call take" from the model's
+        # and the UI's point of view, not merely its own database time.
+        started = time.monotonic()
+        async with self._lock:
+            result = await self._inner.execute(args, ctx)
+        duration_ms = int((time.monotonic() - started) * 1000)
+        return result.model_copy(update={"duration_ms": duration_ms})
+
+
 class ChatService:
     """Turns an agent, its configured prompt, and a user message into a
     streamed reply that is persisted with usage and cost.
@@ -338,6 +425,32 @@ class ChatService:
         else:
             assert conversation_id is not None
             conversation = await self._conversations.get(conversation_id)
+            if conversation.agent_id != agent_id:
+                # Review round 1, Important finding 2: this used to be
+                # silently tolerated -- `agent`/`provider_name`/`model_name`/
+                # `system_prompt` above are all already resolved from the
+                # REQUEST's `agent_id`, not `conversation.agent_id`, so a
+                # caller who names a `conversation_id` belonging to a
+                # different agent in the same org got that other agent's
+                # prompt, provider, model, temperature and max_tokens
+                # applied to it -- and, worse, any tool `agent_tools` grants
+                # to the REQUEST's agent but not the conversation's own
+                # (`create_lead`, say) ran anyway, because `ToolContext.
+                # agent_id` is `conversation.agent_id` (correctly
+                # server-derived, per the same review's confirmed-correct
+                # finding), so a lead the request's agent was never granted
+                # `create_lead` for could still be attributed to the
+                # conversation's agent, who never actually made the call.
+                # Rejecting outright, rather than silently preferring
+                # `conversation.agent_id` for everything, is deliberate: a
+                # mismatch here is a caller bug (or an attempt to borrow
+                # another agent's tool grants), not a case with a sensible
+                # default to fall back to. `NotFoundError`, not a more
+                # specific error, for the same reason `ConversationService.
+                # get` never distinguishes "not yours" from "does not
+                # exist" -- confirming which agents share an org is not
+                # this error's job to leak.
+                raise NotFoundError("conversation not found")
 
         # The assistant's message id is minted now, before its content is
         # known, so `ChatMessageStart` can tell the caller which message is
@@ -545,13 +658,36 @@ class ChatService:
                     cost_usd=cost,
                 )
             )
-            yield ChatMessageEnd(
-                usage=usage,
-                cost_usd=cost,
-                latency_ms=latency_ms,
-                model=model_used,
-                prompt_version_id=prompt_version_id,
-            )
+            if step_limit_hit:
+                # §5.1's pseudocode: `yield Error("step_limit_reached")`.
+                # Review round 1, Important finding 4: an earlier version of
+                # this method treated a step-limit hit as an ordinary
+                # success -- everything above (message, tool calls,
+                # citations, usage) is still persisted, because it is all
+                # real, but the client received a normal `message_end` for
+                # what could be a completely empty assistant message, with
+                # nothing on the wire distinguishing "the model finished"
+                # from "the loop gave up mid-thought". Yielding `ChatError`
+                # instead of `ChatMessageEnd` here is the explicit,
+                # in-band signal §4/§5.1 both call for; `finish_reason` on
+                # the persisted message (set above) is the same fact for
+                # anything reading history afterward.
+                yield ChatError(
+                    code="step_limit_reached",
+                    message=(
+                        f"The assistant reached its step limit "
+                        f"({config.max_agent_steps}) while still requesting "
+                        "tools and could not finish answering."
+                    ),
+                )
+            else:
+                yield ChatMessageEnd(
+                    usage=usage,
+                    cost_usd=cost,
+                    latency_ms=latency_ms,
+                    model=model_used,
+                    prompt_version_id=prompt_version_id,
+                )
         else:
             # Do not discard the partial reply: some of it already reached
             # the browser, so a history that disagrees with the screen is
@@ -659,20 +795,31 @@ class ChatService:
         return [name for name, enabled in resolved.items() if enabled]
 
     def _build_registry(self) -> ToolRegistry:
-        """Every Phase 4 builtin, registered fresh per turn.
+        """Every Phase 4 builtin, registered fresh per turn -- each wrapped
+        in `_LockedSessionTool`, sharing one `asyncio.Lock` created fresh
+        here, so no two calls this turn ever touch `self.session`
+        concurrently. See `_LockedSessionTool`'s docstring for why a lock,
+        not a session per call: `AsyncSession` is not safe for concurrent
+        use, `AgentRunner.run` gathers a step's calls with
+        `asyncio.gather`, and a genuinely independent per-call session
+        cannot see this same turn's own not-yet-committed writes (the
+        conversation `create_lead` needs to find on a visitor's very first
+        message).
+
+        One lock per turn, not one global lock: two DIFFERENT turns (two
+        different `ChatService.send()` calls, each with its own session)
+        must never contend on each other's lock -- only calls sharing the
+        SAME session need to.
 
         Cheap: `ToolRegistry.register` does no I/O, only the
         tenant-leak-check on each `args_model` (already paid once per class
         at import time in practice, since Python caches the class object --
-        this just re-runs it). Both tools are handed `self.session` --
-        the caller's own, already tenant-bound session -- not one either
-        tool opens for itself, so their own `begin_nested()` savepoints (see
-        each tool's docstring) protect *this* turn's surrounding
-        transaction.
+        this just re-runs it).
         """
+        lock = asyncio.Lock()
         registry = ToolRegistry()
-        registry.register(RetrieveKnowledgeTool(self.session))
-        registry.register(CreateLeadTool(self.session))
+        registry.register(_LockedSessionTool(RetrieveKnowledgeTool, self.session, lock))
+        registry.register(_LockedSessionTool(CreateLeadTool, self.session, lock))
         return registry
 
     async def _assert_message_belongs_to_tenant(self, message_id: uuid.UUID) -> None:
@@ -710,6 +857,11 @@ class ChatService:
         UI's own transcript view read the complete payload from, while the
         model (via history) and the live stream (via `ChatToolCallResult`)
         both see a bounded version.
+
+        `duration_ms` comes straight off `record.result` -- populated by
+        `_LockedSessionTool.execute`, which times the whole call (including
+        any wait for a sibling call holding the shared session's lock), not
+        measured here.
         """
         if not records:
             return
@@ -727,6 +879,7 @@ class ChatService:
                     result=_serialize_tool_result(record.result),
                     is_error=record.result.is_error,
                     error_message=record.result.content if record.result.is_error else None,
+                    duration_ms=record.result.duration_ms,
                 )
                 for record in records
             ]
@@ -749,6 +902,25 @@ class ChatService:
         NULL`: a re-ingest or a document delete nulls them out and the
         citation has to stay legible on its own. See `MessageCitation`'s
         own docstring.
+
+        `rank` is renumbered sequentially across `chunks` here
+        (`enumerate(chunks, start=1)`), not read off `chunk.rank` --
+        review round 1, Important finding 3. `chunk.rank` is *per-call*
+        (`RetrievalService.retrieve` numbers each call's own results
+        `1..top_k`), and `chunks` here is the whole turn's citations
+        accumulated across every `retrieve_knowledge` call the model made
+        (`ChatService.send` extends `citations` once per qualifying
+        `AgentToolCallEnd`) -- persisting `chunk.rank` unchanged meant a
+        turn with two calls, each returning two results, wrote ranks
+        `[1, 1, 2, 2]`, not `[1, 2, 3, 4]`. There is no unique constraint on
+        `(message_id, rank)` to have caught this; renumbering at the one
+        place these are actually persisted is what makes "rank" mean
+        "this citation's position among everything this message cited",
+        which is what a UI listing a message's sources needs it to mean.
+        The SSE-facing `ChatCitations` events themselves are unaffected --
+        each is emitted per call and keeps that call's own local rank,
+        which is correct there: one event describes one call's own ranked
+        results, not the whole turn's.
         """
         if not chunks:
             return
@@ -764,10 +936,10 @@ class ChatService:
                     document_id=chunk.document_id,
                     document_title=chunk.document_title,
                     excerpt=chunk.excerpt,
-                    rank=chunk.rank,
+                    rank=rank,
                     score=chunk.score,
                 )
-                for chunk in chunks
+                for rank, chunk in enumerate(chunks, start=1)
             ]
         )
         await self.session.flush()

@@ -270,9 +270,14 @@ async def ingest_document(
     # `uq_chunk_document_index`, and its own failure transaction then
     # overwrites the winner's committed `ready` with `failed`. Everything
     # downstream -- the Knowledge page's badge, the retry gate, and
-    # `ChatService._retrieve_context`'s `status=READY` readiness check --
-    # reads that field, so a single-document organization silently loses
-    # grounding while its corpus sits there intact. Serialising is cheaper
+    # `RetrievalService`'s own `d.status = 'ready'` filter (both queries in
+    # `app/rag/retrieve.py`, consulted every time the `retrieve_knowledge`
+    # tool runs -- Phase 4 removed the separate `ChatService`-owned
+    # readiness gate this comment used to name; retrieval is opt-in per
+    # turn now, but a document's `ready` status still gates whether its
+    # chunks are ever retrievable at all) -- reads that field, so a
+    # single-document organization silently loses grounding while its
+    # corpus sits there intact. Serialising is cheaper
     # than tolerating: the second job simply re-ingests over the first,
     # which `replace_chunks` already does correctly.
     #
