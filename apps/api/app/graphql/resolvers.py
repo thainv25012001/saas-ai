@@ -279,8 +279,25 @@ class Query:
         """The dashboard's Task 8 toggle surface: every builtin this agent
         could call, and whether it currently may. See
         `AgentService.list_tools` for the shadowing rule and what
-        `is_enabled` means when the agent has no link to a tool at all."""
-        pairs = await _agents(info).list_tools(agent_id)
+        `is_enabled` means when the agent has no link to a tool at all.
+
+        An `agent_id` belonging to another organization (or not existing)
+        returns an empty list, exactly like `leads` and `conversations`
+        above -- whole-branch review, Important 5. `AgentService.list_tools`
+        still raises underneath, via its `get_agent` ownership check; that
+        distinction is what must not reach a client, and it is the *query*
+        convention being reconciled here, not the service's. These two
+        queries were added in the same commit, take the same `agentId`, and
+        are rendered on adjacent pages, so one returning an empty table
+        while the other rendered a red error was the narrow version of the
+        codebase-wide split the ledger defers to Phase 5. `setAgentToolEnabled`
+        keeps raising: a mutation that silently did nothing would be worse
+        than one that says it could not.
+        """
+        try:
+            pairs = await _agents(info).list_tools(agent_id)
+        except NotFoundError:
+            return []
         return [gql.AgentTool.from_pair(tool, is_enabled) for tool, is_enabled in pairs]
 
 

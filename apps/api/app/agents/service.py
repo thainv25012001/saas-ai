@@ -210,7 +210,18 @@ class AgentService:
             select(Tool, AgentToolLink.is_enabled)
             .outerjoin(
                 AgentToolLink,
-                (AgentToolLink.tool_id == Tool.id) & (AgentToolLink.agent_id == agent_id),
+                (AgentToolLink.tool_id == Tool.id)
+                & (AgentToolLink.agent_id == agent_id)
+                # Layer 1 (`docs/ARCHITECTURE.md` §2.3), in the ON clause and
+                # not the WHERE: a LEFT JOIN whose tenant predicate sits in
+                # WHERE silently becomes an INNER JOIN, dropping every tool
+                # the agent has no link to at all -- which is exactly the row
+                # this query exists to report as `is_enabled: false`. RLS
+                # (layer 2) is not the only thing standing between this join
+                # and another organization's link row; see
+                # `tests/integration/test_agent_tools_layer_1.py`, which
+                # isolates this predicate from RLS on an `app_owner` session.
+                & (AgentToolLink.organization_id == self.tenant.organization_id),
             )
             .where(
                 Tool.type == ToolType.BUILTIN,
@@ -263,6 +274,16 @@ class AgentService:
             select(AgentToolLink).where(
                 AgentToolLink.agent_id == agent_id,
                 AgentToolLink.tool_id == tool_id,
+                # Layer 1 (§2.3), the sibling of the predicate `list_tools`
+                # above and `ChatService._resolve_enabled_tool_names` both
+                # carry. Note what it converts: a row for this (agent, tool)
+                # labelled with ANOTHER organization is no longer found, so
+                # the upsert below attempts an INSERT and trips `agent_tools`'
+                # composite primary key instead of silently flipping a
+                # foreign tenant's row. A loud integrity error on a row that
+                # should not exist is the right end for that case; a silent
+                # cross-tenant write is not.
+                AgentToolLink.organization_id == self.tenant.organization_id,
             )
         )
         link = link_result.scalar_one_or_none()

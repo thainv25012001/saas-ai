@@ -175,7 +175,15 @@ async def test_disabling_an_already_linked_tool_flips_the_existing_row(api_clien
     assert by_name["retrieve_knowledge"]["isEnabled"] is False
 
 
-async def test_agent_tools_for_another_organizations_agent_is_not_found(api_client):
+async def test_another_organizations_agent_leaks_nothing_through_either_surface(api_client):
+    """The tenant boundary, pinned on both halves of Task 8's surface.
+
+    The QUERY returns an empty list (whole-branch review, Important 5 -- it
+    used to raise `not_found`, disagreeing with `leads`, which was added in
+    the same commit over the same argument). The MUTATION still raises:
+    silently doing nothing to a write request is worse than saying it could
+    not be done.
+    """
     owner_token = await _register(api_client, "tools-owner-a@example.com", "Tools Org A")
     owner_org_id = await _organization_id(api_client, owner_token)
     agent_id = await _agent(owner_org_id)
@@ -185,10 +193,18 @@ async def test_agent_tools_for_another_organizations_agent_is_not_found(api_clie
     response = await graphql(
         api_client, AGENT_TOOLS_QUERY, {"agentId": str(agent_id)}, _auth(other_token)
     )
-
     body = response.json()
-    assert body["data"] is None
-    assert body["errors"][0]["extensions"]["code"] == "not_found"
+    assert "errors" not in body, body
+    assert body["data"]["agentTools"] == []
+
+    mutation = await graphql(
+        api_client,
+        SET_TOOL_MUTATION,
+        {"agentId": str(agent_id), "toolId": str(uuid.uuid4()), "isEnabled": True},
+        _auth(other_token),
+    )
+    mutation_body = mutation.json()
+    assert mutation_body["errors"][0]["extensions"]["code"] == "not_found"
 
 
 async def test_set_agent_tool_enabled_requires_authentication(api_client):
@@ -200,3 +216,39 @@ async def test_set_agent_tool_enabled_requires_authentication(api_client):
 
     body = response.json()
     assert body["errors"][0]["extensions"]["code"] == "unauthenticated"
+
+
+LEADS_QUERY = """
+query Leads($agentId: UUID!) {
+  leads(agentId: $agentId) { id name }
+}
+"""
+
+
+async def test_a_foreign_agent_id_gives_both_new_queries_the_same_empty_answer(api_client):
+    """Whole-branch review, Important 5. `leads` and `agentTools` were added
+    in the same commit, take the same `agentId`, and are rendered on adjacent
+    pages -- and disagreed: one returned an empty list for another
+    organization's agent, the other a GraphQL error. Silent-empty is the
+    convention `conversations` and `documents` already follow, so that is the
+    one both now use. Asserted against a REAL second organization's agent id,
+    not a random UUID, so the test covers "exists but is not yours" and not
+    only "does not exist".
+    """
+    token_a = await _register(api_client, "coherence-a@example.com")
+    token_b = await _register(api_client, "coherence-b@example.com", org_name="Ada Motors B")
+    org_b = await _organization_id(api_client, token_b)
+    foreign_agent_id = await _agent(org_b)
+
+    tools = await graphql(
+        api_client, AGENT_TOOLS_QUERY, {"agentId": str(foreign_agent_id)}, _auth(token_a)
+    )
+    leads = await graphql(
+        api_client, LEADS_QUERY, {"agentId": str(foreign_agent_id)}, _auth(token_a)
+    )
+
+    tools_body, leads_body = tools.json(), leads.json()
+    assert "errors" not in tools_body, tools_body
+    assert "errors" not in leads_body, leads_body
+    assert tools_body["data"]["agentTools"] == []
+    assert leads_body["data"]["leads"] == []
