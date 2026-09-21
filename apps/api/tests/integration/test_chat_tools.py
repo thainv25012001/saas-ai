@@ -6,10 +6,20 @@ Every chat turn below scripts `FakeProvider` with `turns=`, not `script=`:
 this is what the Phase 4 testing note in `docs/PHASE-4.md` §3 calls out --
 a loop that runs "until the model stops asking for tools" cannot be tested
 against a fake that can never ask for one. `enable_builtin_tool` (from
-`tests/conftest.py`) gives a test agent an `agent_tools` row before any of
-that matters, since `ChatService._resolve_enabled_tool_names` (this task)
-reads that table, not a hard-coded list -- an agent with no such row is
-offered no tools at all, tool-calling model or not.
+`tests/conftest.py`) gives a test agent an ORG-SCOPED `agent_tools` row
+before any of that matters, since `ChatService._resolve_enabled_tool_names`
+(this task) reads that table, not a hard-coded list.
+
+Since Task 7b, `_agent()`/`AgentService.create_agent` already links every
+new agent to the GLOBAL `retrieve_knowledge` builtin by default (see
+`app/db/builtin_tools.py`), so a test below that also calls
+`enable_builtin_tool(..., tool_name="retrieve_knowledge")` is not creating
+that tool's availability from nothing -- it is adding a more specific,
+org-scoped link that *shadows* the default global one (same name, same
+resolved outcome; see `_resolve_enabled_tool_names`'s own docstring on
+shadowing). `create_lead` is NOT linked by default (task-7b-report.md), so
+tests that need it still call `enable_builtin_tool(..., tool_name=
+"create_lead")` for real.
 """
 
 import asyncio
@@ -90,42 +100,44 @@ async def _ready_document_with_chunks(
 # ---------------------------------------------------------------------------
 
 
-async def test_an_agent_with_no_agent_tools_row_is_offered_no_tools(tenant_a):
+async def test_an_agent_created_normally_resolves_the_default_builtin_tool(tenant_a):
+    """`AgentService.create_agent` (Task 7b) links the default builtin in
+    the same flush as the config row, so an agent created the normal way
+    -- no `enable_builtin_tool` fixture call in sight -- is never offered
+    nothing. See `app/db/builtin_tools.py` and task-7b-report.md for why
+    `retrieve_knowledge` specifically."""
     async with tenant_session(tenant_a) as session:
         agent = await _agent(session, tenant_a)
+        names = await ChatService(session, tenant_a)._resolve_enabled_tool_names(agent.id)
+    assert names == ["retrieve_knowledge"]
+
+
+async def test_an_agent_with_its_tool_links_explicitly_removed_is_offered_no_tools(tenant_a):
+    """The no-implicit-fallback half of Task 7b's design (task-7b-report.md
+    §"pre-existing agents"): `agent_tools` rows are the single source of
+    truth, with nothing in `_resolve_enabled_tool_names` treating "no rows"
+    as "every builtin". An agent whose links were deliberately all removed
+    must stay offered nothing, not silently regain the default."""
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+        await session.execute(
+            text("DELETE FROM agent_tools WHERE agent_id = :id"), {"id": agent.id}
+        )
+        await session.flush()
         names = await ChatService(session, tenant_a)._resolve_enabled_tool_names(agent.id)
     assert names == []
 
 
-async def test_global_builtin_tool_is_resolved_when_no_org_override_exists(
-    tenant_a, owner_connection
-):
-    global_id = uuid7()
-    await owner_connection.execute(
-        text(
-            "INSERT INTO tools (id, organization_id, name, type, config, is_enabled) "
-            "VALUES (:id, NULL, 'retrieve_knowledge', 'builtin', '{}', true)"
-        ),
-        {"id": global_id},
-    )
-    await owner_connection.commit()
-    try:
-        async with tenant_session(tenant_a) as session:
-            agent = await _agent(session, tenant_a)
-            await session.execute(
-                text(
-                    "INSERT INTO agent_tools "
-                    "(agent_id, tool_id, organization_id, is_enabled, overrides) "
-                    "VALUES (:agent_id, :tool_id, :org, true, '{}')"
-                ),
-                {"agent_id": agent.id, "tool_id": global_id, "org": tenant_a.organization_id},
-            )
-            await session.flush()
-            names = await ChatService(session, tenant_a)._resolve_enabled_tool_names(agent.id)
-        assert names == ["retrieve_knowledge"]
-    finally:
-        await owner_connection.execute(text("DELETE FROM tools WHERE id = :id"), {"id": global_id})
-        await owner_connection.commit()
+async def test_global_builtin_tool_is_resolved_when_no_org_override_exists(tenant_a):
+    """Since Task 7b, `create_agent` itself is what links the agent to the
+    global builtin (seeded once by migration 0009, not fabricated per test
+    the way this test used to) -- so this scenario now falls straight out
+    of creating an agent normally, with no org-scoped row anywhere to
+    shadow it."""
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+        names = await ChatService(session, tenant_a)._resolve_enabled_tool_names(agent.id)
+    assert names == ["retrieve_knowledge"]
 
 
 async def test_disabled_agent_tools_link_excludes_the_tool(tenant_a, owner_connection):
@@ -144,7 +156,9 @@ async def test_non_builtin_tool_type_is_never_offered_to_the_model(tenant_a):
     MCP is explicitly Phase 6), so a `type='http'` row -- legal per Task 3's
     schema, and exactly what `test_tool_schema.py`'s own fixtures create --
     must never reach the model as an offered tool: nothing could ever answer
-    the call."""
+    the call. `["retrieve_knowledge"]`, not `[]`: since Task 7b, `_agent()`
+    already links the default builtin -- this proves the http-type row is
+    excluded ON TOP of that, not that nothing at all is offered."""
     async with tenant_session(tenant_a) as session:
         agent = await _agent(session, tenant_a)
         http_tool_id = uuid7()
@@ -165,67 +179,54 @@ async def test_non_builtin_tool_type_is_never_offered_to_the_model(tenant_a):
         )
         await session.flush()
         names = await ChatService(session, tenant_a)._resolve_enabled_tool_names(agent.id)
-    assert names == []
+    assert names == ["retrieve_knowledge"]
 
 
-async def test_org_scoped_tool_link_shadows_a_global_builtin_of_the_same_name(
-    tenant_a, owner_connection
-):
+async def test_org_scoped_tool_link_shadows_a_global_builtin_of_the_same_name(tenant_a):
     """The shadowing decision `_resolve_enabled_tool_names` documents: an
     org-scoped `tools` row of the same name as a global builtin fully
     replaces it for this agent, including whether the agent may call it at
-    all. Here the org-scoped link is *disabled* while a separate link to the
-    (enabled) global builtin exists -- proving the disabled, more specific
-    row wins rather than the tool falling back to the enabled global one.
+    all. Here the org-scoped link is *disabled* while a separate link to
+    the (enabled) global builtin exists -- proving the disabled, more
+    specific row wins rather than the tool falling back to the enabled
+    global one.
 
-    Fail-check performed by hand: with the shadowing loop's `if name in
-    shadowed: continue` guard removed, both rows are folded into the same
-    dict key in row order and the *last* row processed wins regardless of
-    scope -- since `ORDER BY ... organization_id IS NULL` still places the
-    org-scoped row first, the global (enabled) row would be processed
-    second and overwrite it, resolving to `["retrieve_knowledge"]` instead
-    of `[]`. Restored afterwards.
+    Since Task 7b, `_agent()` itself is what creates the enabled link to
+    the global builtin (no manual insert needed any more -- migration 0009
+    seeds the one global `retrieve_knowledge` row every test in this suite
+    shares); this test only needs to add the org-scoped, disabled
+    counterpart on top of it.
+
+    Fail-check performed by hand (still valid against the new setup): with
+    the shadowing loop's `if name in shadowed: continue` guard removed,
+    both rows are folded into the same dict key in row order and the
+    *last* row processed wins regardless of scope -- since `ORDER BY ...
+    organization_id IS NULL` still places the org-scoped row first, the
+    global (enabled) row would be processed second and overwrite it,
+    resolving to `["retrieve_knowledge"]` instead of `[]`. Restored
+    afterwards.
     """
-    global_id = uuid7()
-    await owner_connection.execute(
-        text(
-            "INSERT INTO tools (id, organization_id, name, type, config, is_enabled) "
-            "VALUES (:id, NULL, 'retrieve_knowledge', 'builtin', '{}', true)"
-        ),
-        {"id": global_id},
-    )
-    await owner_connection.commit()
-    try:
-        async with tenant_session(tenant_a) as session:
-            agent = await _agent(session, tenant_a)
-            org_tool_id = uuid7()
-            await session.execute(
-                text(
-                    "INSERT INTO tools (id, organization_id, name, type, config, is_enabled) "
-                    "VALUES (:id, :org, 'retrieve_knowledge', 'builtin', '{}', true)"
-                ),
-                {"id": org_tool_id, "org": tenant_a.organization_id},
-            )
-            await session.execute(
-                text(
-                    "INSERT INTO agent_tools "
-                    "(agent_id, tool_id, organization_id, is_enabled, overrides) "
-                    "VALUES (:agent_id, :org_tool_id, :org, false, '{}'), "
-                    "(:agent_id, :global_tool_id, :org, true, '{}')"
-                ),
-                {
-                    "agent_id": agent.id,
-                    "org_tool_id": org_tool_id,
-                    "global_tool_id": global_id,
-                    "org": tenant_a.organization_id,
-                },
-            )
-            await session.flush()
-            names = await ChatService(session, tenant_a)._resolve_enabled_tool_names(agent.id)
-        assert names == []
-    finally:
-        await owner_connection.execute(text("DELETE FROM tools WHERE id = :id"), {"id": global_id})
-        await owner_connection.commit()
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+        org_tool_id = uuid7()
+        await session.execute(
+            text(
+                "INSERT INTO tools (id, organization_id, name, type, config, is_enabled) "
+                "VALUES (:id, :org, 'retrieve_knowledge', 'builtin', '{}', true)"
+            ),
+            {"id": org_tool_id, "org": tenant_a.organization_id},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO agent_tools "
+                "(agent_id, tool_id, organization_id, is_enabled, overrides) "
+                "VALUES (:agent_id, :org_tool_id, :org, false, '{}')"
+            ),
+            {"agent_id": agent.id, "org_tool_id": org_tool_id, "org": tenant_a.organization_id},
+        )
+        await session.flush()
+        names = await ChatService(session, tenant_a)._resolve_enabled_tool_names(agent.id)
+    assert names == []
 
 
 # ---------------------------------------------------------------------------

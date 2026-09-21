@@ -231,3 +231,34 @@ apps/web/src/app/dashboard/leads/page.tsx      # Task 8
 - [ ] Whole-branch review, one fix wave, one scoped re-review, adjudicate residuals.
 - [ ] Update `ARCHITECTURE.md` §9 and the README; record in `PHASE-4.md` anything not delivered.
 - [ ] Push and open a PR.
+
+---
+
+### Task 7b: Make the tools reachable
+
+**Added mid-phase.** Task 7's review found Phase 4 ships *inert*: on a freshly migrated database `tools` has zero rows, `agent_tools` has zero rows, nothing in the codebase can create them outside `tests/conftest.py`, and an agent created the normal way is offered no tools at all. The plan's own end-to-end verification cannot pass by any route a user or operator has.
+
+Worse, `agent_configs.enabled_tool_names` — which `ARCHITECTURE.md` §5.1 names as *the* resolution source, which `create_agent` initialises, and which `updateAgentConfig` exposes over GraphQL — is read by nothing. It is a writable field that silently does nothing.
+
+**Files:** create `apps/api/alembic/versions/0009_seed_builtin_tools.py`; modify `app/agents/service.py`, and whichever of `app/graphql/` and `app/db/models/agent.py` the decision below requires; test `tests/integration/test_builtin_tools.py`, extend `tests/integration/test_agent_service.py`.
+
+**Decision this task must make first — it is a design call, not a data insert.** `docs/ARCHITECTURE.md` §3.6 defines `agent_tools` (carrying `overrides`, per-agent `is_enabled`, and the shadowing semantics Task 7 implemented); §5.1 instead resolves from `config.enabled_tool_names`. Both exist; only the first is read. Keep `agent_tools` as the source of truth — it is richer and already implemented — and resolve `enabled_tool_names` one of two ways:
+- remove it from the writable GraphQL surface and from `AgentConfig`, or
+- keep the field and translate writes into `agent_tools` rows.
+**No writable field may silently do nothing.** Whichever you choose, amend §5.1 so the spec names the mechanism that actually runs, and say in the report why you chose it.
+
+**Requirements:**
+- **Global builtin `tools` rows are seeded by a data migration**, not the dev seed script: they are platform-global rather than per-org, `uq_tool_global_name` makes the insert idempotent, and a script under `app/db/seed.py` cannot reach staging or production. Seed `retrieve_knowledge` and `create_lead` with `organization_id = NULL`, `type = builtin`, and descriptions that match the tools' own.
+- **`AgentService.create_agent` links the default tools**, in the same flush as the `AgentConfig` row, so every new agent works out of the box. Decide and document which builtins are on by default — `retrieve_knowledge` is uncontroversial; `create_lead` writes data on a visitor's say-so, so argue the default rather than assuming it.
+- Existing agents created before this migration must also work. Say whether the migration backfills `agent_tools` for them, or whether resolution treats an agent with no links as "all enabled builtins", and why.
+- The seed migration must be safe to re-run: `downgrade` then `upgrade` must not duplicate rows or orphan links.
+
+**Tests:**
+1. On a freshly migrated database, `tools` contains both builtins with `organization_id IS NULL`.
+2. An agent created through `AgentService.create_agent` resolves a non-empty tool list, and a chat turn through `ChatService` reaches the provider with `tools` set — **this is the test that proves the phase is no longer inert**, so assert on the captured `CompletionRequest`, not on row counts.
+3. The migration round-trips without duplicating rows.
+4. Whatever you decide about `enabled_tool_names` is pinned: if removed, nothing references it; if translated, a write through `updateAgentConfig` changes what the model is offered.
+5. An agent predating the migration behaves per your documented choice.
+6. Tenancy holds: one org's agent cannot resolve another org's tool rows, and builtins remain visible to both.
+
+- [ ] Tests first, watch them fail, implement, migrate, gates, commit.

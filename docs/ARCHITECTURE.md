@@ -223,7 +223,7 @@ agents
 
 agent_configs                       -- 1:1 with agents; behaviour, not identity
   id, agent_id (unique), persona, tone, language, greeting, fallback_message,
-  enabled_tool_names text[], retrieval_top_k, retrieval_min_score,
+  retrieval_top_k, retrieval_min_score,
   max_agent_steps, guardrails jsonb, variables jsonb, created_at, updated_at
 
 prompts                             -- a named slot, e.g. "sales_system"
@@ -339,6 +339,30 @@ leads
   status enum(new, contacted, qualified, won, lost), score, source,
   metadata jsonb, created_at, updated_at
 ```
+
+**Seeding.** `retrieve_knowledge` and `create_lead` are seeded once as global
+(`organization_id IS NULL`) `builtin` rows by a data migration
+(`0009_seed_builtin_tools`), not by `app/db/seed.py` — a dev seed script
+cannot reach staging or production, and these two rows must exist
+everywhere `tools` does. `uq_tool_global_name` makes the insert idempotent;
+each row's `description` is a literal copy of the tool class's own
+`description`, pinned against drift by
+`tests/integration/test_builtin_tools.py`.
+
+`AgentService.create_agent` links a new agent to the default-enabled
+builtins (`app/db/builtin_tools.DEFAULT_ENABLED_TOOL_NAMES`) in the same
+flush as its `AgentConfig` row, so a normally-created agent is never
+offered nothing. Only `retrieve_knowledge` is on by default — a pure read
+with no risk; `create_lead` writes a real record on an anonymous visitor's
+say-so and stays off until an agent's `agent_tools` rows are edited
+directly (Phase 4 ships no dashboard/GraphQL surface for that yet). See
+task-7b-report.md for the full argument.
+
+The same migration backfills `agent_tools` for every agent that predates
+it, onto the identical default set — `_resolve_enabled_tool_names` (§5.1)
+carries no "no rows means every builtin" fallback, so an agent's `tools`
+resolution depends only on what `agent_tools` actually says, never on when
+the agent was created.
 
 ### 3.7 Evaluation
 
@@ -487,7 +511,8 @@ async def run(self, ctx: AgentContext) -> AsyncIterator[AgentEvent]:
     config   = await self.agents.get_config(agent.id)
     version  = await self.prompts.active_version(agent.prompt_id)
     system   = render(version.system_prompt, self.build_variables(ctx, agent))
-    tools    = self.registry.specs_for(agent, config.enabled_tool_names)
+    names    = await self.resolve_enabled_tool_names(agent.id)   # agent_tools ⋈ tools, §3.6
+    tools    = self.registry.specs_for(names)
     messages = await self.history.build(ctx.conversation_id, ctx.user_message)
 
     for step in range(config.max_agent_steps):          # hard cap, default 5
@@ -514,6 +539,20 @@ async def run(self, ctx: AgentContext) -> AsyncIterator[AgentEvent]:
 
     await self.persist(ctx, messages, usage, version.id)
 ```
+
+**Tool resolution.** `resolve_enabled_tool_names` (`ChatService.
+_resolve_enabled_tool_names` in the actual implementation) is a join of
+`agent_tools` to `tools` (§3.6) under the two-layer tenancy predicate
+(§2.3), not a read of a config column: an agent may call a builtin only if
+an enabled `agent_tools` row links it there, and an org-scoped `tools` row
+fully shadows a global builtin of the same name for that agent — see that
+method's own docstring for the shadowing rule and why it exists. An
+earlier draft of this section named `agent_configs.enabled_tool_names` as
+the resolution source instead; that column was never read by anything,
+Task 7b's review caught it, and the column has since been dropped rather
+than wired up — `agent_tools` was already the richer, already-implemented
+mechanism, so it stayed the one source of truth instead of gaining a
+second, translated one. See task-7b-report.md for the full argument.
 
 ### 5.2 How the agent makes each required decision
 

@@ -20,7 +20,6 @@ type AgentConfig {
   persona: String
   greeting: String
   fallbackMessage: String!
-  enabledToolNames: [String!]!
   retrievalTopK: Int!
   retrievalMinScore: Float!
   maxAgentSteps: Int!
@@ -211,7 +210,6 @@ input UpdateAgentConfigInput {
   language: String = null
   greeting: String = null
   fallbackMessage: String = null
-  enabledToolNames: [String!] = null
   retrievalTopK: Int = null
   retrievalMinScore: Float = null
   maxAgentSteps: Int = null

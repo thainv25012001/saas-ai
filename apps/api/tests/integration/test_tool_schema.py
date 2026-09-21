@@ -31,12 +31,20 @@ pytestmark = pytest.mark.anyio
 async def tools_global_and_scoped(owner_connection, tenant_a, tenant_b):
     """One global builtin (organization_id NULL) plus one tool scoped to
     tenant A. Inserted as app_owner, bypassing RLS entirely, matching the
-    fixture style in test_isolation_layers.py."""
+    fixture style in test_isolation_layers.py.
+
+    Named `probe_global_tool`, not `retrieve_knowledge`: migration 0009
+    (Task 7b) now seeds a REAL global `retrieve_knowledge` row on every
+    freshly migrated database, and `uq_tool_global_name` allows only one
+    global row per name -- reusing that name here would collide with it.
+    This fixture is about RLS visibility, not about any specific tool's
+    identity, so a fictitious name is exactly as good a probe.
+    """
     builtin_id, scoped_id = uuid7(), uuid7()
     await owner_connection.execute(
         text(
             "INSERT INTO tools (id, organization_id, name, type, config, is_enabled) "
-            "VALUES (:id, NULL, 'retrieve_knowledge', 'builtin', '{}', true)"
+            "VALUES (:id, NULL, 'probe_global_tool', 'builtin', '{}', true)"
         ),
         {"id": builtin_id},
     )
@@ -219,12 +227,16 @@ async def test_duplicate_global_tool_name_rejected(owner_connection):
 @pytest.fixture
 async def agents_and_agent_tools(owner_connection, tenant_a, tenant_b):
     """An agent plus an enabled agent_tools link in each of two orgs, and one
-    shared global tool both agents point at."""
+    shared global tool both agents point at.
+
+    Fictitious name (`probe_global_tool`), same reason as
+    `tools_global_and_scoped` above: migration 0009 now seeds a real global
+    `retrieve_knowledge` row, and `uq_tool_global_name` allows only one."""
     tool_id = uuid7()
     await owner_connection.execute(
         text(
             "INSERT INTO tools (id, organization_id, name, type, config, is_enabled) "
-            "VALUES (:id, NULL, 'retrieve_knowledge', 'builtin', '{}', true)"
+            "VALUES (:id, NULL, 'probe_global_tool', 'builtin', '{}', true)"
         ),
         {"id": tool_id},
     )

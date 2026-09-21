@@ -4,7 +4,7 @@ from typing import Any
 
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -72,9 +72,6 @@ class AgentConfig(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
         nullable=False,
         default="I don't have that information. Would you like me to connect you "
         "with someone who does?",
-    )
-    enabled_tool_names: Mapped[list[str]] = mapped_column(
-        ARRAY(String), nullable=False, default=list
     )
     retrieval_top_k: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     retrieval_min_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)

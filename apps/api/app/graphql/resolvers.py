@@ -297,7 +297,6 @@ class Mutation:
             language=input.language,
             greeting=input.greeting,
             fallback_message=input.fallback_message,
-            enabled_tool_names=input.enabled_tool_names,
             retrieval_top_k=input.retrieval_top_k,
             retrieval_min_score=input.retrieval_min_score,
             max_agent_steps=input.max_agent_steps,

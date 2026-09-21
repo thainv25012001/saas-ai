@@ -89,7 +89,6 @@ class AgentConfig:
     persona: str | None
     greeting: str | None
     fallback_message: str
-    enabled_tool_names: list[str]
     retrieval_top_k: int
     retrieval_min_score: float
     max_agent_steps: int
@@ -103,7 +102,6 @@ class AgentConfig:
             persona=model.persona,
             greeting=model.greeting,
             fallback_message=model.fallback_message,
-            enabled_tool_names=list(model.enabled_tool_names),
             retrieval_top_k=model.retrieval_top_k,
             retrieval_min_score=model.retrieval_min_score,
             max_agent_steps=model.max_agent_steps,
@@ -428,7 +426,6 @@ class UpdateAgentConfigInput:
     language: str | None = None
     greeting: str | None = None
     fallback_message: str | None = None
-    enabled_tool_names: list[str] | None = None
     retrieval_top_k: int | None = None
     retrieval_min_score: float | None = None
     max_agent_steps: int | None = None

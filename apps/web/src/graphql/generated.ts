@@ -26,7 +26,6 @@ export type MessageRole =
   | 'USER';
 
 export type UpdateAgentConfigInput = {
-  enabledToolNames?: Array<string> | null | undefined;
   fallbackMessage?: string | null | undefined;
   greeting?: string | null | undefined;
   language?: string | null | undefined;
