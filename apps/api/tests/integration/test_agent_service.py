@@ -1,5 +1,6 @@
 import pytest
 from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.schemas import UpdateAgentConfigInput, UpdateAgentInput
 from app.agents.service import AgentService
@@ -8,6 +9,7 @@ from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.core.tenancy import tenant_session
 from app.db.models import AgentToolLink, Tool
 from app.llm.fake_provider import FakeProvider
+from tests.conftest import enable_builtin_tool
 from tests.factories import agent_input
 
 pytestmark = pytest.mark.anyio
@@ -227,3 +229,39 @@ async def test_an_agent_with_its_tool_links_explicitly_cleared_is_offered_nothin
         await session.flush()
         names = await ChatService(session, tenant_a)._resolve_enabled_tool_names(agent.id)
     assert names == []
+
+
+async def test_set_tool_enabled_layer1_predicate_blocks_another_orgs_tool(
+    tenant_a, tenant_b, owner_connection
+):
+    """`AgentService.set_tool_enabled`'s tool lookup carries its own
+    `organization_id` predicate (`Tool.organization_id == self.tenant.
+    organization_id` OR `IS NULL`) -- Layer 1 of `docs/ARCHITECTURE.md`
+    §2.3, the same discipline `LeadService.list_for_agent`'s own docstring
+    names. Run through the normal `tenant_session` (RLS-bound), a version
+    of this test with the predicate removed would still pass: Postgres RLS
+    (Layer 2) blocks the SELECT from ever seeing another org's row
+    regardless of what the query itself asks for, which is exactly the gap
+    a review found by removing the predicate and watching every existing
+    test -- all of them RLS-protected -- stay green.
+
+    This test isolates Layer 1 by binding the session directly to
+    `owner_connection`, the `app_owner`-authenticated connection that
+    bypasses RLS entirely (matching `test_tool_schema.py`'s and `test_
+    retrieve_tool.py`'s own use of it for schema-level setup) -- so the
+    *only* thing standing between org B and org A's tool row here is the
+    predicate itself. If it is ever removed, this test starts failing
+    without RLS available to quietly cover for it.
+    """
+    async with tenant_session(tenant_a) as session:
+        agent_a = await AgentService(session, tenant_a).create_agent(agent_input("Org A Agent"))
+    async with tenant_session(tenant_b) as session:
+        agent_b = await AgentService(session, tenant_b).create_agent(agent_input("Org B Agent"))
+
+    # An org-scoped `tools` row that belongs to org A alone.
+    tool_a_id = await enable_builtin_tool(owner_connection, tenant_a, agent_a.id, "create_lead")
+
+    bypassing_session = AsyncSession(bind=owner_connection, expire_on_commit=False)
+    service = AgentService(bypassing_session, tenant_b)
+    with pytest.raises(NotFoundError):
+        await service.set_tool_enabled(agent_b.id, tool_a_id, True)
