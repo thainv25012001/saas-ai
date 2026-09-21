@@ -12,6 +12,7 @@ reads that table, not a hard-coded list -- an agent with no such row is
 offered no tools at all, tool-calling model or not.
 """
 
+import asyncio
 import uuid
 
 import pytest
@@ -38,8 +39,10 @@ from app.db.models import Document, DocumentSourceType, Lead, MessageCitation, M
 from app.documents.schemas import ChunkInput, CreateDocumentInput
 from app.documents.service import DocumentService
 from app.embeddings.hashing import HashingEmbedder
+from app.leads.service import LeadService
 from app.llm.fake_provider import FakeProvider, FakeToolCall
 from app.rag.retrieve import RetrievalService
+from app.tools.retrieve import RetrieveKnowledgeTool
 from tests.conftest import enable_builtin_tool
 from tests.factories import agent_input
 
@@ -792,3 +795,74 @@ async def test_step_limit_reached_is_surfaced_as_an_in_band_error_not_a_silent_b
             .all()
         )
     assert len(tool_call_rows) == 2
+
+
+async def test_a_slow_sibling_holding_the_lock_does_not_fabricate_a_timeout_for_the_queued_call(
+    tenant_a, owner_connection, monkeypatch
+):
+    """Review round 2, item 1: `_LockedSessionTool` serializes two calls in
+    one step behind a shared lock, and `ToolRegistry.execute` wraps the
+    WHOLE call (lock wait included) in `asyncio.timeout(tool.
+    timeout_seconds)`. Without a separate, later-starting budget for the
+    tool's own work, a slow sibling holding the lock can fabricate a
+    timeout for a call that never got a chance to run -- reproduced here
+    exactly as measured in review: `create_lead` (its own, unrestricted
+    10s budget) genuinely takes ~1.0s of real work and holds the lock for
+    it; `retrieve_knowledge`, queued behind it and given a tiny 0.3s OWN
+    timeout, does negligible real work but must still complete rather than
+    being reported as timed out, because its budget only starts once it
+    actually acquires the lock -- two DIFFERENT tool classes, so each
+    call's `timeout_seconds` can be set independently.
+    """
+    monkeypatch.setattr(RetrieveKnowledgeTool, "timeout_seconds", 0.3)
+
+    real_create = LeadService.create
+
+    async def _slow_create(self, agent_id, conversation_id, data):  # type: ignore[no-untyped-def]
+        await asyncio.sleep(1.0)
+        return await real_create(self, agent_id, conversation_id, data)
+
+    monkeypatch.setattr(LeadService, "create", _slow_create)
+
+    query = "annual maintenance inspection checklist"
+    query_vector = await _embed(query)
+    async with tenant_session(tenant_a) as session:
+        await _ready_document_with_chunks(
+            session, tenant_a, [(f"{query} details.", query_vector)], title="Maintenance Guide"
+        )
+        agent = await _agent(session, tenant_a)
+        agent_id = agent.id
+    await enable_builtin_tool(owner_connection, tenant_a, agent_id, tool_name="retrieve_knowledge")
+    await enable_builtin_tool(owner_connection, tenant_a, agent_id, tool_name="create_lead")
+
+    provider = FakeProvider(
+        turns=[
+            [
+                FakeToolCall(
+                    id="slow",
+                    name="create_lead",
+                    input={
+                        "name": "Slow Visitor",
+                        "email": "slow@example.com",
+                        "interest": "widgets",
+                    },
+                ),
+                FakeToolCall(id="fast", name="retrieve_knowledge", input={"query": query}),
+            ],
+            "done",
+        ]
+    )
+    async with tenant_session(tenant_a) as session:
+        service = ChatService(session, tenant_a, provider_override=provider)
+        events = [event async for event in service.send(agent_id, "help")]
+
+    tool_end = next(e for e in events if isinstance(e, ChatToolCallEnd))
+    results_by_id = {r.tool_call_id: r for r in tool_end.results}
+    assert set(results_by_id) == {"slow", "fast"}
+    # Neither call is falsely reported as timed out -- specifically not
+    # "fast", queued behind ~1.0s of "slow" holding the lock while its own
+    # declared budget is only 0.3s.
+    assert results_by_id["slow"].is_error is False, results_by_id["slow"].result
+    assert results_by_id["fast"].is_error is False, results_by_id["fast"].result
+    assert "timed out" not in results_by_id["fast"].result
+    assert "took longer" not in results_by_id["fast"].result

@@ -105,17 +105,17 @@ class CitationPayload:
     """One retrieved passage's SSE- and tool-facing shape.
 
     Deliberately narrower than `RetrievedChunk`: `excerpt` is a short
-    preview (see `app/chat/service.py`'s `_excerpt`), not the full chunk
-    `content`, which would double the bytes of every grounded turn on the
-    wire for no benefit the UI needs -- it already has `chunk_id` to fetch
-    the rest on demand.
+    preview (see `excerpt()` below), not the full chunk `content`, which
+    would double the bytes of every grounded turn on the wire for no
+    benefit the UI needs -- it already has `chunk_id` to fetch the rest on
+    demand.
 
     Lives here rather than in `app/chat/service.py` (where it originated)
     because `app/tools/base.py`'s `ToolResult.citations` also needs it: a
     tool result and an SSE turn should report a grounding chunk identically
-    rather than through two shapes that drift, and `app/chat/service.py` is
-    expected to import `app/tools` in a later Phase-4 task, so the reverse
-    import would cycle.
+    rather than through two shapes that drift, and `app/chat/service.py`
+    imports `app/tools` (Phase 4's tool layer), so the reverse import would
+    cycle.
     """
 
     chunk_id: uuid.UUID
@@ -131,20 +131,24 @@ class CitationPayload:
     page: int | None
 
 
-# Mirrors `app/chat/service.py`'s `_EXCERPT_MAX_CHARS`/`_excerpt`: a preview
-# only, not the full chunk `content`, for the same reason -- it would double
-# the bytes of every grounded turn (SSE citation or tool result alike) for
-# no benefit the UI needs, since it already has `chunk_id` to fetch the rest
-# on demand. Kept as its own constant here rather than imported from
-# `app/chat/service.py` to avoid a RAG-module -> chat-module dependency for
-# one integer; `app/tools/retrieve.py` uses this copy too.
-_EXCERPT_MAX_CHARS = 240
+# Public (no leading underscore): `app/chat/service.py` imports this pair
+# directly for its own, unrelated excerpting need (`ChatToolCallResult.result`,
+# a tool's plain-text result -- never the full payload on the wire, the same
+# reason a citation carries an excerpt rather than a whole chunk). Both
+# operate on a plain `str`, and there is no reason the bound or the
+# truncation shape should ever drift between the two call sites, so this is
+# the one definition, not a second copy kept in step by hand -- which is
+# exactly what happened here for most of Phase 4 (a byte-identical private
+# copy sat in `app/chat/service.py` until review round 2 pointed out that
+# reaching across a module boundary for a leading-underscore name was the
+# wrong way to share it).
+EXCERPT_MAX_CHARS = 240
 
 
-def _excerpt(content: str) -> str:
-    if len(content) <= _EXCERPT_MAX_CHARS:
+def excerpt(content: str) -> str:
+    if len(content) <= EXCERPT_MAX_CHARS:
         return content
-    return content[:_EXCERPT_MAX_CHARS].rstrip() + "..."
+    return content[:EXCERPT_MAX_CHARS].rstrip() + "..."
 
 
 def build_citation(chunk: RetrievedChunk) -> CitationPayload:
@@ -158,7 +162,7 @@ def build_citation(chunk: RetrievedChunk) -> CitationPayload:
         document_title=chunk.document_title,
         rank=chunk.rank,
         score=chunk.score,
-        excerpt=_excerpt(chunk.content),
+        excerpt=excerpt(chunk.content),
         page=chunk.page,
     )
 

@@ -505,8 +505,8 @@ async def run(self, ctx: AgentContext) -> AsyncIterator[AgentEvent]:
 
         yield ToolCallStart(calls)
         results = await asyncio.gather(*[
-            self.registry.execute(c, ctx) for c in calls   # parallel, each isolated
-        ])
+            self.registry.execute(c, ctx) for c in calls   # dispatched together, each isolated
+        ])                                                 # -- see §7.3: execution may still serialise
         yield ToolCallEnd(results)
         messages.append(ToolResults(results))
     else:
@@ -663,13 +663,25 @@ and — per prompt rule 8 — the model must confirm details before calling it.
 
 - **Argument validation.** Model output is parsed through the Pydantic model. A validation
   error becomes a tool result the model can read and correct from, not a 500.
-- **Timeouts.** Per-tool, default 10s. A timeout is a tool error, not a hung request.
+- **Timeouts.** Per-tool, default 10s, measured from when the call actually starts running —
+  not from when it was dispatched. Phase 4's builtins share the turn's single database
+  session (see Isolation, below), so a call gathered alongside a slow sibling can sit
+  queued for a while before it ever executes; starting its clock at dispatch would let that
+  wait alone fabricate a timeout for a call that never got the chance to run. A timeout is a
+  tool error, not a hung request.
 - **Failure never becomes fiction.** A failed tool returns `is_error=True` with a message
   such as `"Unable to check live inventory."` The prompt forbids substituting a guess, and
   the UI shows that the tool failed. This is the explicit requirement from the brief's
   Error Handling section.
-- **Isolation.** Parallel tool calls are gathered with exceptions captured per call; one
-  failure does not abort the others.
+- **Isolation.** Parallel calls in one step are dispatched together with `asyncio.gather`,
+  with exceptions captured per call: one failure does not abort the others, and the model
+  receives a result for every call it made. They are *not* guaranteed to execute
+  concurrently — every Phase 4 builtin shares the turn's single database session, which is
+  not safe for concurrent use, so their execution serialises on it. Isolation is the
+  load-bearing property; concurrency is an optimisation the shared session currently
+  forecloses. A future non-database tool (an HTTP call, an MCP round-trip) genuinely would
+  overlap with its siblings — it is the shared session that serialises execution, not the
+  loop.
 - **Tenancy.** `ctx.organization_id` comes from the authenticated request or from the
   conversation's agent, never from the model's arguments. A model cannot reach another
   tenant's data because there is no argument through which to ask.

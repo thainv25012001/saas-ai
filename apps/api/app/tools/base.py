@@ -52,11 +52,18 @@ class ToolResult(BaseModel):
     chunk identically, with nothing left to translate between them.
 
     `duration_ms` is `None` from every tool's own `execute` -- no tool body
-    times itself. It is filled in by whatever dispatches the call (Task 7's
-    per-call session wrapper in `app/chat/service.py`, which already has to
-    open and close a dedicated `async with` block per call and so gets the
-    timing for free) and persisted onto `MessageToolCall.duration_ms`,
-    §3.6's declared column for it.
+    times itself. It is filled in by whatever dispatches the call
+    (`app/chat/service.py`'s `_LockedSessionTool`, which wraps each call in
+    an `asyncio.Lock` -- every Phase 4 builtin shares one `AsyncSession` per
+    turn, which is not safe for concurrent use, so calls serialise on that
+    lock rather than each opening a session of its own -- and already
+    brackets the call in a `time.monotonic()` pair to do it) and persisted
+    onto `MessageToolCall.duration_ms`, §3.6's declared column for it. It
+    measures the call's full wall-clock time, including any wait for a
+    sibling call already holding the lock -- see `_LockedSessionTool`'s own
+    docstring for why that wait is deliberately still counted here even
+    though a *separate* budget (`_LockedSessionTool._own_timeout_seconds`)
+    is what decides whether the call is treated as having timed out.
     """
 
     content: str

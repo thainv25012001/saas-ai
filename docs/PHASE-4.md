@@ -103,10 +103,19 @@ actually handed, not that the fake was called.
   case, and exhausting it is an explicit `step_limit_reached` error, not a silent stop. The
   `for ... else` in §5.1 is doing real work: the `else` fires only when the loop was never
   broken out of.
-- **Parallel calls are isolated.** Calls in one step run with `asyncio.gather`, exceptions
-  captured per call. One failing tool must not abort its siblings, and the model must
-  receive a result for every call it made — a missing `tool_result` for an issued
-  `tool_use` is a protocol error that providers reject.
+- **Parallel calls are isolated.** Calls in one step are dispatched together with
+  `asyncio.gather`, with exceptions captured per call: one failing tool must not abort its
+  siblings, and the model must receive a result for every call it made. They are *not*
+  guaranteed to execute concurrently — every Phase 4 builtin shares the turn's single
+  database session, which is not safe for concurrent use, so their execution serialises on
+  it (`ChatService`'s `_LockedSessionTool`). Isolation is the load-bearing property;
+  concurrency is an optimisation the shared session currently forecloses. `AgentRunner`
+  itself still gathers, so a future non-database tool (an HTTP call, an MCP round-trip)
+  genuinely would overlap — it is the shared session that serialises execution, not the
+  loop. `timeout_seconds` follows from the same fact: a call's declared budget is measured
+  from when it actually starts running, not from when it was dispatched, since a slow
+  sibling holding the shared session must not be able to fabricate a timeout for a call
+  still queued behind it.
 - **Failure never becomes fiction.** A failed tool returns `is_error=True` with a plain
   message. The model is told the tool failed; it is not handed an empty result it can
   paper over. This is the brief's explicit Error Handling requirement.

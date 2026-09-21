@@ -18,7 +18,7 @@ the truncation behaviour it protects did not go away, only where it lives.
 
 import uuid
 
-from app.rag.retrieve import _EXCERPT_MAX_CHARS, RetrievedChunk, build_citation
+from app.rag.retrieve import EXCERPT_MAX_CHARS, RetrievedChunk, build_citation
 
 
 def _chunk(content: str, page: int | None = None) -> RetrievedChunk:
@@ -39,8 +39,8 @@ def test_a_short_chunk_is_carried_through_unchanged() -> None:
 
 
 def test_a_long_chunk_is_truncated_with_a_trailing_ellipsis() -> None:
-    long_content = "word " * 100  # comfortably longer than _EXCERPT_MAX_CHARS
-    assert len(long_content) > _EXCERPT_MAX_CHARS
+    long_content = "word " * 100  # comfortably longer than EXCERPT_MAX_CHARS
+    assert len(long_content) > EXCERPT_MAX_CHARS
 
     payload = build_citation(_chunk(long_content))
 
@@ -48,7 +48,7 @@ def test_a_long_chunk_is_truncated_with_a_trailing_ellipsis() -> None:
     assert payload.excerpt.endswith("...")
     # Bounded, not merely shorter -- a version that truncated to some other
     # arbitrary length would still pass a bare "is it shorter" check.
-    assert len(payload.excerpt) <= _EXCERPT_MAX_CHARS + len("...")
+    assert len(payload.excerpt) <= EXCERPT_MAX_CHARS + len("...")
 
 
 def test_a_pdf_sourced_chunk_carries_its_page() -> None:

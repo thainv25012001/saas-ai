@@ -46,7 +46,8 @@ from app.llm.types import Message as LLMMessage
 from app.llm.types import ToolUseBlock, Usage
 from app.prompts.defaults import DEFAULT_SALES_SYSTEM_PROMPT
 from app.prompts.service import PromptService
-from app.rag.retrieve import CitationPayload, _excerpt
+from app.rag.retrieve import CitationPayload
+from app.rag.retrieve import excerpt as excerpt_text
 from app.tools.base import AgentTool, ToolContext, ToolResult
 from app.tools.leads import CreateLeadTool
 from app.tools.registry import ToolRegistry
@@ -61,9 +62,11 @@ logger = get_logger(__name__)
 # `retrieve_knowledge`), and shipping that twice per turn (once as the
 # model's own context, once again over SSE for a UI card) buys nothing the
 # UI needs beyond "did it work, and roughly what came back". Reuses
-# `app/rag/retrieve.py`'s own `_EXCERPT_MAX_CHARS`/`_excerpt` directly
-# (imported above) rather than a second, byte-identical copy: both operate
-# on a plain `str` (one truncates `ToolResult.content`, the other
+# `app/rag/retrieve.py`'s own public `EXCERPT_MAX_CHARS`/`excerpt` directly
+# (imported above, as `excerpt_text` -- the bare name would be easy to
+# mistake for a field access among the many `.excerpt` references in this
+# module) rather than a second, byte-identical copy: both operate on a
+# plain `str` (one truncates `ToolResult.content`, the other
 # `RetrievedChunk.content`) and there is no reason for the bound or the
 # truncation shape to ever drift between the two call sites.
 
@@ -73,6 +76,17 @@ logger = get_logger(__name__)
 # on the service that consumes it, exactly like `provider_override` on the
 # same class already does for a value that otherwise resolves from data.
 DEFAULT_HISTORY_WINDOW = 20
+
+# `_LockedSessionTool`'s outer, registry-enforced budget (see its
+# docstring): a soft, deliberately generous allowance for a call to sit
+# queued behind however many sibling calls one step happens to gather,
+# on top of the tool's own real timeout -- not a precise worst case, since
+# nothing bounds how many calls one step can contain. A call still queued
+# past its own budget plus this much is symptomatic of something
+# structurally wrong (a leaked lock, a hung sibling that somehow evaded
+# its own inner timeout), which is exactly the case this outer bound
+# exists to still catch.
+_LOCK_WAIT_BUDGET_SECONDS = 30.0
 
 _VARIABLE_PATTERN = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 
@@ -160,7 +174,8 @@ class ChatToolCallStart:
 @dataclass(frozen=True, slots=True)
 class ChatToolCallResult:
     """One call's outcome, compact. `result` is an excerpt of
-    `ToolResult.content` (see `_excerpt`), never the full payload -- the
+    `ToolResult.content` (see `excerpt_text`, imported from
+    `app.rag.retrieve.excerpt`), never the full payload -- the
     same reason `ChatCitations`' `excerpt` field exists: a tool result can be
     an entire assembled context block, and the UI needs only enough to show
     the call succeeded and roughly what it returned, not a second copy of
@@ -299,14 +314,52 @@ class _LockedSessionTool(AgentTool):
     turns on one non-thread-safe database session -- an implementation
     detail of talking to Postgres, not a property of the loop.
 
-    `name`/`description`/`args_model`/`timeout_seconds` are read straight
-    off the wrapped class -- every Phase 4 tool declares them as class
-    attributes (see e.g. `RetrieveKnowledgeTool.name`), not instance state,
-    so no instance is needed to know them. The wrapped tool itself is
-    constructed once, per turn (not per call): it is stateless beyond the
-    session and (for `RetrieveKnowledgeTool`) an optional embedder, and
-    reusing it holds no more risk than reusing the session it already
-    shares with every other call this turn makes.
+    `name`/`description`/`args_model` are read straight off the wrapped
+    class -- every Phase 4 tool declares them as class attributes (see e.g.
+    `RetrieveKnowledgeTool.name`), not instance state, so no instance is
+    needed to know them. The wrapped tool itself is constructed once, per
+    turn (not per call): it is stateless beyond the session and (for
+    `RetrieveKnowledgeTool`) an optional embedder, and reusing it holds no
+    more risk than reusing the session it already shares with every other
+    call this turn makes.
+
+    **`timeout_seconds` and the exposed vs. own budget (review round 2,
+    item 1).** `ToolRegistry.execute` wraps the ENTIRE `tool.execute(...)`
+    call -- lock wait included -- in `asyncio.timeout(tool.timeout_seconds)`.
+    If this class exposed the wrapped tool's own declared budget
+    unchanged, a call queued behind a slow sibling could be reported as
+    "timed out" having never run at all: measured directly, a sibling
+    holding the lock ~1.0s alongside a 0.3s budget produced exactly that
+    -- `is_error=True`, "timed out after 0.3s", `duration_ms` left
+    unset, for a call the registry cancelled mid-*wait*, before this
+    class's own `execute` had even acquired the lock.
+
+    So the two budgets are deliberately different now. `self.timeout_seconds`
+    (what `ToolRegistry.execute` enforces) is widened by
+    `_LOCK_WAIT_BUDGET_SECONDS` -- a generous, explicitly soft allowance for
+    realistic queueing behind however many sibling calls one step happens
+    to gather, not a precise worst case (there is no static bound on how
+    many calls one step can contain). `self._own_timeout_seconds` -- the
+    wrapped tool's real, unwidened budget -- is enforced separately, by a
+    SECOND, nested `asyncio.timeout()` opened fresh only after the lock is
+    actually acquired, so it measures the tool's own work, never its
+    queueing. The two failures are worded differently for the model
+    reading them, deliberately: "timed out after Xs" (the outer,
+    registry-level bound -- genuinely stuck, including any wait) vs. "took
+    longer than Xs to run, not counting time spent waiting for another
+    tool call in this turn" (this class's own bound -- the tool itself ran
+    long once it got the chance). Keeping the outer bound at all, rather
+    than removing it in favour of the inner one alone, is deliberate too:
+    it is the only thing that still catches a call stuck for a
+    structural reason (a leaked lock, a hung sibling) rather than its own
+    slow work, which the inner bound by construction cannot.
+
+    `duration_ms` still measures the call's FULL wall-clock time, wait
+    included -- unchanged from round 1's reasoning, and the two rulings
+    are not in tension: "how long did this call take" (duration_ms, for
+    the UI/audit trail) and "how long was this call allowed to actually
+    run before being cut off" (`_own_timeout_seconds`, for whether it is
+    treated as a failure) are different questions.
     """
 
     def __init__(
@@ -315,7 +368,8 @@ class _LockedSessionTool(AgentTool):
         self.name = tool_cls.name
         self.description = tool_cls.description
         self.args_model = tool_cls.args_model
-        self.timeout_seconds = tool_cls.timeout_seconds
+        self._own_timeout_seconds = tool_cls.timeout_seconds
+        self.timeout_seconds = tool_cls.timeout_seconds + _LOCK_WAIT_BUDGET_SECONDS
         # Every Phase 4 builtin's constructor takes the session as its sole
         # required argument (see `RetrieveKnowledgeTool`/`CreateLeadTool`)
         # -- not expressible on the `AgentTool` ABC itself, which declares
@@ -328,14 +382,37 @@ class _LockedSessionTool(AgentTool):
         # Holds the lock for the tool's ENTIRE execution, not just its
         # database statements -- simpler and still correct, at the cost of
         # serializing any non-DB work a future tool body might do (a
-        # rate-limit check, say) alongside its DB work too. `duration_ms`
-        # therefore measures this call's full wall-clock time including any
-        # wait for a sibling call already holding the lock, which is the
-        # honest figure for "how long did this call take" from the model's
-        # and the UI's point of view, not merely its own database time.
+        # rate-limit check, say) alongside its DB work too.
         started = time.monotonic()
         async with self._lock:
-            result = await self._inner.execute(args, ctx)
+            wait_ms = int((time.monotonic() - started) * 1000)
+            if wait_ms:
+                # Logged, not merely absorbed into `duration_ms`: an
+                # operator watching this tool suddenly get slow needs to be
+                # able to tell "its own work got slow" apart from "it is
+                # queued behind a sibling", and only this line says which.
+                logger.info(
+                    "tool_call_waited_for_shared_session",
+                    tool_name=self.name,
+                    wait_ms=wait_ms,
+                )
+            try:
+                async with asyncio.timeout(self._own_timeout_seconds):
+                    result = await self._inner.execute(args, ctx)
+            except TimeoutError:
+                logger.warning(
+                    "tool_call_execution_timed_out",
+                    tool_name=self.name,
+                    timeout_seconds=self._own_timeout_seconds,
+                )
+                result = ToolResult(
+                    content=(
+                        f"'{self.name}' took longer than {self._own_timeout_seconds}s to "
+                        "run (not counting time spent waiting for another tool call in "
+                        "this turn) and was stopped."
+                    ),
+                    is_error=True,
+                )
         duration_ms = int((time.monotonic() - started) * 1000)
         return result.model_copy(update={"duration_ms": duration_ms})
 
@@ -573,7 +650,7 @@ class ChatService:
                             ChatToolCallResult(
                                 tool_call_id=result.tool_call_id,
                                 tool_name=tool_name,
-                                result=_excerpt(result.result.content),
+                                result=excerpt_text(result.result.content),
                                 is_error=result.result.is_error,
                             )
                         )

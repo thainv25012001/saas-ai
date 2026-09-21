@@ -95,6 +95,8 @@ async def tenant_b(owner_connection: "AsyncConnection") -> AsyncIterator["Tenant
 async def _make_tenant(
     owner_connection: "AsyncConnection", name: str
 ) -> AsyncIterator["TenantContext"]:
+    import uuid as uuid_stdlib
+
     from sqlalchemy import text
 
     from app.core.ids import uuid7
@@ -102,7 +104,17 @@ async def _make_tenant(
     from app.db.models import MembershipRole
 
     org_id, user_id, membership_id = uuid7(), uuid7(), uuid7()
-    slug = f"{name.lower().replace(' ', '-')}-{org_id.hex[:8]}"
+    # Pre-existing flake, fixed here (review round 2, item 4): `org_id` is a
+    # uuid7, whose first 48 bits are a millisecond timestamp -- so
+    # `org_id.hex[:8]` (the first 32 bits) carries only ~65 seconds of
+    # granularity (2**16 ms), not 32 bits of entropy, and any two tenant
+    # fixtures alive in the same ~65-second window collided on
+    # `organizations_slug_key`. This is the root cause of "phantom" test
+    # failures blamed on concurrent runs several times across this phase --
+    # serial runs mostly got away with it because teardown deletes the row
+    # before the window recurs. `uuid.uuid4()` (stdlib, genuinely random,
+    # not time-ordered) is what the suffix actually needs.
+    slug = f"{name.lower().replace(' ', '-')}-{uuid_stdlib.uuid4().hex[:8]}"
     await owner_connection.execute(
         text(
             "INSERT INTO organizations (id, name, slug, plan, settings) "
@@ -120,7 +132,10 @@ async def _make_tenant(
         ),
         {
             "id": user_id,
-            "email": f"{name.lower().replace(' ', '-')}-{user_id.hex[:8]}@example.com",
+            # Same fix as `slug` above, same reason: `user_id.hex[:8]` would
+            # carry the same ~65-second-granularity collision risk on
+            # `users.email`'s unique constraint.
+            "email": f"{name.lower().replace(' ', '-')}-{uuid_stdlib.uuid4().hex[:8]}@example.com",
             "full_name": name,
         },
     )
