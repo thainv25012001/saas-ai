@@ -22,11 +22,20 @@ from collections.abc import Sequence
 
 # See task-7b-report.md for the argument. `retrieve_knowledge` is a pure
 # read with no risk, so it is linked, enabled, for every agent by default.
-# `create_lead` writes a real record to the database on an anonymous
-# visitor's say-so, and Phase 4 ships no dashboard/GraphQL surface yet to
-# review or disable it per-agent, so it stays reachable (the same
-# `agent_tools` insert `tests/conftest.py::enable_builtin_tool` already
-# uses) but off by default.
+# `create_lead` writes a real `leads` row on every call, and today the only
+# thing that can call it is an authenticated org member testing their own
+# agent in the playground (`POST /api/v1/chat/stream` requires a bearer
+# token; `widget`/`api` channels exist only as unused enum values) -- so
+# defaulting it on would let ordinary "let me try asking about pricing"
+# playground turns write rows into the very `leads` table Task 8 presents
+# to that same staff as a customer pipeline, indistinguishable from a real
+# lead. (It will also matter for the reason this comment used to give as
+# the present-tense one -- an anonymous, unauthenticated visitor -- once a
+# public channel exists; that is a Phase 7 concern, not a current one.)
+# Phase 4 ships no dashboard/GraphQL surface yet to review or disable it
+# per-agent, so it stays reachable (the same `agent_tools` insert
+# `tests/conftest.py::enable_builtin_tool` already uses) but off by
+# default.
 DEFAULT_ENABLED_TOOL_NAMES: Sequence[str] = ("retrieve_knowledge",)
 
 

@@ -353,10 +353,19 @@ each row's `description` is a literal copy of the tool class's own
 builtins (`app/db/builtin_tools.DEFAULT_ENABLED_TOOL_NAMES`) in the same
 flush as its `AgentConfig` row, so a normally-created agent is never
 offered nothing. Only `retrieve_knowledge` is on by default — a pure read
-with no risk; `create_lead` writes a real record on an anonymous visitor's
-say-so and stays off until an agent's `agent_tools` rows are edited
-directly (Phase 4 ships no dashboard/GraphQL surface for that yet). See
-task-7b-report.md for the full argument.
+with no risk. `create_lead` writes a real `leads` row every time it runs,
+and stays off until an agent's `agent_tools` rows are edited directly
+(Phase 4 ships no dashboard/GraphQL surface for that yet — Task 8 makes
+this a hard requirement). The risk that matters *today* is not an
+anonymous public visitor: no public channel exists yet (`POST
+/api/v1/chat/stream` requires an authenticated bearer token; `widget`/`api`
+are unused enum values), so the only thing that can call it right now is
+an org member testing their own agent in the playground — defaulting it on
+would let an ordinary test turn into a row in the very `leads` table Task 8
+presents to that same org as its customer pipeline, indistinguishable from
+a real lead. The anonymous-visitor concern is real, but only once a public
+channel ships in a later phase — see task-7b-report.md for the full
+argument.
 
 The same migration backfills `agent_tools` for every agent that predates
 it, onto the identical default set — `_resolve_enabled_tool_names` (§5.1)

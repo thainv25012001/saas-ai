@@ -150,9 +150,13 @@ async def test_delete_from_another_org_raises_not_found(tenant_a, tenant_b):
 
 async def test_create_agent_links_the_default_builtin_tool_in_the_same_flush(tenant_a):
     """`retrieve_knowledge` is a pure read with no risk, so it is linked
-    (enabled) for every new agent by default; `create_lead` writes a real
-    record to the database on an anonymous visitor's say-so and Phase 4
-    ships no dashboard/GraphQL surface yet to review or disable it
+    (enabled) for every new agent by default. `create_lead` writes a real
+    `leads` row every time it runs; today the only thing that can call it
+    is an authenticated org member testing their own agent in the
+    playground (no public, unauthenticated channel exists yet), so
+    defaulting it on would let an ordinary test turn into a row in the
+    exact table Task 8 presents to that same org as its customer pipeline.
+    Phase 4 ships no dashboard/GraphQL surface yet to review or disable it
     per-agent, so it stays off by default (still reachable the same way
     `enable_builtin_tool` reaches it in tests -- a direct `agent_tools`
     insert).

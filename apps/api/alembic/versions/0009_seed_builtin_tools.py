@@ -34,6 +34,24 @@ an existing link, and what happens to a name's `overrides` when the flat
 list omits it on a later write. See `docs/ARCHITECTURE.md` §5.1 and
 task-7b-report.md for the full argument.
 
+**Why only `retrieve_knowledge` is in `DEFAULT_ENABLED_TOOL_NAMES`.**
+`retrieve_knowledge` is a pure read with no side effect, so every agent gets
+it. `create_lead` writes a real `leads` row every time it runs, and the risk
+that matters *today* is not an anonymous public visitor -- no public channel
+exists yet: `POST /api/v1/chat/stream` requires an authenticated bearer
+token, the route hardcodes `channel=PLAYGROUND`, and `widget`/`api` are
+unused enum values reserved for later phases. The only thing that can
+trigger `create_lead` right now is an org member testing their own agent in
+the playground, and defaulting it on would let an ordinary "let me try
+asking about pricing" test turn into a row in the exact `leads` table
+Task 8 is about to present to that same org as its customer pipeline --
+test-data pollution indistinguishable from a real lead. (The anonymous-
+visitor concern is real too, but only once a public channel ships in a
+later phase -- it does not describe the system as it exists now.) It stays
+off until an agent's `agent_tools` rows are edited directly; see
+`app/db/builtin_tools.py`'s module-level comment and task-7b-report.md for
+the full argument.
+
 **Tool descriptions are copied here as literal text**, not imported from
 `app.tools.retrieve`/`app.tools.leads` (the code `RetrieveKnowledgeTool`/
 `CreateLeadTool` actually define `description` on), on purpose: a migration
