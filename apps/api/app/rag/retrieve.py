@@ -77,16 +77,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.rrf import fuse_rrf, top_fused
 from app.core.tenancy import TenantContext
 from app.embeddings.base import EmbeddingProvider
 from app.embeddings.registry import get_embedding_provider
-
-# Reciprocal Rank Fusion's published constant (Cormack, Clarke & Buettcher,
-# 2009, the paper that introduced RRF): score = sum(1 / (k + rank)) over the
-# lists a document appears in. k=60 is the value that paper found robust
-# across corpora and is the de facto default everywhere RRF is used --
-# treated here as a fixed convention, not something to tune per query.
-_RRF_K = 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,37 +384,29 @@ class RetrievalService:
             # fusion with the vector arm settles the rest.
             keyword_rows = (await self.session.execute(_KEYWORD_ANY_TERM_SQL, keyword_params)).all()
 
-        scores: dict[uuid.UUID, float] = {}
+        # `info` is captured from whichever list first produced a chunk --
+        # separate from fusion itself (`fuse_rrf` below), which only ever
+        # sees ids and rank positions. An empty list here (no lexical match
+        # at all, or a corpus with no embeddings) simply contributes
+        # nothing to the fused scores -- it can never zero out whatever the
+        # other retriever already found.
         info: dict[uuid.UUID, _CandidateInfo] = {}
-        # An empty list here (no lexical match at all, or a corpus with no
-        # embeddings) simply contributes nothing to `scores` -- it can never
-        # zero out whatever the other retriever already found, because
-        # fusion only ever adds to a chunk's score, never resets it.
         for rows in (vector_rows, keyword_rows):
-            for rank, row in enumerate(rows, start=1):
-                chunk_id = row.id
-                scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (_RRF_K + rank)
-                if chunk_id not in info:
+            for row in rows:
+                if row.id not in info:
                     metadata = row.metadata or {}
-                    info[chunk_id] = _CandidateInfo(
+                    info[row.id] = _CandidateInfo(
                         document_id=row.document_id,
                         document_title=row.title,
                         content=row.content,
                         page=metadata.get("page"),
                     )
 
-        # Ties (identical fused score) break on chunk_id purely for a
-        # deterministic order across runs -- no ranking significance.
-        ordered = sorted(scores.items(), key=lambda item: (-item[1], str(item[0])))
+        scores = fuse_rrf([[row.id for row in vector_rows], [row.id for row in keyword_rows]])
+        ordered = top_fused(scores, top_k=top_k, min_score=min_score)
 
         results: list[RetrievedChunk] = []
         for chunk_id, score in ordered:
-            if score < min_score:
-                # `ordered` is sorted descending by score, so nothing after
-                # this point can clear the threshold either.
-                break
-            if len(results) >= top_k:
-                break
             candidate = info[chunk_id]
             results.append(
                 RetrievedChunk(
