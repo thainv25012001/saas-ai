@@ -15,7 +15,7 @@ from app.agents.schemas import (
 from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.core.ids import uuid7
 from app.core.tenancy import TenantContext
-from app.db.builtin_tools import DEFAULT_ENABLED_TOOL_NAMES
+from app.db.builtin_tools import DEFAULT_ENABLED_TOOL_NAMES, first_row_per_name
 from app.db.models import Agent, AgentConfig, AgentStatus, AgentToolLink, Tool, ToolType
 
 _DEFAULT_FALLBACK = (
@@ -235,11 +235,9 @@ class AgentService:
         )
         rows = (await self.session.execute(stmt)).all()
 
-        resolved: dict[str, tuple[Tool, bool]] = {}
-        for tool, link_enabled in rows:
-            if tool.name in resolved:
-                continue
-            resolved[tool.name] = (tool, bool(link_enabled))
+        resolved = first_row_per_name(
+            (tool.name, (tool, bool(link_enabled))) for tool, link_enabled in rows
+        )
         return list(resolved.values())
 
     async def set_tool_enabled(

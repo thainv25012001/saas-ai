@@ -18,7 +18,7 @@ migration is supposed to be immune to. This module is structural only
 a migration and runtime code carries none of that risk.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 # See task-7b-report.md for the argument. `retrieve_knowledge` is a pure
 # read with no risk, so it is linked, enabled, for every agent by default.
@@ -78,3 +78,36 @@ def default_agent_tools_backfill_sql() -> str:
         "WHERE t.organization_id IS NULL AND t.type = 'builtin' AND t.name = ANY(:names) "
         "ON CONFLICT (agent_id, tool_id) DO NOTHING"
     )
+
+
+def first_row_per_name[T](rows: Iterable[tuple[str, T]]) -> dict[str, T]:
+    """Collapse tool rows to one per name, keeping the first of each.
+
+    This is the *shadowing* rule `docs/ARCHITECTURE.md` §3.6 leaves to
+    resolution: an org-scoped `tools` row fully shadows a global builtin of
+    the same name -- not only its config, but whether the agent may call it
+    at all. Callers express that by ordering their query
+    `ORDER BY tools.name, tools.organization_id IS NULL`, which in Postgres
+    puts `false` (NOT NULL, i.e. org-scoped) before `true`, so "first per
+    name" and "org-scoped wins" are the same statement.
+
+    It lives here, beside `DEFAULT_ENABLED_TOOL_NAMES`, for the reason this
+    module exists at all: two callers need the identical answer and had
+    written it twice. `ChatService._resolve_enabled_tool_names` decides what
+    an agent may actually run; `AgentService.list_tools` decides what the
+    dashboard offers to toggle. If those two ever disagree, the management
+    screen shows a tool as enabled that chat will not grant -- a discrepancy
+    with no error attached, which is why it is one function and not two
+    matching loops.
+
+    The two queries deliberately still differ: `list_tools` LEFT JOINs so it
+    can report a tool with no link at all as "off", while the resolver INNER
+    JOINs because only a linked tool can ever run. That difference is real;
+    the collapse that follows it is not.
+    """
+    resolved: dict[str, T] = {}
+    for name, payload in rows:
+        if name in resolved:
+            continue
+        resolved[name] = payload
+    return resolved

@@ -4,6 +4,7 @@ import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { formatTimestamp } from "@/lib/format";
 import { Icon } from "@/components/ui/icons";
 import type { DocumentStatus } from "@/graphql/generated";
 import { canRetryDocument, documentStatusLabel, documentStatusTone } from "@/lib/document-status";
@@ -26,11 +27,6 @@ export type DocumentsTableProps = {
   onRetry: (id: string) => void;
   onDelete: (id: string, title: string) => void;
 };
-
-function formatUploadedAt(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
 
 /**
  * The list itself: status, chunk count, upload time, and the two actions a
@@ -105,7 +101,7 @@ export function DocumentsTable({
                   </Badge>
                 </td>
                 <td className="px-5 py-3 text-ink-muted">{doc.chunkCount}</td>
-                <td className="px-5 py-3 text-ink-muted">{formatUploadedAt(doc.createdAt)}</td>
+                <td className="px-5 py-3 text-ink-muted">{formatTimestamp(doc.createdAt)}</td>
                 <td className="px-5 py-3 text-right">
                   <div className="flex justify-end gap-2">
                     {retryable ? (

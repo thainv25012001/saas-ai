@@ -13,7 +13,8 @@ becomes a `ToolResult(is_error=True)`.
 
 import asyncio
 from collections.abc import Iterator
-from typing import get_args, get_origin
+from functools import cache
+from typing import Any, get_args, get_origin
 
 from pydantic import AliasChoices, AliasPath, BaseModel
 from pydantic import ValidationError as PydanticValidationError
@@ -119,8 +120,9 @@ def _reject_tenant_leaking_model(
       refused outright on every args model, independent of what it declares.
 
     `seen` guards a self-referential or mutually-referential model from
-    recursing forever; the checks below are cheap enough not to need a
-    memoised "already known safe" cache on top of it.
+    recursing forever *within one walk*. Repeat walks of the same class
+    are avoided a level up, by `_assert_args_model_is_safe` -- see there
+    for why that matters once a registry is rebuilt per turn.
     """
     if model in seen:
         return
@@ -151,6 +153,37 @@ def _reject_tenant_leaking_model(
             _reject_tenant_leaking_model(tool_name, nested, seen)
 
 
+@cache
+def _assert_args_model_is_safe(tool_name: str, args_model: type[BaseModel]) -> None:
+    """`_reject_tenant_leaking_model`, memoised per `(tool_name, args_model)`.
+
+    The check walks every field, alias and nested model of an argument
+    schema, and its answer is a pure function of the class -- it cannot
+    differ between two calls for the same one. `ChatService` builds a fresh
+    `ToolRegistry` per turn (deliberately: the per-turn lock and session
+    belong to that turn), so without this the walk ran again on every chat
+    turn for output that was identical every time.
+
+    A failure is not memoised, because `lru_cache` does not cache raised
+    exceptions -- a rejected model is re-walked and re-rejected on each
+    attempt, which is what we want for something that should never reach
+    production anyway.
+    """
+    _reject_tenant_leaking_model(tool_name, args_model, set())
+
+
+@cache
+def _input_schema(args_model: type[BaseModel]) -> dict[str, Any]:
+    """`model_json_schema()`, memoised per class, for the same reason.
+
+    Pydantic's schema generation is a recursive reflection pass, and the
+    provider-facing schema for a given `args_model` is fixed for the life of
+    the process. Computing it once per class rather than once per turn is
+    the whole of the saving; the result is never mutated by callers.
+    """
+    return args_model.model_json_schema()
+
+
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, AgentTool] = {}
@@ -168,7 +201,7 @@ class ToolRegistry:
         argument through which to ask for another tenant's data" hold for
         tools nobody has written yet.
         """
-        _reject_tenant_leaking_model(tool.name, tool.args_model, set())
+        _assert_args_model_is_safe(tool.name, tool.args_model)
         self._tools[tool.name] = tool
 
     def specs_for(self, names: list[str]) -> list[ToolSpec]:
@@ -182,7 +215,7 @@ class ToolRegistry:
             ToolSpec(
                 name=tool.name,
                 description=tool.description,
-                input_schema=tool.args_model.model_json_schema(),
+                input_schema=_input_schema(tool.args_model),
             )
             for tool in (self._tools[name] for name in names)
         ]

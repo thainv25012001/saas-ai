@@ -28,6 +28,7 @@ from app.core.errors import AppError, NotFoundError
 from app.core.ids import uuid7
 from app.core.logging import get_logger
 from app.core.tenancy import TenantContext
+from app.db.builtin_tools import first_row_per_name
 from app.db.models import (
     Agent,
     AgentToolLink,
@@ -1166,14 +1167,9 @@ class ChatService:
         )
         rows = (await self.session.execute(stmt)).all()
 
-        resolved: dict[str, bool] = {}
-        shadowed: set[str] = set()
-        for name, tool_organization_id, link_is_enabled in rows:
-            if name in shadowed:
-                continue
-            resolved[name] = bool(link_is_enabled)
-            if tool_organization_id is not None:
-                shadowed.add(name)
+        resolved = first_row_per_name(
+            (name, bool(link_is_enabled)) for name, _org_id, link_is_enabled in rows
+        )
         return [name for name, enabled in resolved.items() if enabled]
 
     def _build_registry(self, tool_names: list[str]) -> ToolRegistry:
@@ -1219,10 +1215,11 @@ class ChatService:
         must never contend on each other's lock -- only calls sharing the
         SAME session need to.
 
-        Cheap: `ToolRegistry.register` does no I/O, only the
-        tenant-leak-check on each `args_model` (already paid once per class
-        at import time in practice, since Python caches the class object --
-        this just re-runs it).
+        Cheap: `ToolRegistry.register` does no I/O, and the tenant-leak
+        check on each `args_model` is memoised per class in
+        `app.tools.registry` -- so rebuilding the registry every turn
+        costs a dict insert per granted tool, not a fresh reflective walk
+        of its argument schema.
         """
         granted = set(tool_names)
         lock = asyncio.Lock()
