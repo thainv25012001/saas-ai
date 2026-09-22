@@ -1,23 +1,40 @@
-"""`_classify_distance_shape` (`app/tools/products.py`), tested directly
-against literal distance lists -- the exact seam a reviewer used to find
-fix round 1's bug: comparing only the best result to the second-best
-called `[0.13, 0.15, 0.70, ...]` (two genuinely close matches sitting
-above a real tail) "flat", telling the model nothing stood out about a
-set where two results plainly did.
+"""`_match_shape_note`/`_classify_distance_shape` (`app/tools/products.py`),
+tested directly against literal `vector_distance` values -- the exact seam
+a reviewer used to find both fix round 1's and fix round 2's bugs:
 
-Pure numbers, not a `HashingEmbedder` corpus, and deliberately in
-`tests/unit`, not `tests/integration`: fix round 2's own ruling was
-explicit that a corpus built from perfect ties at exactly 1.0 is itself a
-degenerate trap, and there is no reason to approximate Task 4's own
-measured distributions through an embedder that cannot be asked to
-produce one specific float when the numbers are already on record. (A
-first attempt at this file lived in `tests/integration`, driven by plain
-`def` tests with no fixtures -- `tests/integration/conftest.py`'s autouse
-`_dispose_shared_engine` fixture requires an event loop, which a
-synchronous, DB-free test never opens, and pytest's own fixture-teardown
-bookkeeping broke in a way that failed *other, unrelated* tests in the
-same module. Moving the pure tests here, where nothing is async and
-nothing is autoused, was the fix -- not narrowing what each test covers.)
+- Fix round 1 compared only the best result to the second-best, so
+  `[0.13, 0.15, 0.70, ...]` (two genuinely close matches sitting above a
+  real tail -- `docs/PHASE-5.md` §3's own named case, "Camry LE vs Camry
+  SE") read as "flat", telling the model nothing stood out about a set
+  where two results plainly did.
+- Fix round 2 fixed that by generalising to a leading GROUP, capped at
+  half the set (`len // 2`) so a group could never be a majority. That cap
+  had the SAME bug one size down: `[0.10, 0.12, 0.90]` (`n = 3`, a group of
+  two excluded by `n // 2 = 1`) read as "flat" for the identical reason,
+  at a set size (`search_products` with a small `limit`, or a filtered
+  catalogue) that is entirely ordinary.
+- Fix round 3 replaced the majority cap with a single rule that scales
+  correctly at every `n`: a candidate leading group is only considered
+  when it does not outnumber its own remainder by more than
+  `_SHARP_LEADER_GAP_RATIO` allows (`boundary * _SHARP_LEADER_GAP_RATIO <=
+  remainder`) -- reusing the same constant that already governs how big a
+  gap must be, rather than introducing a second tuned number.
+
+Pure numbers, not a `HashingEmbedder` corpus, and in `tests/unit`, not
+`tests/integration`: fix round 2 established that a corpus built from
+perfect ties at exactly 1.0 is a degenerate trap, and separately that
+`tests/integration/conftest.py`'s autouse, event-loop-requiring
+`_dispose_shared_engine` fixture corrupts pytest's own fixture-teardown
+bookkeeping when a plain synchronous test shares a module with it (a
+confirmed, recorded infrastructure hazard, not something this file works
+around by coincidence).
+
+Built through `_match_shape_note` and a minimal `ProductMatch` factory,
+not `_classify_distance_shape` directly: `_classify_distance_shape` alone
+has no defined behaviour below `_MIN_SHAPE_SAMPLE` results (that gate lives
+in `_match_shape_note`), and one of the shapes fix round 3 must cover --
+a two-element set -- only exists on the ACTUAL production seam, not the
+inner one.
 
 See `tests/integration/test_product_tools.py`'s own note for where the
 same shape is proven end to end, through a real embedder and the real
@@ -25,23 +42,98 @@ tool -- this file owns the classification boundary itself, that file owns
 the wiring around it.
 """
 
+import uuid
+
+from app.db.models import ProductAvailability
+from app.rag.products import ProductMatch
 from app.tools.products import (
+    _AMBIGUOUS_MATCH_QUALITY_NOTE,
     _FLAT_BAND_NOTE,
     _SHARP_LEADER_NOTE,
-    _classify_distance_shape,
+    _match_shape_note,
 )
 
 
+def _match(vector_distance: float | None) -> ProductMatch:
+    """A `ProductMatch` carrying only the one field `_match_shape_note`
+    reads -- every other field is an otherwise-irrelevant placeholder.
+    Constructed directly, with no database round trip, which is the whole
+    point of testing this seam here: the classification boundary is pure
+    arithmetic over `vector_distance` values, and deserves a test suite
+    that treats it as exactly that."""
+    return ProductMatch(
+        product_id=uuid.uuid4(),
+        external_id="sku",
+        name="Product",
+        description=None,
+        category=None,
+        price=None,
+        currency=None,
+        attributes={},
+        availability=ProductAvailability.IN_STOCK,
+        stock_quantity=None,
+        image_url=None,
+        product_url=None,
+        score=0.0,
+        rank=1,
+        vector_distance=vector_distance,
+        keyword_rank=None,
+    )
+
+
+def _shape_note(distances: list[float]) -> str:
+    return _match_shape_note([_match(d) for d in distances])
+
+
+# ---------------------------------------------------------------------------
+# The two regression examples, at the two sizes each was found at.
+# ---------------------------------------------------------------------------
+
+
 def test_two_near_tied_leaders_above_a_noise_tail_is_sharp_not_flat() -> None:
-    """The reviewer's exact regression example. Two results (0.13, 0.15)
-    sit far below a real tail (0.70 up to 1.00) -- `docs/PHASE-5.md` §3's
-    own named case, "Camry LE vs Camry SE" -- and fix round 1's
-    rank-1-vs-rank-2-only comparison called this "flat", telling the model
-    nothing stood out about a set where two results plainly did. Pinned
-    here so a regression back to that comparison fails this test directly,
-    not just a corpus-dependent integration test."""
+    """The reviewer's original regression example (fix round 1, `n = 10`).
+    Two results (0.13, 0.15) sit far below a real tail (0.70 up to 1.00).
+    Fix round 1's rank-1-vs-rank-2-only comparison called this "flat";
+    pinned here so a regression back to that comparison fails this test
+    directly, not just a corpus-dependent integration test."""
     distances = [0.13, 0.15, 0.70, 0.75, 0.79, 0.85, 0.91, 0.92, 0.93, 1.00]
-    assert _classify_distance_shape(distances) == _SHARP_LEADER_NOTE
+    assert _shape_note(distances) == _SHARP_LEADER_NOTE
+
+
+def test_two_genuine_matches_above_one_outlier_is_sharp_at_small_n() -> None:
+    """The reviewer's fix round 3 regression example: the identical shape
+    as the test above, at `n = 3`. Fix round 2's `len // 2` cap excluded a
+    group of two here (`3 // 2 = 1`), reproducing fix round 1's exact
+    class of false statement at a size that is entirely ordinary for
+    `search_products` (a small `limit`, or a filtered catalogue) rather
+    than a corner case."""
+    distances = [0.10, 0.12, 0.90]
+    assert _shape_note(distances) == _SHARP_LEADER_NOTE
+
+
+def test_three_genuine_matches_above_two_outliers_is_sharp_at_small_n() -> None:
+    """The same regression at `n = 5`: a group of three, correctly excluded
+    from consideration under fix round 2's cap (`5 // 2 = 2`), now
+    correctly included (`boundary=3` leaves a remainder of 2, and
+    `3 * 0.5 = 1.5 <= 2`)."""
+    distances = [0.10, 0.11, 0.12, 0.85, 0.90]
+    assert _shape_note(distances) == _SHARP_LEADER_NOTE
+
+
+def test_a_lone_trailing_outlier_does_not_make_the_rest_a_leading_group() -> None:
+    """Nine near-tied results (a flat cluster on their own) followed by one
+    outlier far from all of them. A group of nine leaves a remainder of
+    only one (`9 * 0.5 = 4.5 > 1`), so fix round 3's remainder rule
+    excludes it exactly as fix round 2's majority cap did -- this is the
+    shape that rule exists to keep FLAT, and it must stay FLAT under the
+    new rule too."""
+    distances = [0.10, 0.12, 0.14, 0.16, 0.18, 0.20, 0.22, 0.24, 0.26, 0.90]
+    assert _shape_note(distances) == _FLAT_BAND_NOTE
+
+
+# ---------------------------------------------------------------------------
+# Task 4's own measured distributions.
+# ---------------------------------------------------------------------------
 
 
 def test_the_measured_single_leader_shape_is_sharp() -> None:
@@ -54,7 +146,7 @@ def test_the_measured_single_leader_shape_is_sharp() -> None:
     (0.5638 of a 0.7999 total spread, ratio 0.7048), comfortably clear of
     every other candidate boundary in this list."""
     distances = [0.1294, 0.6932, 0.75, 0.81, 0.86, 0.9293]
-    assert _classify_distance_shape(distances) == _SHARP_LEADER_NOTE
+    assert _shape_note(distances) == _SHARP_LEADER_NOTE
 
 
 def test_the_measured_unrelated_query_shape_is_flat() -> None:
@@ -76,7 +168,7 @@ def test_the_measured_unrelated_query_shape_is_flat() -> None:
         0.9800,
         1.0000,
     ]
-    assert _classify_distance_shape(distances) == _FLAT_BAND_NOTE
+    assert _shape_note(distances) == _FLAT_BAND_NOTE
 
 
 def test_the_measured_sharp_and_flat_shapes_produce_different_notes() -> None:
@@ -86,21 +178,49 @@ def test_the_measured_sharp_and_flat_shapes_produce_different_notes() -> None:
     anything."""
     sharp = [0.1294, 0.6932, 0.75, 0.81, 0.86, 0.9293]
     flat = [0.9139, 0.9201, 0.9280, 0.9350, 0.9410, 0.9500, 0.9580, 0.9650, 0.9800, 1.0000]
-    assert _classify_distance_shape(sharp) != _classify_distance_shape(flat)
-    assert _classify_distance_shape(sharp) == _SHARP_LEADER_NOTE
-    assert _classify_distance_shape(flat) == _FLAT_BAND_NOTE
+    assert _shape_note(sharp) != _shape_note(flat)
+    assert _shape_note(sharp) == _SHARP_LEADER_NOTE
+    assert _shape_note(flat) == _FLAT_BAND_NOTE
 
 
-def test_a_lone_trailing_outlier_does_not_make_the_rest_a_leading_group() -> None:
-    """Nine near-tied results (a flat cluster on their own) followed by one
-    outlier far from all of them. Without a cap on how large a "leading
-    group" is allowed to be, this cluster of NINE would register as
-    "leading" the one outlier -- misusing `_SHARP_LEADER_NOTE`'s own
-    wording ("the top result(s) ... stand out"), which means a genuine
-    minority, not nine-tenths of the returned set. `_classify_distance_shape`'s
-    `max_group_size = len(sorted_distances) // 2` -- derived from the
-    set's own size, not a second tuned constant -- is what keeps this
-    FLAT: a leading group cannot be the majority of the list and still be
-    leading a tail."""
-    distances = [0.10, 0.12, 0.14, 0.16, 0.18, 0.20, 0.22, 0.24, 0.26, 0.90]
-    assert _classify_distance_shape(distances) == _FLAT_BAND_NOTE
+# ---------------------------------------------------------------------------
+# The remaining shapes fix round 3 named -- each must produce a note that
+# is TRUE of the shape, not necessarily the same note as any other case.
+# ---------------------------------------------------------------------------
+
+
+def test_a_two_element_set_falls_back_to_the_ambiguous_note() -> None:
+    """Two results are `_MIN_SHAPE_SAMPLE`'s own floor: there is exactly one
+    gap and nothing of its own to compare it against, so `_match_shape_note`
+    never even reaches `_classify_distance_shape` for this shape -- the
+    honest, and only true, statement is "too few results to tell"."""
+    assert _shape_note([0.20, 0.90]) == _AMBIGUOUS_MATCH_QUALITY_NOTE
+
+
+def test_all_identical_distances_is_flat() -> None:
+    """Every result at the exact same distance from the query -- the
+    flattest possible band, definitionally true: nothing stands out
+    because nothing differs at all."""
+    assert _shape_note([0.5, 0.5, 0.5, 0.5]) == _FLAT_BAND_NOTE
+
+
+def test_a_smooth_monotonic_gradient_is_flat() -> None:
+    """Evenly spaced distances with no cluster and no break -- every
+    adjacent gap is identical, so no candidate boundary's gap is any more
+    "the" leading edge than any other. Calling any one of them a genuine
+    leader would be arbitrary, not supported by the data; FLAT ("nothing
+    stands out") is the true reading of a shape with no distinguishing
+    feature at all."""
+    distances = [0.10, 0.26, 0.42, 0.58, 0.74, 0.90]
+    assert _shape_note(distances) == _FLAT_BAND_NOTE
+
+
+def test_a_single_outlier_below_a_tight_cluster_is_sharp() -> None:
+    """The mirror image of the trailing-outlier shape above: one genuinely
+    close match sitting well below an otherwise tight cluster of much
+    worse ones. A group of one always clears the remainder rule (the
+    remainder is everything else), so this is the plainest possible
+    sharp-leader shape and must stay SHARP under any version of this
+    rule."""
+    distances = [0.10, 0.85, 0.86, 0.87, 0.88, 0.89]
+    assert _shape_note(distances) == _SHARP_LEADER_NOTE

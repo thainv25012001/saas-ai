@@ -119,6 +119,26 @@ Three responses were on the table:
    spread. A single clear leader is still just this same loop's
    `group_size == 1` case.
 
+   **Fix round 3: the same bug, one size down.** The "cannot be the
+   majority of the set" cap from fix round 2 is itself expressed as a
+   fraction of the WHOLE set (`len // 2`), and that turned out to be
+   wrong at small `n` for the identical reason a fixed cosine-distance
+   cutoff was wrong in the first place -- it does not scale. At `n = 10`
+   the cap correctly excludes a group of nine (leaving one real outlier
+   behind is not "leading a tail"). At `n = 3`, the SAME cap excludes a
+   group of two (`[0.10, 0.12, 0.90]`, `n // 2 = 1`) -- and a
+   `search_products` call returning three results from a small `limit` or
+   a filtered catalogue is entirely ordinary, not a corner case. What
+   actually needs to hold is not "the group is a minority of everything"
+   but "the group does not outnumber its own REMAINDER too heavily" --
+   `_classify_distance_shape` now admits a candidate boundary only when
+   `boundary * _SHARP_LEADER_GAP_RATIO <= remainder` (the group is at most
+   twice what it leaves behind), reusing the SAME constant that already
+   governs how big a gap must be, because both ask the identical question
+   ("is the thing claimed as dominant at least as substantial as what it
+   is weighed against") in different units. One rule, not a small-`n`
+   special case alongside a large-`n` one.
+
 **Citations.** `docs/ARCHITECTURE.md` §5.4 rule 3 ("message_citations
 records what was actually retrieved") is implemented for products the
 identical way it already is for chunks: every product that reaches the
@@ -230,17 +250,29 @@ _FLAT_BAND_NOTE = (
 # points is "I cannot tell", never a shape claim this data cannot support.
 _MIN_SHAPE_SAMPLE = 3
 
-# The fraction of the returned set's OWN distance range (worst minus best)
-# that a leading group's own trailing gap must occupy before the set counts
-# as having a genuine leader. A RATIO, not a cosine distance: computed
-# from, and only ever compared against, the SAME query's own returned
-# distances, so -- unlike a fixed cosine-distance cutoff -- it carries no
-# assumption about what any one embedder's numbers mean in absolute terms,
-# which is exactly the constraint that ruled out an absolute cutoff in the
-# first place (see this module's docstring). 0.5 says "the gap behind the
-# leading group is at least as large as the entire spread of everything
-# else" -- a lopsided shape by construction, not a number tuned against any
-# one embedder's measurements.
+# Governs TWO structurally identical questions, reused rather than
+# duplicated as a second constant (fix round 3):
+#
+# 1. The fraction of the returned set's OWN distance range (worst minus
+#    best) that a leading group's own trailing gap must occupy before the
+#    set counts as having a genuine leader. A RATIO, not a cosine
+#    distance: computed from, and only ever compared against, the SAME
+#    query's own returned distances, so -- unlike a fixed cosine-distance
+#    cutoff -- it carries no assumption about what any one embedder's
+#    numbers mean in absolute terms, which is exactly the constraint that
+#    ruled out an absolute cutoff in the first place (see this module's
+#    docstring). 0.5 says "the gap behind the leading group is at least
+#    as large as the entire spread of everything else."
+# 2. (fix round 3) Whether a candidate GROUP SIZE is even worth checking
+#    at all: a group only "leads" a tail if the tail is at least half the
+#    group's own size (`_classify_distance_shape`'s `boundary *
+#    _SHARP_LEADER_GAP_RATIO <= remainder`) -- the identical question
+#    ("is X at least as substantial as what it is being weighed against")
+#    asked in a different unit (counts, not distance). Reusing the same
+#    number here rather than introducing a second one is deliberate: two
+#    independently-tuned constants would have been two chances for the
+#    next reviewer to ask "why THIS number", where one constant answering
+#    both questions only has to be justified once.
 _SHARP_LEADER_GAP_RATIO = 0.5
 
 
@@ -250,8 +282,8 @@ def _classify_distance_shape(sorted_distances: list[float]) -> str:
     `ProductMatch`), specifically so it can be tested against a literal
     list of numbers without constructing a full row for each one. This is
     also exactly the seam a reviewer (or Phase 6) would want to call this
-    logic through directly, the same way they already did against the
-    fix round's first version.
+    logic through directly, the same way they already did against both
+    of this module's earlier versions.
 
     **Why a leading GROUP, not a leading item (fix round 2).** The first
     version compared only the best result to the second-best, which
@@ -263,14 +295,33 @@ def _classify_distance_shape(sorted_distances: list[float]) -> str:
     this whole mechanism replaced: a note that asserts something false
     reads as a finding, where silence at least does not mislead.
 
-    The fix generalises "the gap after position 0" to "the largest gap
-    after any position up to half the set" -- checking every candidate
-    boundary for a leading group of size 1 up to `len(sorted_distances) //
-    2` (a group cannot be the MAJORITY of the set and still be "leading a
-    tail"; this is a structural bound derived from the set's own size, not
-    a second tuned constant) and keeping whichever boundary has the
-    biggest gap relative to the set's total spread. A single clear leader
-    is still just the `group_size == 1` case of this same loop -- nothing
+    **Why "at most twice the remainder", not "at most half the set" (fix
+    round 3).** Fix round 2's fix capped a candidate leading group at
+    `len // 2` -- a group cannot be the majority of the set. That cap
+    itself had the SAME bug one level down: at `n = 10`, nine near-tied
+    results plus one trailing outlier correctly stayed FLAT (a group of
+    nine is excluded, over the `n // 2 = 5` cap), but at `n = 3`, a group
+    of two (two genuine matches, one real outlier -- `[0.10, 0.12, 0.90]`)
+    was ALSO excluded (`n // 2 = 1`), so the note wrongly claimed "nothing
+    stands out" about a set where two results plainly did -- the identical
+    class of false statement fix round 2 exists to prevent, surviving at a
+    size (`search_products` with a small `limit`, or a filtered catalogue)
+    that is entirely ordinary. A cap expressed as a FRACTION OF THE WHOLE
+    SET cannot be right at both a large and a small `n` in this way; what
+    actually needs to be true is that the group leaves behind a REMAINDER
+    substantial enough, relative to the group's OWN size, to plausibly
+    call the group "leading" it -- not that the group is outright a
+    minority of everything. `boundary * _SHARP_LEADER_GAP_RATIO <=
+    remainder` (equivalently: the group is at most twice the remainder)
+    is that single rule, with no separate size regime for small `n`: it
+    is what lets `n = 3`'s group of two (remainder one, exactly at the
+    line) through while still excluding `n = 10`'s group of nine
+    (remainder one, nowhere close for a group that size).
+
+    Checks every candidate boundary the remainder rule admits and keeps
+    whichever has the biggest gap relative to the set's total spread. A
+    single clear leader is still just the `group_size == 1` case of this
+    same loop (a remainder of `n - 1` always clears the bar) -- nothing
     about the sharp/flat classification for that shape changes.
     """
     total_spread = sorted_distances[-1] - sorted_distances[0]
@@ -285,11 +336,20 @@ def _classify_distance_shape(sorted_distances: list[float]) -> str:
         # on what the distances themselves mean.
         return _FLAT_BAND_NOTE
 
-    max_group_size = max(1, len(sorted_distances) // 2)
-    best_gap_ratio = max(
-        (sorted_distances[boundary] - sorted_distances[boundary - 1]) / total_spread
-        for boundary in range(1, max_group_size + 1)
-    )
+    sample_size = len(sorted_distances)
+    best_gap_ratio = 0.0
+    for boundary in range(1, sample_size):
+        remainder = sample_size - boundary
+        if boundary * _SHARP_LEADER_GAP_RATIO > remainder:
+            # This group would outnumber its own remainder by more than
+            # `_SHARP_LEADER_GAP_RATIO` allows -- not a leading group, just
+            # most of the list with a few stragglers, and every LARGER
+            # boundary only shrinks the remainder further, so nothing past
+            # this point can pass either.
+            break
+        gap = sorted_distances[boundary] - sorted_distances[boundary - 1]
+        best_gap_ratio = max(best_gap_ratio, gap / total_spread)
+
     if best_gap_ratio >= _SHARP_LEADER_GAP_RATIO:
         return _SHARP_LEADER_NOTE
     return _FLAT_BAND_NOTE
