@@ -589,6 +589,20 @@ class _LockedSessionTool(AgentTool):
         `except SQLAlchemyError` there) rather than letting it escape --
         containment behind prevention, because no tool failure of any kind
         may cost a turn that already reached the user.
+
+        **What containment does and does not buy, stated exactly**, because
+        it is easy to read the in-band `ChatError` as the whole story and it
+        is not. In that residual case the client does get a terminal `error`
+        event instead of a stream that stops mid-air -- but the session is
+        still unusable, so the caller's own commit fails afterwards: for
+        `POST /chat/stream` that is `tenant_session.__aexit__` raising inside
+        `_pump`'s `finally`, after the terminal event is already on the wire,
+        and `_queue_title` is skipped because the turn never committed. The
+        turn's rows are gone either way. Containment converts "an uncaught
+        exception the client sees as a generic internal error" into "a named
+        failure the client can render", which is worth having and is not the
+        same as saving the turn. Only prevention saves the turn, which is why
+        `statement_timeout` is the primary fix and this is the floor.
         """
         statement_timeout_ms = max(1, int(self._own_timeout_seconds * 1000))
         try:

@@ -1204,3 +1204,60 @@ async def test_a_step_limit_still_wins_over_the_providers_stop_reason(tenant_a, 
     async with tenant_session(tenant_a) as session:
         history = await ConversationService(session, tenant_a).history(conversation_id)
     assert history[1].finish_reason == "step_limit_reached"
+
+
+async def test_a_tools_statement_timeout_does_not_outlive_the_tool_call(tenant_a, owner_connection):
+    """`_LockedSessionTool._clear_statement_timeout` (re-review, item 2).
+
+    `_run_bounded` issues `SET LOCAL statement_timeout` per call so a slow
+    query is cancelled by Postgres rather than by the event loop. `SET LOCAL`
+    is transaction-scoped and Postgres undoes it when the savepoint it was
+    issued inside ROLLS BACK -- but NOT when that savepoint is RELEASED,
+    which is what a successful call does. Without the explicit reset in
+    `_run_bounded`'s `finally`, a single successful `retrieve_knowledge`
+    therefore leaves the tool's 10s budget clamped on the turn's transaction
+    for every write `send()` makes afterwards: the assistant message, the
+    tool-call rows, the citations, the usage row. Nothing in the suite would
+    notice -- replacing that `finally` body with `pass` leaves 48 tests green
+    -- because none of those writes is slow enough to hit 10s.
+
+    Asserted on `current_setting('statement_timeout')` read from the SAME
+    session, immediately after a turn that really did call the tool, because
+    that is the value the caller's own later statements would run under.
+    `'0'` is Postgres' spelling of "no limit", which is what this session
+    began with and must end with.
+    """
+    query = "warranty coverage duration"
+    query_vector = await _embed(query)
+    async with tenant_session(tenant_a) as session:
+        await _ready_document_with_chunks(
+            session, tenant_a, [(f"{query} is explained here.", query_vector)], title="Warranty"
+        )
+        agent = await _agent(session, tenant_a)
+        agent_id = agent.id
+    await enable_builtin_tool(owner_connection, tenant_a, agent_id)
+
+    provider = FakeProvider(
+        turns=[
+            [FakeToolCall(id="c1", name="retrieve_knowledge", input={"query": query})],
+            "Two years.",
+        ]
+    )
+    async with tenant_session(tenant_a) as session:
+        service = ChatService(session, tenant_a, provider_override=provider)
+        events = [event async for event in service.send(agent_id, query)]
+        # Same session, same still-open transaction the turn's own writes ran
+        # in -- reading it on a fresh session would prove nothing, since
+        # `SET LOCAL` never escapes the transaction that issued it.
+        setting = (
+            await session.execute(text("SELECT current_setting('statement_timeout')"))
+        ).scalar_one()
+
+    # Precondition: the tool really ran, so a timeout really was set and
+    # really had to be cleared.
+    tool_end = next(e for e in events if isinstance(e, ChatToolCallEnd))
+    assert tool_end.results[0].is_error is False, tool_end.results[0].result
+    assert setting == "0", (
+        "a tool's statement_timeout outlived its call and is now clamping "
+        f"the rest of the turn's transaction at {setting}"
+    )

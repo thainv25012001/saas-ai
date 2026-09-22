@@ -535,8 +535,12 @@ async def run(self, ctx: AgentContext) -> AsyncIterator[AgentEvent]:
                 case "usage":      usage = ev.usage
                 case "message_end": stop_reason = ev.stop_reason
 
-        calls  = [c for c in calls if c.id not in seen_ids]   # duplicate ids are dropped
-        seen_ids |= {c.id for c in calls}
+        unique = []                             # dedup applies WITHIN a step as well
+        for c in calls:                         # as across them -- two calls in ONE
+            if c.id not in seen_ids:            # step sharing an id is the case that
+                seen_ids.add(c.id)              # was reproduced, so `seen_ids` has to
+                unique.append(c)                # grow as this walks, not after it
+        calls = unique                          # (`AgentRunner._unique_calls`)
         blocks = ([Text(text)] if text else []) + calls
         if blocks:
             messages.append(Assistant(blocks))          # text AND tool calls — never just
@@ -736,6 +740,27 @@ and — per prompt rule 8 — the model must confirm details before calling it.
   queued for a while before it ever executes; starting its clock at dispatch would let that
   wait alone fabricate a timeout for a call that never got the chance to run. A timeout is a
   tool error, not a hung request.
+
+  That one declared budget is enforced by **three** mechanisms, and they are
+  deliberately not the same number, because *how* a call is stopped decides whether
+  the turn survives it:
+
+  | Bound | Value | Enforced by | Stops |
+  |---|---|---|---|
+  | The tool's database work | `timeout_seconds` (10s) | `SET LOCAL statement_timeout`, per call, inside a savepoint | one statement, as an ordinary `query_canceled` error a savepoint recovers from |
+  | The tool's non-database work | `timeout_seconds + 5s` | `asyncio.timeout`, opened after the lock is acquired | the task, by cancellation |
+  | The call including its queueing | `timeout_seconds + 30s` | `asyncio.timeout` in `ToolRegistry.execute` | a call stuck for a structural reason (a leaked lock, a hung sibling) |
+
+  The first is what makes the whole scheme safe. Cancelling a task mid-statement
+  invalidates the asyncpg connection, and a savepoint recovers a transaction from a
+  *statement error*, never from a cancelled statement on an invalidated connection —
+  so an `asyncio` bound alone cost the entire turn, including the answer already on
+  the user's screen. Bounding database work at the database means the second bound
+  only ever fires when the tool is provably **not** inside a statement, which is
+  exactly when cancelling it is safe. The `+5s` grace exists to guarantee that
+  ordering; the `+30s` one is a soft allowance for queueing behind siblings sharing
+  the turn's session, and is never quoted back to the model as if it were the tool's
+  own budget. See `_LockedSessionTool._run_bounded`.
 - **Failure never becomes fiction.** A failed tool returns `is_error=True` with a message
   such as `"Unable to check live inventory."` The prompt forbids substituting a guess, and
   the UI shows that the tool failed. This is the explicit requirement from the brief's
