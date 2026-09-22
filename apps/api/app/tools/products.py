@@ -54,18 +54,51 @@ Three responses were on the table:
    can make this decision (Task 4's own docstring says so); the choice made
    here is to hand them to the one party who does not need a calibrated
    number to use them usefully: the model itself, on this one call, in the
-   context of this one question. `_MATCH_QUALITY_NOTE` below (added to
-   `content` only when a `query` actually drove ranking -- filters-only
-   browsing has no relevance question to caveat) states plainly that
-   results are ranked, not floored, and that a large `vector_distance`
-   alongside a missing `keyword_rank` means "the least-bad option", not "a
-   good match" -- and each result's `data` payload carries the literal
-   numbers, per match, for the model to weigh. This reports match quality
-   instead of hiding it, without smuggling a magic number in as if it had
-   been measured. It does not stop a model that ignores the note from
-   recommending anyway -- no prompt rule fully holds, per §2 item 2 -- but
-   that is the same partial-mitigation shape every other layer of §2
-   already accepts, not a new gap this module introduces.
+   context of this one question. Each result's `data` payload carries the
+   literal numbers, per match, for the model to weigh, and `content` (only
+   when a `query` actually drove ranking -- filters-only browsing has no
+   relevance question to caveat) is prefixed with a note about what the
+   returned set looks like. This reports match quality instead of hiding
+   it, without smuggling a magic number in as if it had been measured. It
+   does not stop a model that ignores the note from recommending anyway --
+   no prompt rule fully holds, per §2 item 2 -- but that is the same
+   partial-mitigation shape every other layer of §2 already accepts, not a
+   new gap this module introduces.
+
+   **The note is keyed on the SHAPE of the returned set, not a constant
+   string** (`_match_shape_note`, added in this task's fix round). The
+   first version of this module used one fixed sentence regardless of
+   whether the top result was the measured-excellent case (cosine distance
+   0.1294) or the measured-garbage case (0.9139-1.0000, all ten rows) --
+   which has two problems, and the second is the one that matters. It risks
+   exactly the failure this brief warns about: hedging on a genuinely good
+   match is a new harm, not a fix for the old one. And more fundamentally,
+   **a note that always fires carries no information** -- `docs/PHASE-5.md`
+   §2 item 2 already says prompt rules alone do not hold here, and a
+   constant disclaimer is the weakest possible form of one, since the model
+   has no way to tell "be careful here" apart from "no need to be", so it
+   degrades into noise a model learns to skip.
+
+   The fix keys the note on a discriminator that needs no cross-embedder
+   calibration -- the ratio between the gap separating the best result from
+   the rest, and the total spread of the returned set's OWN `vector_distance`
+   values (`_SHARP_LEADER_GAP_RATIO`, `_match_shape_note` below). This is
+   self-referential: it is computed from, and only ever compared against,
+   the SAME query's own returned distances, so -- unlike an absolute cosine
+   -distance cutoff -- it carries no assumption about what any one
+   embedder's numbers mean, which is the exact constraint that ruled out
+   option 1 above. A sharp leader (one result meaningfully closer than
+   everything else) gets a note that says so, without claiming it is a
+   GOOD match in any absolute sense -- only that it stands out from its own
+   peers in this list. A flat band (nothing stands out) gets a more
+   pointed caution, because that is precisely the shape Task 4 measured
+   for a wholly unrelated query. Degrades safely to the original, uniform
+   note whenever the shape cannot be assessed honestly: too few results
+   with a real `vector_distance` to have a leader and a "rest" to compare
+   it against at all (`_MIN_SHAPE_SAMPLE`) -- which is every single-result
+   set, and every result set the keyword arm alone produced. Never a
+   confident claim the data does not support; the strong claim is the one
+   that can be wrong.
 
 **Citations.** `docs/ARCHITECTURE.md` §5.4 rule 3 ("message_citations
 records what was actually retrieved") is implemented for products the
@@ -118,17 +151,108 @@ _NOT_FOUND_MESSAGE = "No product found with that id."
 # Added to `content` only for a ranked (query-driven) search -- a
 # filters-only browse has no relevance question to caveat, since every
 # surviving row satisfied an exact predicate rather than a similarity
-# score. See this module's own docstring for the argument behind stating
-# this instead of filtering on it.
-_MATCH_QUALITY_NOTE = (
+# score. Which of the three notes below fires is decided by
+# `_match_shape_note`; see this module's own docstring ("The note is keyed
+# on the SHAPE...") for why a single constant string was replaced with this.
+
+# Degrade-safe fallback: whenever the shape of the returned set cannot be
+# assessed honestly (`_MIN_SHAPE_SAMPLE`), this is the ONLY note that fires
+# -- unchanged from the fix round's original, uniform note, since "I cannot
+# tell" is still an honest thing to say and was never the problem with it.
+_AMBIGUOUS_MATCH_QUALITY_NOTE = (
     "Results are ranked by relevance to your query but are NOT filtered by "
-    "a minimum relevance threshold -- the least-bad match in the catalogue "
-    "is still returned even when nothing is actually a good fit. Check each "
-    "result's vector_distance (lower = closer semantic match; absent means "
-    "the product has no embedding yet) and keyword_rank (absent means no "
-    "exact lexical overlap with your query) before presenting a result as "
-    "relevant. Do not assume the first result answers the question."
+    "a minimum relevance threshold, and there are too few results here to "
+    "tell whether the top one stands out or is just the least-bad option. "
+    "Check each result's vector_distance (lower = closer semantic match; "
+    "absent means the product has no embedding yet) and keyword_rank "
+    "(absent means no exact lexical overlap with your query) before "
+    "presenting a result as relevant. Do not assume the first result "
+    "answers the question."
 )
+
+# A sharp leader: one result's vector_distance is clearly separated from
+# the rest of the returned set (see `_match_shape_note`). Deliberately does
+# NOT say the result is a good match -- only that it stands out from its
+# own peers here, which is the strongest claim this signal supports.
+_SHARP_LEADER_NOTE = (
+    "The top result's vector_distance is clearly closer than the rest of "
+    "this list -- a real gap, not noise -- which is some evidence it is "
+    "more relevant than its peers here. That is not the same as being a "
+    "good match in an absolute sense: verify it actually answers the "
+    "question, and check its keyword_rank too, before presenting it as "
+    "the answer."
+)
+
+# A flat band: nothing in the returned set stands out from the rest (see
+# `_match_shape_note`) -- the same shape Task 4 measured for a query with
+# no genuine match in the catalogue at all (docs/PHASE-5.md §2; all ten
+# rows at cosine distance 0.9139-1.0000). More pointed than the ambiguous
+# note above on purpose: this is not "too little data to tell", it is
+# "enough data to tell, and what it shows is that nothing stands out."
+_FLAT_BAND_NOTE = (
+    "These results are packed closely together in vector_distance -- "
+    "nothing here stands out as a clearly stronger match than the rest, "
+    "the same shape a wholly unrelated query produces against this "
+    "catalogue. Ranking is not filtering: a closely bunched list is a "
+    "sign none of these may actually be relevant. Do not present the top "
+    "result as clearly relevant without other evidence."
+)
+
+# How many results with a real `vector_distance` are needed before the
+# returned set's shape says anything at all. Below this, "sharp leader" and
+# "flat band" are not merely unmeasured, they are UNKNOWABLE: one point has
+# no gap to speak of, and two points have exactly one gap with nothing of
+# its own to compare that gap against (`_match_shape_note`'s "rest" is a
+# single value, which has no spread). The honest answer below this many
+# points is "I cannot tell", never a shape claim this data cannot support.
+_MIN_SHAPE_SAMPLE = 3
+
+# The fraction of the returned set's OWN distance range (worst minus best)
+# that the gap between the best and second-best result must occupy before
+# the set counts as having a genuine leader. A RATIO, not a cosine
+# distance: computed from, and only ever compared against, the SAME
+# query's own returned distances, so -- unlike a fixed cosine-distance
+# cutoff -- it carries no assumption about what any one embedder's numbers
+# mean in absolute terms, which is exactly the constraint that ruled out an
+# absolute cutoff in the first place (see this module's docstring). 0.5
+# says "the leader's own gap is at least as large as the entire spread of
+# everything behind it" -- a lopsided shape by construction, not a number
+# tuned against any one embedder's measurements.
+_SHARP_LEADER_GAP_RATIO = 0.5
+
+
+def _match_shape_note(matches: list[ProductMatch]) -> str:
+    """Which of the three notes above describes this returned set's own
+    `vector_distance` values -- self-referentially, with no cross-embedder
+    calibration, because nothing here is ever compared to anything but the
+    SAME set's own numbers (see this module's docstring).
+
+    Sorts the non-`None` distances ascending, then looks only at where the
+    single biggest gap in the WHOLE sorted list falls. The gap between the
+    best and second-best result is the one that matters (a leader separates
+    itself from EVERYTHING behind it, not just its immediate neighbour) --
+    checking any other adjacent pair would call a set "sharp" because of a
+    gap in the middle of an otherwise flat tail, which is not the shape
+    this note claims to describe.
+    """
+    distances = sorted(m.vector_distance for m in matches if m.vector_distance is not None)
+    if len(distances) < _MIN_SHAPE_SAMPLE:
+        return _AMBIGUOUS_MATCH_QUALITY_NOTE
+    total_spread = distances[-1] - distances[0]
+    if total_spread <= 1e-9:
+        # Every embedded result is (near enough) equidistant from the
+        # query -- the flattest possible band, and not merely "ambiguous":
+        # there IS enough data here, and what it shows is that nothing
+        # stands out. Guards against a bare `== 0.0` check being defeated
+        # by float noise from postgres/pgvector's own arithmetic, without
+        # smuggling in a distance-scale-dependent tolerance -- 1e-9 is
+        # being used as "indistinguishable from zero", not as a threshold
+        # on what the distances themselves mean.
+        return _FLAT_BAND_NOTE
+    leader_gap_ratio = (distances[1] - distances[0]) / total_spread
+    if leader_gap_ratio >= _SHARP_LEADER_GAP_RATIO:
+        return _SHARP_LEADER_NOTE
+    return _FLAT_BAND_NOTE
 
 
 class SearchProductsArgs(BaseModel):
@@ -352,7 +476,7 @@ class SearchProductsTool(AgentTool):
         ]
         content = "\n\n".join(blocks)
         if ranked:
-            content = f"{_MATCH_QUALITY_NOTE}\n\n{content}"
+            content = f"{_match_shape_note(matches)}\n\n{content}"
 
         return ToolResult(
             content=content,
