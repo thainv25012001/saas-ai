@@ -15,7 +15,7 @@ from app.db.models import MembershipRole
 from app.db.session import engine
 from app.llm.base import ModelCapabilities
 from app.llm.errors import LLMUnavailableError
-from app.llm.fake_provider import FakeProvider
+from app.llm.fake_provider import FakeProvider, FakeToolCall
 from app.llm.types import (
     CompletionRequest,
     CompletionResponse,
@@ -27,6 +27,7 @@ from app.llm.types import (
     Usage,
 )
 from app.main import create_app
+from tests.conftest import enable_builtin_tool
 from tests.factories import agent_input
 
 pytestmark = pytest.mark.anyio
@@ -1272,3 +1273,105 @@ async def test_a_rolled_back_turn_queues_nothing(app, api_client, clean_users, t
     )
 
     assert titles.calls == []
+
+
+# ---------------------------------------------------------------------------
+# 12. Task 7 -- tool_call_start/tool_call_end on the wire
+# ---------------------------------------------------------------------------
+
+
+async def test_tool_call_start_and_end_appear_on_the_wire_in_order(
+    app, api_client, clean_users, owner_connection
+):
+    """The SSE-facing shape of Task 7's two new event types: `arguments` on
+    `tool_call_start` echoes what the model sent, `result`/`is_error` on
+    `tool_call_end` are present, and `tool_call_start` precedes its matching
+    `tool_call_end` -- all without ever putting the tool's full result
+    payload on the wire (`ChatToolCallResult.result` is an excerpt; see
+    `app/chat/service.py`)."""
+    token = await _register(api_client, "tool-call-wire@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id)
+    tenant = TenantContext(
+        organization_id=org_id, user_id=None, role=MembershipRole.OWNER, request_id="test"
+    )
+    await enable_builtin_tool(owner_connection, tenant, agent_id)
+
+    provider = FakeProvider(
+        turns=[
+            [FakeToolCall(id="call_1", name="retrieve_knowledge", input={"query": "widgets"})],
+            "No matches, but here's what I know generally.",
+        ]
+    )
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: provider
+
+    response = await api_client.post(
+        CHAT_URL,
+        json={"agent_id": str(agent_id), "message": "Tell me about widgets"},
+        headers=_auth(token),
+    )
+
+    events = _parse_events(response.text)
+    types = [e["type"] for e in events]
+    assert "tool_call_start" in types
+    assert "tool_call_end" in types
+    assert types.index("tool_call_start") < types.index("tool_call_end")
+
+    start = events[types.index("tool_call_start")]
+    assert start["calls"] == [
+        {"id": "call_1", "name": "retrieve_knowledge", "arguments": {"query": "widgets"}}
+    ]
+
+    end = events[types.index("tool_call_end")]
+    [result] = end["results"]
+    assert result["tool_call_id"] == "call_1"
+    assert result["tool_name"] == "retrieve_knowledge"
+    assert result["is_error"] is False
+    # No document was seeded, so the tool's own "nothing relevant found"
+    # message is what the compact result carries -- proving `result` is
+    # real tool output, not a placeholder.
+    assert "No relevant knowledge found" in result["result"]
+    # And no `citations` event: an empty result carries none.
+    assert "citations" not in types
+
+
+async def test_a_failing_tool_call_reports_is_error_on_the_wire_and_the_stream_still_completes(
+    app, api_client, clean_users, owner_connection, monkeypatch
+):
+    token = await _register(api_client, "tool-call-wire-error@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _make_agent(org_id)
+    tenant = TenantContext(
+        organization_id=org_id, user_id=None, role=MembershipRole.OWNER, request_id="test"
+    )
+    await enable_builtin_tool(owner_connection, tenant, agent_id)
+
+    from app.rag.retrieve import RetrievalService
+
+    async def _boom(self, query, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("outage")
+
+    monkeypatch.setattr(RetrievalService, "retrieve", _boom)
+
+    provider = FakeProvider(
+        turns=[
+            [FakeToolCall(id="call_1", name="retrieve_knowledge", input={"query": "widgets"})],
+            "Still able to help.",
+        ]
+    )
+    app.dependency_overrides[chat_api.get_chat_provider] = lambda: provider
+
+    response = await api_client.post(
+        CHAT_URL,
+        json={"agent_id": str(agent_id), "message": "Tell me about widgets"},
+        headers=_auth(token),
+    )
+
+    events = _parse_events(response.text)
+    types = [e["type"] for e in events]
+    assert types[-1] == "message_end"
+    assert "error" not in types
+
+    end = events[types.index("tool_call_end")]
+    [result] = end["results"]
+    assert result["is_error"] is True

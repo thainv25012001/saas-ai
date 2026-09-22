@@ -275,10 +275,14 @@ function PlaygroundContent() {
               seenConversationId = event.conversation_id;
               break;
             case "citations":
-              // Arrives after message_start and before the first
-              // text_delta (see docs/PHASE-3.md and `ChatCitations`'s
-              // docstring), so sources are on screen while the answer is
-              // still streaming in rather than only once it ends.
+              // Phase 3 guaranteed this arrived before the first
+              // text_delta; Phase 4 makes retrieval a tool the model can
+              // call after already speaking, so this may now land
+              // mid-stream or after the visible answer (see
+              // `ChatMessageData.citations`'s docstring in
+              // `ChatMessage.tsx` and `ChatCitations`'s own docstring in
+              // `apps/api/app/chat/service.py`). Merged in wherever it
+              // arrives rather than assumed to be first.
               setMessages((prev) =>
                 prev.map((m) =>
                   m.id === assistantId
@@ -303,6 +307,51 @@ function PlaygroundContent() {
                 prev.map((m) =>
                   m.id === assistantId ? { ...m, text: m.text + event.text } : m,
                 ),
+              );
+              break;
+            case "tool_call_start":
+              // Appended in the order the calls started; `tool_call_end`
+              // below matches each one back by id, so two calls in the same
+              // step (a step can gather more than one) never get mixed up.
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId
+                    ? {
+                        ...m,
+                        toolCalls: [
+                          ...(m.toolCalls ?? []),
+                          ...event.calls.map((call) => ({
+                            id: call.id,
+                            name: call.name,
+                            arguments: call.arguments,
+                            status: "running" as const,
+                          })),
+                        ],
+                      }
+                    : m,
+                ),
+              );
+              break;
+            case "tool_call_end":
+              setMessages((prev) =>
+                prev.map((m) => {
+                  if (m.id !== assistantId || !m.toolCalls) return m;
+                  const byId = new Map(event.results.map((result) => [result.tool_call_id, result]));
+                  return {
+                    ...m,
+                    toolCalls: m.toolCalls.map((call) => {
+                      const result = byId.get(call.id);
+                      return result
+                        ? {
+                            ...call,
+                            status: "done" as const,
+                            result: result.result,
+                            isError: result.is_error,
+                          }
+                        : call;
+                    }),
+                  };
+                }),
               );
               break;
             case "message_end":

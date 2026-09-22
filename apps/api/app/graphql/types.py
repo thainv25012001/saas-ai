@@ -10,10 +10,12 @@ from app.db.models import AgentConfig as AgentConfigModel
 from app.db.models import Conversation as ConversationModel
 from app.db.models import ConversationMessage as MessageModel
 from app.db.models import Document as DocumentModel
+from app.db.models import Lead as LeadModel
 from app.db.models import MessageCitation as MessageCitationModel
 from app.db.models import Organization as OrganizationModel
 from app.db.models import Prompt as PromptModel
 from app.db.models import PromptVersion as PromptVersionModel
+from app.db.models import Tool as ToolModel
 from app.graphql.context import Context
 
 
@@ -89,7 +91,6 @@ class AgentConfig:
     persona: str | None
     greeting: str | None
     fallback_message: str
-    enabled_tool_names: list[str]
     retrieval_top_k: int
     retrieval_min_score: float
     max_agent_steps: int
@@ -103,7 +104,6 @@ class AgentConfig:
             persona=model.persona,
             greeting=model.greeting,
             fallback_message=model.fallback_message,
-            enabled_tool_names=list(model.enabled_tool_names),
             retrieval_top_k=model.retrieval_top_k,
             retrieval_min_score=model.retrieval_min_score,
             max_agent_steps=model.max_agent_steps,
@@ -384,6 +384,83 @@ class Conversation:
         return [Message.from_model(row) for row in rows]
 
 
+@strawberry.enum
+class LeadStatus(enum.Enum):
+    NEW = "new"
+    CONTACTED = "contacted"
+    QUALIFIED = "qualified"
+    WON = "won"
+    LOST = "lost"
+
+
+@strawberry.type
+class Lead:
+    id: uuid.UUID
+    agent_id: uuid.UUID
+    conversation_id: uuid.UUID
+    #: Untrusted -- captured from the model's own `create_lead` tool call,
+    #: which in turn copied whatever the visitor typed. Render as JSX text
+    #: only, exactly like `Message.content` and `MessageCitation`'s fields
+    #: above: no `dangerouslySetInnerHTML`, no markdown pass.
+    name: str | None
+    email: str | None
+    phone: str | None
+    interest: str | None
+    status: LeadStatus
+    created_at: datetime
+
+    @classmethod
+    def from_model(cls, model: LeadModel) -> "Lead":
+        return cls(
+            id=model.id,
+            agent_id=model.agent_id,
+            conversation_id=model.conversation_id,
+            name=model.name,
+            email=model.email,
+            phone=model.phone,
+            interest=model.interest,
+            status=LeadStatus(model.status.value),
+            created_at=model.created_at,
+        )
+
+    @strawberry.field
+    async def conversation(self, info: strawberry.Info[Context, None]) -> "Conversation | None":
+        """The thread this lead came from, for the dashboard's "captured
+        during this conversation" column. Batched through a loader for the
+        same reason `Agent.config` is: a page of leads would otherwise issue
+        one query per row just to show a title.
+
+        Nullable in principle (the conversation could have been deleted
+        since -- `ON DELETE CASCADE` on `leads.conversation_id` actually
+        takes the lead with it, but a resolver reading through a loader
+        keyed by id has no way to assume that stays true forever), so this
+        mirrors `Query.conversation`'s own "not found is null" contract
+        rather than raising.
+        """
+        if info.context.conversation_loader is None:
+            raise AuthenticationError("authentication required")
+        model = await info.context.conversation_loader.load(self.conversation_id)
+        return Conversation.from_model(model) if model else None
+
+
+@strawberry.type
+class AgentTool:
+    """One row of the per-agent tool toggle (Task 8) -- a `tools` row this
+    organization can see (global builtin or its own), plus whether *this*
+    agent's `agent_tools` link enables it. See `AgentService.list_tools` for
+    what `is_enabled` means when no link exists at all.
+    """
+
+    id: uuid.UUID
+    name: str
+    description: str | None
+    is_enabled: bool
+
+    @classmethod
+    def from_pair(cls, tool: ToolModel, is_enabled: bool) -> "AgentTool":
+        return cls(id=tool.id, name=tool.name, description=tool.description, is_enabled=is_enabled)
+
+
 @strawberry.input
 class CreateAgentInput:
     """`provider` and `model` are non-null and have no default, matching
@@ -428,7 +505,6 @@ class UpdateAgentConfigInput:
     language: str | None = None
     greeting: str | None = None
     fallback_message: str | None = None
-    enabled_tool_names: list[str] | None = None
     retrieval_top_k: int | None = None
     retrieval_min_score: float | None = None
     max_agent_steps: int | None = None

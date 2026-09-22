@@ -20,7 +20,6 @@ type AgentConfig {
   persona: String
   greeting: String
   fallbackMessage: String!
-  enabledToolNames: [String!]!
   retrievalTopK: Int!
   retrievalMinScore: Float!
   maxAgentSteps: Int!
@@ -30,6 +29,13 @@ enum AgentStatus {
   DRAFT
   ACTIVE
   DISABLED
+}
+
+type AgentTool {
+  id: UUID!
+  name: String!
+  description: String
+  isEnabled: Boolean!
 }
 
 type Conversation {
@@ -98,6 +104,27 @@ enum DocumentStatus {
   FAILED
 }
 
+type Lead {
+  id: UUID!
+  agentId: UUID!
+  conversationId: UUID!
+  name: String
+  email: String
+  phone: String
+  interest: String
+  status: LeadStatus!
+  createdAt: DateTime!
+  conversation: Conversation
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  WON
+  LOST
+}
+
 type Me {
   userId: UUID!
   email: String!
@@ -156,6 +183,7 @@ type Mutation {
   createPromptVersion(promptId: UUID!, input: CreatePromptVersionInput!): PromptVersion!
   activatePromptVersion(versionId: UUID!): PromptVersion!
   deleteDocument(id: UUID!): Boolean!
+  setAgentToolEnabled(agentId: UUID!, toolId: UUID!, isEnabled: Boolean!): AgentTool!
 }
 
 type Organization {
@@ -201,6 +229,8 @@ type Query {
   conversations(agentId: UUID!, channel: ConversationChannel = null, limit: Int! = 20, offset: Int! = 0): [Conversation!]!
   conversation(id: UUID!): Conversation
   document(id: UUID!): Document
+  leads(agentId: UUID!, limit: Int! = 50, offset: Int! = 0): [Lead!]!
+  agentTools(agentId: UUID!): [AgentTool!]!
 }
 
 scalar UUID
@@ -211,7 +241,6 @@ input UpdateAgentConfigInput {
   language: String = null
   greeting: String = null
   fallbackMessage: String = null
-  enabledToolNames: [String!] = null
   retrievalTopK: Int = null
   retrievalMinScore: Float = null
   maxAgentSteps: Int = null

@@ -416,10 +416,11 @@ async def test_two_concurrent_ingests_of_one_document_leave_it_ready(
     after the loser's statement snapshot was taken. It deletes nothing,
     collides on `uq_chunk_document_index`, and -- worse than the wasted
     work -- its independent failure session then overwrites the winner's
-    committed `ready` with `failed`. The corpus is intact and the document
-    is retrievable, but `_retrieve_context`'s readiness gate
-    (`list_documents(status=READY, limit=1)`) sees no ready document, so
-    for a single-document organization grounding stops entirely.
+    committed `ready` with `failed`. The corpus is intact, but
+    `RetrievalService`'s `d.status = 'ready'` filter (`app/rag/retrieve.py`
+    -- consulted whenever the `retrieve_knowledge` tool runs) sees no ready
+    document, so for a single-document organization grounding stops
+    entirely.
 
     The slow embedder is what makes the overlap real rather than
     hypothetical: both jobs are inside their `try` block, past

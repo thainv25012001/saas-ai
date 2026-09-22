@@ -18,6 +18,7 @@ from app.db.models import User as UserModel
 from app.documents.service import DocumentService
 from app.graphql import types as gql
 from app.graphql.context import Context
+from app.leads.service import LeadService
 from app.llm.catalog import models_for
 from app.llm.registry import KNOWN_PROVIDERS, provider_is_configured
 from app.prompts import schemas as prompt_schemas
@@ -87,6 +88,13 @@ def _conversations(info: Info) -> ConversationService:
     assert info.context.tenant is not None
     assert info.context.session is not None
     return ConversationService(info.context.session, info.context.tenant)
+
+
+def _leads(info: Info) -> LeadService:
+    _require_tenant(info)
+    assert info.context.tenant is not None
+    assert info.context.session is not None
+    return LeadService(info.context.session, info.context.tenant)
 
 
 @strawberry.type
@@ -251,6 +259,47 @@ class Query:
         except NotFoundError:
             return None
 
+    @strawberry.field
+    async def leads(
+        self,
+        info: Info,
+        agent_id: uuid.UUID,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[gql.Lead]:
+        """An agent's captured leads, most recent first. Like `conversations`
+        above, an `agent_id` belonging to another organization returns an
+        empty list rather than an error -- indistinguishable from one that
+        does not exist, and an error would confirm it does."""
+        rows = await _leads(info).list_for_agent(agent_id, limit=limit, offset=offset)
+        return [gql.Lead.from_model(row) for row in rows]
+
+    @strawberry.field
+    async def agent_tools(self, info: Info, agent_id: uuid.UUID) -> list[gql.AgentTool]:
+        """The dashboard's Task 8 toggle surface: every builtin this agent
+        could call, and whether it currently may. See
+        `AgentService.list_tools` for the shadowing rule and what
+        `is_enabled` means when the agent has no link to a tool at all.
+
+        An `agent_id` belonging to another organization (or not existing)
+        returns an empty list, exactly like `leads` and `conversations`
+        above -- whole-branch review, Important 5. `AgentService.list_tools`
+        still raises underneath, via its `get_agent` ownership check; that
+        distinction is what must not reach a client, and it is the *query*
+        convention being reconciled here, not the service's. These two
+        queries were added in the same commit, take the same `agentId`, and
+        are rendered on adjacent pages, so one returning an empty table
+        while the other rendered a red error was the narrow version of the
+        codebase-wide split the ledger defers to Phase 5. `setAgentToolEnabled`
+        keeps raising: a mutation that silently did nothing would be worse
+        than one that says it could not.
+        """
+        try:
+            pairs = await _agents(info).list_tools(agent_id)
+        except NotFoundError:
+            return []
+        return [gql.AgentTool.from_pair(tool, is_enabled) for tool, is_enabled in pairs]
+
 
 @strawberry.type
 class Mutation:
@@ -297,7 +346,6 @@ class Mutation:
             language=input.language,
             greeting=input.greeting,
             fallback_message=input.fallback_message,
-            enabled_tool_names=input.enabled_tool_names,
             retrieval_top_k=input.retrieval_top_k,
             retrieval_min_score=input.retrieval_min_score,
             max_agent_steps=input.max_agent_steps,
@@ -356,3 +404,19 @@ class Mutation:
         # gone now".
         await _documents(info).delete(id)
         return True
+
+    @strawberry.mutation
+    async def set_agent_tool_enabled(
+        self,
+        info: Info,
+        agent_id: uuid.UUID,
+        tool_id: uuid.UUID,
+        is_enabled: bool,
+    ) -> gql.AgentTool:
+        """Task 8's whole reason for existing: `create_lead` is seeded and
+        reachable in principle but linked to no agent by default (see
+        `app.db.builtin_tools`), and until this mutation shipped, turning it
+        on required a raw database write. Creates the `agent_tools` link if
+        none exists yet -- see `AgentService.set_tool_enabled`."""
+        tool, enabled = await _agents(info).set_tool_enabled(agent_id, tool_id, is_enabled)
+        return gql.AgentTool.from_pair(tool, enabled)

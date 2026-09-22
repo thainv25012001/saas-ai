@@ -65,7 +65,6 @@ class UpdateAgentConfigInput(BaseModel):
     language: str | None = None
     greeting: str | None = None
     fallback_message: str | None = None
-    enabled_tool_names: list[str] | None = None
     retrieval_top_k: int | None = Field(default=None, ge=1, le=50)
     retrieval_min_score: float | None = Field(default=None, ge=0.0, le=1.0)
     max_agent_steps: int | None = Field(default=None, ge=1, le=20)

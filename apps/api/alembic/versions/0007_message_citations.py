@@ -64,8 +64,11 @@ def upgrade() -> None:
         # Copied onto the citation rather than joined for, so the row still
         # says what was cited after the chunk and the document are both
         # gone. `excerpt` is the same preview the SSE `citations` event
-        # carried (see `ChatService._excerpt`), not the whole chunk: enough
-        # to recognise the passage, not a second copy of the corpus.
+        # carries (see `build_citation`/`_excerpt` in `app/rag/retrieve.py`
+        # -- Phase 4 moved citation-building there, since a tool now
+        # produces citations, not a chat-owned prefix step), not the whole
+        # chunk: enough to recognise the passage, not a second copy of the
+        # corpus.
         sa.Column("document_title", sa.String(255), nullable=False),
         sa.Column("excerpt", sa.Text(), nullable=False),
         sa.Column("rank", sa.Integer(), nullable=False),

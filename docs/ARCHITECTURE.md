@@ -223,7 +223,7 @@ agents
 
 agent_configs                       -- 1:1 with agents; behaviour, not identity
   id, agent_id (unique), persona, tone, language, greeting, fallback_message,
-  enabled_tool_names text[], retrieval_top_k, retrieval_min_score,
+  retrieval_top_k, retrieval_min_score,
   max_agent_steps, guardrails jsonb, variables jsonb, created_at, updated_at
 
 prompts                             -- a named slot, e.g. "sales_system"
@@ -339,6 +339,39 @@ leads
   status enum(new, contacted, qualified, won, lost), score, source,
   metadata jsonb, created_at, updated_at
 ```
+
+**Seeding.** `retrieve_knowledge` and `create_lead` are seeded once as global
+(`organization_id IS NULL`) `builtin` rows by a data migration
+(`0009_seed_builtin_tools`), not by `app/db/seed.py` — a dev seed script
+cannot reach staging or production, and these two rows must exist
+everywhere `tools` does. `uq_tool_global_name` makes the insert idempotent;
+each row's `description` is a literal copy of the tool class's own
+`description`, pinned against drift by
+`tests/integration/test_builtin_tools.py`.
+
+`AgentService.create_agent` links a new agent to the default-enabled
+builtins (`app/db/builtin_tools.DEFAULT_ENABLED_TOOL_NAMES`) in the same
+flush as its `AgentConfig` row, so a normally-created agent is never
+offered nothing. Only `retrieve_knowledge` is on by default — a pure read
+with no risk. `create_lead` writes a real `leads` row every time it runs,
+and stays off until it is turned on for that agent — from the agent detail
+page's Tools card, or the `setAgentToolEnabled` mutation behind it, both
+shipped by Task 8. The risk that matters *today* is not an
+anonymous public visitor: no public channel exists yet (`POST
+/api/v1/chat/stream` requires an authenticated bearer token; `widget`/`api`
+are unused enum values), so the only thing that can call it right now is
+an org member testing their own agent in the playground — defaulting it on
+would let an ordinary test turn into a row in the very `leads` table Task 8
+presents to that same org as its customer pipeline, indistinguishable from
+a real lead. The anonymous-visitor concern is real, but only once a public
+channel ships in a later phase — see task-7b-report.md for the full
+argument.
+
+The same migration backfills `agent_tools` for every agent that predates
+it, onto the identical default set — `_resolve_enabled_tool_names` (§5.1)
+carries no "no rows means every builtin" fallback, so an agent's `tools`
+resolution depends only on what `agent_tools` actually says, never on when
+the agent was created.
 
 ### 3.7 Evaluation
 
@@ -487,33 +520,71 @@ async def run(self, ctx: AgentContext) -> AsyncIterator[AgentEvent]:
     config   = await self.agents.get_config(agent.id)
     version  = await self.prompts.active_version(agent.prompt_id)
     system   = render(version.system_prompt, self.build_variables(ctx, agent))
-    tools    = self.registry.specs_for(agent, config.enabled_tool_names)
+    names    = await self.resolve_enabled_tool_names(agent.id)   # agent_tools ⋈ tools, §3.6
+    registry = self.build_registry(names)               # ONLY the granted tools — §7.2
+    tools    = registry.specs_for(names)
     messages = await self.history.build(ctx.conversation_id, ctx.user_message)
+    seen_ids = set()
 
     for step in range(config.max_agent_steps):          # hard cap, default 5
-        blocks, usage = [], None
+        text, calls, usage = "", [], None
         async for ev in self.llm.stream(system, messages, tools):
             match ev.type:
-                case "text_delta": yield TextDelta(ev.text)
-                case "tool_call":  blocks.append(ev.block)
+                case "text_delta": text += ev.text; yield TextDelta(ev.text)
+                case "tool_call":  calls.append(ev.block)
                 case "usage":      usage = ev.usage
+                case "message_end": stop_reason = ev.stop_reason
 
-        messages.append(Assistant(blocks))
-        calls = [b for b in blocks if b.kind == "tool_use"]
-        if not calls:
-            break                                        # the model is done talking
+        unique = []                             # dedup applies WITHIN a step as well
+        for c in calls:                         # as across them -- two calls in ONE
+            if c.id not in seen_ids:            # step sharing an id is the case that
+                seen_ids.add(c.id)              # was reproduced, so `seen_ids` has to
+                unique.append(c)                # grow as this walks, not after it
+        calls = unique                          # (`AgentRunner._unique_calls`)
+        blocks = ([Text(text)] if text else []) + calls
+        if blocks:
+            messages.append(Assistant(blocks))          # text AND tool calls — never just
+        if not calls:                                   # the calls, or the answer is lost;
+            break                                       # an EMPTY assistant turn is skipped,
+                                                        # not appended
 
         yield ToolCallStart(calls)
         results = await asyncio.gather(*[
-            self.registry.execute(c, ctx) for c in calls   # parallel, each isolated
-        ])
+            registry.execute(c, ctx) for c in calls        # dispatched together, each isolated
+        ])                                                 # -- see §7.3: execution may still serialise
         yield ToolCallEnd(results)
         messages.append(ToolResults(results))
     else:
         yield Error("step_limit_reached")
+        stop_reason = "step_limit_reached"
 
-    await self.persist(ctx, messages, usage, version.id)
+    await self.persist(ctx, messages, usage, version.id, stop_reason)
 ```
+
+**Tool resolution.** `resolve_enabled_tool_names` (`ChatService.
+_resolve_enabled_tool_names` in the actual implementation) is a join of
+`agent_tools` to `tools` (§3.6) under the two-layer tenancy predicate
+(§2.3), not a read of a config column: an agent may call a builtin only if
+an enabled `agent_tools` row links it there, and an org-scoped `tools` row
+fully shadows a global builtin of the same name for that agent — see that
+method's own docstring for the shadowing rule and why it exists.
+
+**Where that "only if" is enforced.** In the registry, not in the prompt.
+`ChatService._build_registry(names)` constructs *only* the granted tools, so
+a name the agent was not granted is not in the registry at all and
+`ToolRegistry.execute` returns its ordinary unknown-name error result
+without running anything. Restricting the advertised `ToolSpec` list alone
+is not enforcement: a model can name a tool it was never shown — by
+hallucination, or on an instruction smuggled into a document that
+`retrieve_knowledge` fed back as tool-result content — and for most of Phase
+4 that call ran. `tools.is_enabled = false` is a platform kill switch for
+the same reason: the name stops resolving, so the tool stops being built. An
+earlier draft of this section named `agent_configs.enabled_tool_names` as
+the resolution source instead; that column was never read by anything,
+Task 7b's review caught it, and the column has since been dropped rather
+than wired up — `agent_tools` was already the richer, already-implemented
+mechanism, so it stayed the one source of truth instead of gaining a
+second, translated one. See task-7b-report.md for the full argument.
 
 ### 5.2 How the agent makes each required decision
 
@@ -663,13 +734,46 @@ and — per prompt rule 8 — the model must confirm details before calling it.
 
 - **Argument validation.** Model output is parsed through the Pydantic model. A validation
   error becomes a tool result the model can read and correct from, not a 500.
-- **Timeouts.** Per-tool, default 10s. A timeout is a tool error, not a hung request.
+- **Timeouts.** Per-tool, default 10s, measured from when the call actually starts running —
+  not from when it was dispatched. Phase 4's builtins share the turn's single database
+  session (see Isolation, below), so a call gathered alongside a slow sibling can sit
+  queued for a while before it ever executes; starting its clock at dispatch would let that
+  wait alone fabricate a timeout for a call that never got the chance to run. A timeout is a
+  tool error, not a hung request.
+
+  That one declared budget is enforced by **three** mechanisms, and they are
+  deliberately not the same number, because *how* a call is stopped decides whether
+  the turn survives it:
+
+  | Bound | Value | Enforced by | Stops |
+  |---|---|---|---|
+  | The tool's database work | `timeout_seconds` (10s) | `SET LOCAL statement_timeout`, per call, inside a savepoint | one statement, as an ordinary `query_canceled` error a savepoint recovers from |
+  | The tool's non-database work | `timeout_seconds + 5s` | `asyncio.timeout`, opened after the lock is acquired | the task, by cancellation |
+  | The call including its queueing | `timeout_seconds + 30s` | `asyncio.timeout` in `ToolRegistry.execute` | a call stuck for a structural reason (a leaked lock, a hung sibling) |
+
+  The first is what makes the whole scheme safe. Cancelling a task mid-statement
+  invalidates the asyncpg connection, and a savepoint recovers a transaction from a
+  *statement error*, never from a cancelled statement on an invalidated connection —
+  so an `asyncio` bound alone cost the entire turn, including the answer already on
+  the user's screen. Bounding database work at the database means the second bound
+  only ever fires when the tool is provably **not** inside a statement, which is
+  exactly when cancelling it is safe. The `+5s` grace exists to guarantee that
+  ordering; the `+30s` one is a soft allowance for queueing behind siblings sharing
+  the turn's session, and is never quoted back to the model as if it were the tool's
+  own budget. See `_LockedSessionTool._run_bounded`.
 - **Failure never becomes fiction.** A failed tool returns `is_error=True` with a message
   such as `"Unable to check live inventory."` The prompt forbids substituting a guess, and
   the UI shows that the tool failed. This is the explicit requirement from the brief's
   Error Handling section.
-- **Isolation.** Parallel tool calls are gathered with exceptions captured per call; one
-  failure does not abort the others.
+- **Isolation.** Parallel calls in one step are dispatched together with `asyncio.gather`,
+  with exceptions captured per call: one failure does not abort the others, and the model
+  receives a result for every call it made. They are *not* guaranteed to execute
+  concurrently — every Phase 4 builtin shares the turn's single database session, which is
+  not safe for concurrent use, so their execution serialises on it. Isolation is the
+  load-bearing property; concurrency is an optimisation the shared session currently
+  forecloses. A future non-database tool (an HTTP call, an MCP round-trip) genuinely would
+  overlap with its siblings — it is the shared session that serialises execution, not the
+  loop.
 - **Tenancy.** `ctx.organization_id` comes from the authenticated request or from the
   conversation's agent, never from the model's arguments. A model cannot reach another
   tenant's data because there is no argument through which to ask.
@@ -683,9 +787,9 @@ drops in on both sides without a rewrite.
 
 ```text
                     ┌──────────────────┐
-    Agent  ───────▶ │   ToolRegistry   │
-                    └────────┬─────────┘
-                             │  resolves by `tools.type`
+    Agent  ───────▶ │   ToolRegistry   │  built per turn from the agent's
+                    └────────┬─────────┘  GRANTED tools only (§7.2)
+                             │  each entry constructed by `tools.type`
               ┌──────────────┼──────────────┐
               ▼              ▼              ▼
         LocalTool      MCPToolAdapter    HttpToolAdapter

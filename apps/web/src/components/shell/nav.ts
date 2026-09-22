@@ -38,7 +38,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "Run",
     items: [
       { href: "/dashboard/playground", label: "Playground", icon: "playground", state: "live" },
-      { href: "/dashboard/leads", label: "Leads", icon: "lead", state: "soon", phase: "Phase 4" },
+      { href: "/dashboard/leads", label: "Leads", icon: "lead", state: "live" },
     ],
   },
 ];

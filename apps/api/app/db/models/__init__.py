@@ -15,9 +15,11 @@ from app.db.models.document import (
     DocumentSourceType,
     DocumentStatus,
 )
+from app.db.models.lead import Lead, LeadStatus
 from app.db.models.membership import Membership, MembershipRole
 from app.db.models.organization import Organization
 from app.db.models.prompt import Prompt, PromptVersion
+from app.db.models.tool import AgentToolLink, MessageToolCall, Tool, ToolType
 from app.db.models.user import User
 
 # `Message` is the ORM row for the `messages` table. `app.llm.types.Message`
@@ -30,6 +32,7 @@ __all__ = [
     "Agent",
     "AgentConfig",
     "AgentStatus",
+    "AgentToolLink",
     "Conversation",
     "ConversationChannel",
     "ConversationMessage",
@@ -38,14 +41,19 @@ __all__ = [
     "DocumentChunk",
     "DocumentSourceType",
     "DocumentStatus",
+    "Lead",
+    "LeadStatus",
     "Membership",
     "MembershipRole",
     "Message",
     "MessageCitation",
     "MessageRole",
+    "MessageToolCall",
     "Organization",
     "Prompt",
     "PromptVersion",
+    "Tool",
+    "ToolType",
     "UsageEvent",
     "UsageKind",
     "User",

@@ -4,6 +4,7 @@ import { use, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery } from "urql";
 import { Alert } from "@/components/ui/Alert";
+import { AgentToolsCard } from "@/components/agents/AgentToolsCard";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonLink } from "@/components/ui/Button";
 import { Card, CardBody, CardFooter, CardHeader } from "@/components/ui/Card";
@@ -15,9 +16,11 @@ import { LoadingState } from "@/components/ui/Spinner";
 import {
   AgentDocument,
   AgentStatus,
+  AgentToolsDocument,
   ConfiguredProvidersDocument,
   DeleteAgentDocument,
   ProviderModelsDocument,
+  SetAgentToolEnabledDocument,
   UpdateAgentConfigDocument,
   UpdateAgentDocument,
 } from "@/graphql/generated";
@@ -46,6 +49,15 @@ export default function AgentDetailPage({
   const [updateAgentResult, updateAgent] = useMutation(UpdateAgentDocument);
   const [updateConfigResult, updateAgentConfig] = useMutation(UpdateAgentConfigDocument);
   const [deleteResult, deleteAgent] = useMutation(DeleteAgentDocument);
+
+  const [toolsResult, refetchTools] = useQuery({
+    query: AgentToolsDocument,
+    variables: { agentId: id },
+    pause: loading || !user,
+  });
+  const [, setAgentToolEnabled] = useMutation(SetAgentToolEnabledDocument);
+  const [togglingToolId, setTogglingToolId] = useState<string | null>(null);
+  const [toolsActionError, setToolsActionError] = useState<string | null>(null);
 
   const agent = data?.agent;
 
@@ -132,6 +144,21 @@ export default function AgentDetailPage({
     const result = await deleteAgent({ id });
     if (!result.error) {
       router.push("/dashboard/agents");
+    }
+  }
+
+  async function onToggleTool(toolId: string, nextEnabled: boolean) {
+    setToolsActionError(null);
+    setTogglingToolId(toolId);
+    try {
+      const result = await setAgentToolEnabled({ agentId: id, toolId, isEnabled: nextEnabled });
+      if (result.error) {
+        setToolsActionError(firstGraphQLError(result.error));
+      } else {
+        refetchTools({ requestPolicy: "network-only" });
+      }
+    } finally {
+      setTogglingToolId(null);
     }
   }
 
@@ -370,6 +397,15 @@ export default function AgentDetailPage({
           </CardFooter>
         </Card>
       </form>
+
+      <div className="space-y-2">
+        {toolsActionError ? <Alert tone="danger">{toolsActionError}</Alert> : null}
+        <AgentToolsCard
+          tools={toolsResult.data?.agentTools ?? []}
+          togglingId={togglingToolId}
+          onToggle={onToggleTool}
+        />
+      </div>
 
       <Card tone="danger">
         <CardHeader

@@ -2,14 +2,19 @@
 
 A multi-tenant SaaS where a business configures an AI sales assistant over its own
 knowledge — products, documents, prompts — and that assistant talks to the business's
-customers. This repository is **Phases 1 to 3**: authentication, organizations, agents
+customers. This repository is **Phases 1 to 4**: authentication, organizations, agents
 and prompts; a real LLM call — a provider abstraction (OpenAI, Anthropic, and a
 network-free `fake`), conversations and messages, a streaming `POST /api/v1/chat/stream`
 endpoint with per-message token and cost accounting, and a working playground; and a
 knowledge base — document upload, a background ingest worker (extraction, chunking,
 embedding into pgvector), hybrid retrieval, and chat answers grounded in the
-organization's own documents with citations. Later phases (tool-calling, evaluation, MCP,
-billing) build on this foundation; see [Phase roadmap](#phase-roadmap) below.
+organization's own documents with citations; and the agent itself — a multi-step
+tool-calling loop where the model decides when to search the knowledge base
+(`retrieve_knowledge`) or capture a lead (`create_lead`), with `tool_call_start` /
+`tool_call_end` events on the same SSE stream, a per-agent Tools card that grants or
+revokes each tool, and a Leads page for what `create_lead` captured. Later phases
+(evaluation, MCP, billing) build on this foundation; see
+[Phase roadmap](#phase-roadmap) below.
 
 ## Architecture, in one picture
 
@@ -39,7 +44,7 @@ billing) build on this foundation; see [Phase roadmap](#phase-roadmap) below.
 │           │                              │                       │
 │   ┌───────▼────────────┐        ┌────────▼──────────┐            │
 │   │ Agent Orchestrator │───────▶│   Tool Registry   │            │
-│   │  (later phases)    │◀───────│   (later phases)   │            │
+│   │     (phase 4)      │◀───────│     (phase 4)     │            │
 │   └───────┬────────────┘        └────────┬──────────┘            │
 │           │                              │                       │
 │   ┌───────▼──────────┐  ┌────────────────▼───────┐               │
@@ -269,7 +274,7 @@ outage or a slow database never blocks a frontend-only PR.
 | **1 — Foundation** | Repo structure, FastAPI, GraphQL, Postgres + RLS, migrations, auth, organizations, users, agents, basic Next.js dashboard. | **Complete** (this repository) |
 | **2 — Basic LLM chat** | Next.js → chat API → LLM provider → streaming response. OpenAI first, then an Anthropic adapter behind the same interface. | **Complete** (this repository) — see [`docs/PHASE-2.md`](docs/PHASE-2.md) |
 | **3 — RAG** | Document upload → extraction → chunking → embedding → pgvector → retrieval → LLM. | **Complete** (this repository) — see [`docs/PHASE-3.md`](docs/PHASE-3.md). Upload and retry endpoints, the arq ingest worker, hybrid retrieval (pgvector + full-text, fused with RRF), grounded chat with citations, and the Knowledge dashboard page. Query rewriting and embedding cost accounting are explicitly deferred; PHASE-3.md §7 says why. |
-| 4 — Agent + tools | The agent decides when to call `retrieve_knowledge`, `search_products`, `get_product`, `create_lead`. | Not started |
+| **4 — Agent + tools** | The agent decides when to call its tools, instead of retrieval running unconditionally before every turn. | **Complete** (this repository) — see [`docs/PHASE-4.md`](docs/PHASE-4.md). A multi-step `AgentRunner` loop, a tool registry built per turn from the agent's own `agent_tools` grants, `retrieve_knowledge` and `create_lead`, `tool_call_start`/`tool_call_end` SSE events, a per-agent Tools card and a Leads page. `search_products`/`get_product` move to Phase 5 with products themselves; PHASE-4.md §8 lists everything else not delivered. |
 | 5 — Evaluation | Test datasets, evaluation runs, retrieval and answer scoring. | Not started |
 | 6 — MCP | Expose selected business capabilities through MCP, once the built-in tool system is stable. | Not started |
 | 7 — SaaS features | Billing/Stripe, usage limits, subscription plans, embeddable widget, analytics, lead dashboard. | Not started |

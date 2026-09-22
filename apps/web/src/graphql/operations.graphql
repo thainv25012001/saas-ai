@@ -65,3 +65,20 @@ query Conversation($id: UUID!) {
     }
   }
 }
+
+query Leads($agentId: UUID!, $limit: Int, $offset: Int) {
+  leads(agentId: $agentId, limit: $limit, offset: $offset) {
+    id name email phone interest status createdAt
+    conversation { id title preview }
+  }
+}
+
+query AgentTools($agentId: UUID!) {
+  agentTools(agentId: $agentId) { id name description isEnabled }
+}
+
+mutation SetAgentToolEnabled($agentId: UUID!, $toolId: UUID!, $isEnabled: Boolean!) {
+  setAgentToolEnabled(agentId: $agentId, toolId: $toolId, isEnabled: $isEnabled) {
+    id name description isEnabled
+  }
+}

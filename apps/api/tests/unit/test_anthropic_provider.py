@@ -4,12 +4,15 @@ import anthropic
 import httpx2
 import pytest
 from anthropic.types import (
+    InputJSONDelta,
     RawContentBlockDeltaEvent,
     RawContentBlockStartEvent,
+    RawContentBlockStopEvent,
     TextDelta,
     ThinkingDelta,
 )
 from anthropic.types import TextBlock as AnthropicTextBlock
+from anthropic.types import ToolUseBlock as AnthropicToolUseBlock
 
 from app.llm.anthropic_provider import AnthropicProvider
 from app.llm.errors import (
@@ -18,7 +21,8 @@ from app.llm.errors import (
     LLMRateLimitError,
     LLMUnavailableError,
 )
-from app.llm.types import CompletionRequest, Message
+from app.llm.types import CompletionRequest, Message, TextBlock, ToolResultBlock, ToolSpec
+from app.llm.types import ToolUseBlock as AppToolUseBlock
 
 pytestmark = pytest.mark.anyio
 
@@ -97,6 +101,29 @@ def _content_block_start() -> RawContentBlockStartEvent:
         index=0,
         content_block=AnthropicTextBlock(type="text", text=""),
     )
+
+
+def _tool_use_start(index: int, call_id: str, name: str) -> RawContentBlockStartEvent:
+    """The SDK's own `content_block_start` for a `tool_use` block. `input` on
+    this event is always `{}` on the wire -- the real arguments arrive after,
+    as `input_json_delta` fragments -- so the provider must never read it."""
+    return RawContentBlockStartEvent(
+        type="content_block_start",
+        index=index,
+        content_block=AnthropicToolUseBlock(type="tool_use", id=call_id, name=name, input={}),
+    )
+
+
+def _input_json_delta(index: int, fragment: str) -> RawContentBlockDeltaEvent:
+    return RawContentBlockDeltaEvent(
+        type="content_block_delta",
+        index=index,
+        delta=InputJSONDelta(type="input_json_delta", partial_json=fragment),
+    )
+
+
+def _content_block_stop(index: int) -> RawContentBlockStopEvent:
+    return RawContentBlockStopEvent(type="content_block_stop", index=index)
 
 
 def _final_message(input_tokens=10, output_tokens=4, stop_reason="end_turn"):
@@ -346,6 +373,302 @@ async def test_a_tool_stop_with_no_text_is_not_an_empty_response():
     provider = _provider_with(_FakeStream([], _final_message(stop_reason="tool_use")))
     events = [e async for e in provider.stream(_request())]
     assert [e.type for e in events] == ["message_start", "usage", "message_end"]
+
+
+def _tools_request(**overrides) -> CompletionRequest:
+    tools = [
+        ToolSpec(
+            name="search",
+            description="search stuff",
+            input_schema={"type": "object", "properties": {}},
+        )
+    ]
+    return _request(tools=tools, **overrides)
+
+
+async def test_tool_specs_are_sent_to_the_model():
+    provider = _provider_with(_FakeStream([_text_delta("hi")], _final_message()))
+    async for _ in provider.stream(_tools_request()):
+        pass
+    kwargs = provider._client.messages.stream.call_args.kwargs  # noqa: SLF001
+    assert kwargs["tools"] == [
+        {
+            "name": "search",
+            "description": "search stuff",
+            "input_schema": {"type": "object", "properties": {}},
+        }
+    ]
+
+
+async def test_no_tools_key_is_sent_when_the_request_has_none():
+    """The counterpart to the test above: without this, the branch could be
+    replaced with an unconditional `kwargs["tools"] = []` and the suite would
+    stay green."""
+    provider = _provider_with(_FakeStream([_text_delta("hi")], _final_message()))
+    async for _ in provider.stream(_request()):
+        pass
+    kwargs = provider._client.messages.stream.call_args.kwargs  # noqa: SLF001
+    assert "tools" not in kwargs
+
+
+async def test_tool_use_arguments_split_across_three_chunks_are_accumulated():
+    """The defect this project keeps finding: a fake that delivers whole JSON
+    in one delta tests nothing about the accumulator. This delivers
+    `{"order_id": "A1", "confirm": true}` in three fragments, none of which is
+    valid JSON on its own."""
+    events = [
+        _tool_use_start(0, "call_1", "lookup_order"),
+        _input_json_delta(0, '{"order_id": '),
+        _input_json_delta(0, '"A1", "conf'),
+        _input_json_delta(0, 'irm": true}'),
+        _content_block_stop(0),
+    ]
+    provider = _provider_with(_FakeStream(events, _final_message(stop_reason="tool_use")))
+    tool_events = [e async for e in provider.stream(_request()) if e.type == "tool_use"]
+    assert len(tool_events) == 1
+    block = tool_events[0].block
+    assert block.id == "call_1"
+    assert block.name == "lookup_order"
+    assert block.input == {"order_id": "A1", "confirm": True}
+
+
+async def test_two_concurrent_tool_calls_are_accumulated_independently():
+    """Anthropic interleaves content blocks by index; accumulating into one
+    shared buffer instead of per-index would corrupt both calls' JSON."""
+    events = [
+        _tool_use_start(0, "call_1", "search"),
+        _tool_use_start(1, "call_2", "search"),
+        _input_json_delta(0, '{"q": "a'),
+        _input_json_delta(1, '{"q": "b'),
+        _input_json_delta(0, '"}'),
+        _input_json_delta(1, '"}'),
+        _content_block_stop(0),
+        _content_block_stop(1),
+    ]
+    provider = _provider_with(_FakeStream(events, _final_message(stop_reason="tool_use")))
+    tool_events = [e async for e in provider.stream(_request()) if e.type == "tool_use"]
+    assert [(e.block.id, e.block.input) for e in tool_events] == [
+        ("call_1", {"q": "a"}),
+        ("call_2", {"q": "b"}),
+    ]
+
+
+async def test_a_tool_only_turn_streams_no_text_and_does_not_trip_the_empty_response_guard():
+    """Requirement: confirm this through the real streamed events
+    (content_block_start/delta/stop), not just by handing `stop_reason` to
+    `_final_message` directly with no tool content at all -- that would pass
+    even against a naive `if not emitted_text: raise` guard, since this test
+    would then raise `LLMEmptyResponseError` and fail."""
+    events = [
+        _tool_use_start(0, "call_1", "lookup_order"),
+        _input_json_delta(0, "{}"),
+        _content_block_stop(0),
+    ]
+    provider = _provider_with(_FakeStream(events, _final_message(stop_reason="tool_use")))
+    result = [e async for e in provider.stream(_request())]
+    assert [e.type for e in result] == ["message_start", "tool_use", "usage", "message_end"]
+    end = result[-1]
+    assert end.stop_reason == "tool_use"
+
+
+async def test_an_input_json_delta_for_an_index_with_no_pending_call_does_not_crash():
+    """Two shapes of the same wire anomaly, neither of which we cause: a
+    fragment for an index that never had a `content_block_start` at all, and
+    a fragment that arrives AFTER that index's `content_block_stop` already
+    popped it (the exact case the brief names). Before the `.get` guard,
+    `pending_tool_calls[raw_event.index]` raised `KeyError` straight out of
+    `stream()`, uncaught by any of the `except` clauses below it."""
+    events = [
+        _input_json_delta(9, '{"orphaned": true}'),  # index 9 never started
+        _tool_use_start(0, "call_1", "lookup_order"),
+        _input_json_delta(0, "{}"),
+        _content_block_stop(0),
+        _input_json_delta(0, '{"too_late": true}'),  # arrives after the stop
+    ]
+    provider = _provider_with(_FakeStream(events, _final_message(stop_reason="tool_use")))
+    tool_events = [e async for e in provider.stream(_request()) if e.type == "tool_use"]
+    assert len(tool_events) == 1
+    assert tool_events[0].block.id == "call_1"
+    assert tool_events[0].block.input == {}
+
+
+async def test_a_fragment_arriving_before_its_own_call_starts_is_dropped_not_crashed():
+    """The `.get` guard's blind spot: a fragment for index 0 that arrives
+    BEFORE that index's own `content_block_start` is correctly dropped as
+    "never started", since nothing is pending for it yet -- but that drop
+    means the LATER fragments for the same call, once it does start, no
+    longer add up to valid JSON. Before wrapping the parse in try/except,
+    this raised an uncaught `JSONDecodeError` out of `stream()` with the same
+    blast radius as the original `KeyError`."""
+    events = [
+        _input_json_delta(0, '{"order_id": '),  # arrives before its own start
+        _tool_use_start(0, "call_1", "lookup_order"),
+        _input_json_delta(0, '"A1"}'),
+        _content_block_stop(0),
+    ]
+    provider = _provider_with(_FakeStream(events, _final_message(stop_reason="tool_use")))
+    tool_events = [e async for e in provider.stream(_request()) if e.type == "tool_use"]
+    # The malformed call is dropped entirely -- no `tool_use` event for it --
+    # rather than the whole turn (or the process) crashing on it.
+    assert tool_events == []
+
+
+@pytest.mark.parametrize(
+    "fragments",
+    [
+        pytest.param(["42"], id="scalar-number"),
+        pytest.param(['"hello"'], id="scalar-string"),
+        pytest.param(["null"], id="scalar-null"),
+        pytest.param(["[1, ", "2, 3]"], id="array"),
+    ],
+)
+async def test_valid_but_non_object_json_is_dropped_not_crashed(fragments):
+    """`json.loads` happily parses `42`, `"hello"`, `null`, and `[1, 2, 3]` --
+    none of them raise `JSONDecodeError` -- so a guard scoped to that one
+    exception lets every one of these through to `ToolUseBlock(input=...)`,
+    which then raises `pydantic.ValidationError` because `input` must be a
+    `dict`. That error must be caught by the SAME guard as malformed JSON
+    syntax, not a fourth `except` clause bolted on next to it."""
+    events = [
+        _tool_use_start(0, "call_1", "lookup_order"),
+        *[_input_json_delta(0, fragment) for fragment in fragments],
+        _content_block_stop(0),
+    ]
+    provider = _provider_with(_FakeStream(events, _final_message(stop_reason="tool_use")))
+    tool_events = [e async for e in provider.stream(_request()) if e.type == "tool_use"]
+    assert tool_events == []
+
+
+async def test_one_malformed_tool_call_does_not_take_down_a_well_formed_one():
+    """The whole point of dropping rather than raising: a malformed call
+    sharing a turn with a well-formed one must not cost the well-formed
+    call its `ToolUseEvent`."""
+    events = [
+        _tool_use_start(0, "call_1", "broken"),
+        _input_json_delta(0, "42"),  # valid JSON, not an object -- dropped
+        _content_block_stop(0),
+        _tool_use_start(1, "call_2", "search"),
+        _input_json_delta(1, '{"q": "x"}'),
+        _content_block_stop(1),
+    ]
+    provider = _provider_with(_FakeStream(events, _final_message(stop_reason="tool_use")))
+    tool_events = [e async for e in provider.stream(_request()) if e.type == "tool_use"]
+    assert len(tool_events) == 1
+    assert tool_events[0].block.id == "call_2"
+    assert tool_events[0].block.input == {"q": "x"}
+
+
+async def test_tool_use_with_no_arguments_parses_as_an_empty_dict():
+    """A tool called with no arguments streams zero `input_json_delta`
+    fragments at all -- `json.loads("")` raises, so this edge (as distinct
+    from `{}` arriving as an explicit fragment above) must be handled too."""
+    events = [
+        _tool_use_start(0, "call_1", "ping"),
+        _content_block_stop(0),
+    ]
+    provider = _provider_with(_FakeStream(events, _final_message(stop_reason="tool_use")))
+    tool_events = [e async for e in provider.stream(_request()) if e.type == "tool_use"]
+    assert tool_events[0].block.input == {}
+
+
+async def test_generate_includes_tool_use_blocks_in_content():
+    events = [
+        _tool_use_start(0, "call_1", "lookup_order"),
+        _input_json_delta(0, '{"order_id": "A1"}'),
+        _content_block_stop(0),
+    ]
+    provider = _provider_with(_FakeStream(events, _final_message(stop_reason="tool_use")))
+    response = await provider.generate(_request())
+    tool_blocks = [b for b in response.content if b.type == "tool_use"]
+    assert len(tool_blocks) == 1
+    assert tool_blocks[0].name == "lookup_order"
+    assert tool_blocks[0].input == {"order_id": "A1"}
+
+
+def _tool_round_trip_messages() -> list[Message]:
+    """The exact message shape `AgentRunner.run` builds on step two of a
+    tool-using turn: the original user text, an assistant turn carrying
+    text PLUS two `ToolUseBlock`s (the multi-call case, since that is where
+    a naive implementation is most likely to only handle one), and a user
+    turn carrying the two matching `ToolResultBlock`s -- one of them an
+    error, since `is_error` must round-trip too."""
+    return [
+        Message.text("user", "find shoes"),
+        Message(
+            role="assistant",
+            content=[
+                TextBlock(text="Let me check."),
+                AppToolUseBlock(id="call_1", name="search_products", input={"q": "shoes"}),
+                AppToolUseBlock(id="call_2", name="search_products", input={"q": "boots"}),
+            ],
+        ),
+        Message(
+            role="user",
+            content=[
+                ToolResultBlock(tool_use_id="call_1", content="3 results", is_error=False),
+                ToolResultBlock(tool_use_id="call_2", content="no results", is_error=True),
+            ],
+        ),
+    ]
+
+
+async def test_tool_round_trip_serializes_every_block_not_just_text():
+    """THE bug Task 4's reviewer found: `Message.text_content` silently
+    discards every `ToolUseBlock`/`ToolResultBlock`, so a step-two request
+    degraded to `[{'role':'user','content':'find shoes'},
+    {'role':'assistant','content':''}, {'role':'user','content':''}]` --
+    a 400 against the real API for the empty-text assistant turn, or, if it
+    weren't, a tool result that never reaches the model at all. This builds
+    the message list `AgentRunner` actually produces on step two and asserts
+    every block survives serialization, matched to its call by id."""
+    provider = _provider_with(_FakeStream([_text_delta("hi")], _final_message()))
+    async for _ in provider.stream(_request(messages=_tool_round_trip_messages())):
+        pass
+    messages = provider._client.messages.stream.call_args.kwargs["messages"]  # noqa: SLF001
+
+    assert messages[0] == {"role": "user", "content": [{"type": "text", "text": "find shoes"}]}
+
+    assistant = messages[1]
+    assert assistant["role"] == "assistant"
+    assert assistant["content"] == [
+        {"type": "text", "text": "Let me check."},
+        {"type": "tool_use", "id": "call_1", "name": "search_products", "input": {"q": "shoes"}},
+        {"type": "tool_use", "id": "call_2", "name": "search_products", "input": {"q": "boots"}},
+    ]
+
+    tool_results = messages[2]
+    assert tool_results["role"] == "user"
+    assert tool_results["content"] == [
+        {
+            "type": "tool_result",
+            "tool_use_id": "call_1",
+            "content": "3 results",
+            "is_error": False,
+        },
+        {
+            "type": "tool_result",
+            "tool_use_id": "call_2",
+            "content": "no results",
+            "is_error": True,
+        },
+    ]
+
+
+async def test_an_entirely_empty_assistant_message_is_dropped_not_sent():
+    """Anthropic rejects an empty-content message outright, on any role,
+    anywhere in the array. `AgentRunner` produces exactly this shape when a
+    step's outcome has neither text (`outcome.text == ""`) nor tool calls."""
+    messages = [
+        Message.text("user", "hi"),
+        Message(role="assistant", content=[TextBlock(text="")]),
+        Message.text("user", "still there?"),
+    ]
+    provider = _provider_with(_FakeStream([_text_delta("hi")], _final_message()))
+    async for _ in provider.stream(_request(messages=messages)):
+        pass
+    kwargs = provider._client.messages.stream.call_args.kwargs  # noqa: SLF001
+    roles = [m["role"] for m in kwargs["messages"]]
+    assert roles == ["user", "user"]  # the empty assistant turn is gone entirely
 
 
 def test_capabilities_report_no_sampling_for_current_models():

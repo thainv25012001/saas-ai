@@ -61,6 +61,10 @@ async def test_identity_tables_do_not_have_rls(owner_connection, table):
         "documents",
         "document_chunks",
         "message_citations",
+        "tools",
+        "agent_tools",
+        "message_tool_calls",
+        "leads",
     ],
 )
 async def test_tenant_tables_have_rls_enabled_with_a_tenant_isolation_policy(

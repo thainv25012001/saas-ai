@@ -93,6 +93,17 @@ class TextDeltaEvent(BaseModel):
     text: str
 
 
+class ToolUseEvent(BaseModel):
+    """Emitted once a streamed tool call's arguments are fully accumulated
+    and parsed -- never mid-fragment. `block.id`/`.name` are known from the
+    call's opening event; `block.input` is only ever valid once every
+    fragment has arrived, so there is no partial or "delta" form of this
+    event for a consumer to misuse."""
+
+    type: Literal["tool_use"] = "tool_use"
+    block: ToolUseBlock
+
+
 class UsageEvent(BaseModel):
     type: Literal["usage"] = "usage"
     usage: Usage
@@ -112,6 +123,6 @@ class ErrorEvent(BaseModel):
 
 
 StreamEvent = Annotated[
-    MessageStartEvent | TextDeltaEvent | UsageEvent | MessageEndEvent | ErrorEvent,
+    MessageStartEvent | TextDeltaEvent | ToolUseEvent | UsageEvent | MessageEndEvent | ErrorEvent,
     Field(discriminator="type"),
 ]
