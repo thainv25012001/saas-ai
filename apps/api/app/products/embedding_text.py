@@ -29,11 +29,34 @@ def embeddable_text(name: str, description: str | None, attributes: dict[str, An
     return "\n".join([name, description or "", json.dumps(attributes, sort_keys=True, default=str)])
 
 
+def hash_text(text: str) -> str:
+    """SHA-256 hex digest of an already-computed `embeddable_text` string.
+
+    Split out from `hash_embeddable_text` (below) so a caller that already
+    has the exact string it just embedded -- `app/products/embedding.py`'s
+    `embed_and_store`, most pointedly -- can hash *that string*, not
+    re-derive one from the row's current `name`/`description`/`attributes`.
+    Re-deriving is not equivalent: those attributes live on a mutable ORM
+    object, and if anything changes them between "compute the text to
+    embed" and "compute the hash to store" (an `await` sits in between),
+    the stored hash would describe different text than the vector actually
+    came from -- exactly the divergence `embedding_source_hash` exists to
+    make impossible to have and not know about. Hashing the captured
+    string makes that structurally impossible rather than merely unlikely.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def hash_embeddable_text(name: str, description: str | None, attributes: dict[str, Any]) -> str:
     """SHA-256 hex digest of `embeddable_text`, stored as
     `Product.embedding_source_hash` -- a fingerprint of the text the row's
     *currently stored* embedding was computed from, independent of whether
-    that embedding is fresh or stale."""
-    return hashlib.sha256(
-        embeddable_text(name, description, attributes).encode("utf-8")
-    ).hexdigest()
+    that embedding is fresh or stale.
+
+    A thin composition of `embeddable_text` and `hash_text`: kept as its
+    own function (rather than inlined at every call site) because most
+    callers -- `ProductService.create`/`upsert_many` -- have the row's
+    fields in hand and want the hash directly, with no intermediate string
+    to keep around.
+    """
+    return hash_text(embeddable_text(name, description, attributes))

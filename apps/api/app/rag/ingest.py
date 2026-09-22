@@ -70,7 +70,7 @@ from app.core.config import get_settings
 from app.core.tenancy import TenantContext, tenant_session
 from app.documents.schemas import ChunkInput
 from app.documents.service import DocumentService
-from app.embeddings.base import EmbeddingProvider
+from app.embeddings.batch import embed_batched
 from app.embeddings.registry import get_embedding_provider
 from app.rag.chunk import chunk_document
 from app.rag.extract import extract
@@ -138,38 +138,26 @@ def bounded_error_message(exc: Exception) -> str:
     return _truncate(f"{type(exc).__name__}: {exc}")
 
 
-async def _embed_batch_with_retry(
-    provider: EmbeddingProvider, batch: list[str], max_retries: int, backoff_seconds: float
-) -> list[list[float]]:
-    attempt = 0
-    while True:
-        try:
-            return await provider.embed(batch)
-        except Exception:
-            attempt += 1
-            if attempt >= max_retries:
-                raise
-            await asyncio.sleep(backoff_seconds * attempt)
-
-
 async def _embed_all(texts: list[str]) -> tuple[list[list[float]], str]:
-    """Embed every chunk, batched and retried, all-or-nothing.
+    """Embed every chunk, batched and retried, all-or-nothing --
+    `app.embeddings.batch.embed_batched` is the actual loop (shared with
+    `app/products/embedding.py`'s `embed_texts`, see that module's
+    docstring); this resolves settings/provider and attaches
+    `provider.name`, the two things specific to "embedding chunks" rather
+    than "batching an embed call".
 
     Returns `([], provider.name)` for a document with no chunks (an empty
-    input) without ever calling the provider -- `range(0, 0, batch_size)`
-    is empty, so the loop below simply does not execute; there is nothing
-    to embed, and calling a provider with an empty batch is not a case any
-    of them are obliged to handle sensibly.
+    input) without ever calling the provider -- see `embed_batched`.
     """
     settings = get_settings()
     provider = get_embedding_provider()
-    batch_size = settings.embedding_batch_size
-    max_retries = settings.embedding_max_retries
-    backoff_seconds = settings.embedding_retry_backoff_seconds
-    vectors: list[list[float]] = []
-    for start in range(0, len(texts), batch_size):
-        batch = texts[start : start + batch_size]
-        vectors.extend(await _embed_batch_with_retry(provider, batch, max_retries, backoff_seconds))
+    vectors = await embed_batched(
+        texts,
+        provider,
+        settings.embedding_batch_size,
+        settings.embedding_max_retries,
+        settings.embedding_retry_backoff_seconds,
+    )
     return vectors, provider.name
 
 

@@ -8,45 +8,34 @@ composed here. That is not a style preference -- `Product.embedding_source_hash`
 is a hash of that exact function's output, and if this module ever built its
 own version of "the text to embed" the hash would certify a vector computed
 from different text than the one actually embedded, which is worse than no
-hash at all because it *reads* as a guarantee.
+hash at all because it *reads* as a guarantee. `embed_and_store` goes
+further than merely calling the right function: it hashes the exact string
+it embedded (`hash_text`), not a re-derivation from the row's current
+attributes, so the two cannot disagree even across the `await` in between --
+see its docstring.
 
-Batching, retry and the all-or-nothing contract mirror `app/rag/ingest.py`'s
-`_embed_all` deliberately, not coincidentally: both are "embed a list of
-texts, batched, with per-batch retry, and never hand back a partial result
-a caller could persist half of." A batch that exhausts its retries raises
-instead of returning the vectors collected so far -- see `embed_texts`.
+Batching and retry are `app.embeddings.batch.embed_batched`, shared with
+`app/rag/ingest.py`'s `_embed_all` -- see that module's docstring for why
+this used to be two copies of the same loop and now is not.
 """
 
-import asyncio
 from collections.abc import Sequence
 
 from sqlalchemy import ColumnElement, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.tenancy import TenantContext
 from app.db.models import Product
-from app.embeddings.base import EmbeddingProvider
+from app.embeddings.batch import embed_batched
 from app.embeddings.registry import get_embedding_provider
-from app.products.embedding_text import embeddable_text, hash_embeddable_text
-
-
-async def _embed_batch_with_retry(
-    provider: EmbeddingProvider, batch: list[str], max_retries: int, backoff_seconds: float
-) -> list[list[float]]:
-    attempt = 0
-    while True:
-        try:
-            return await provider.embed(batch)
-        except Exception:
-            attempt += 1
-            if attempt >= max_retries:
-                raise
-            await asyncio.sleep(backoff_seconds * attempt)
+from app.products.embedding_text import embeddable_text, hash_text
 
 
 async def embed_texts(texts: list[str]) -> tuple[list[list[float]], str]:
     """Embed `texts`, batched (default 64, `settings.embedding_batch_size`)
-    and retried per batch, all-or-nothing.
+    and retried per batch, all-or-nothing -- `embed_batched` is the actual
+    loop; this resolves settings/provider and attaches `provider.name`.
 
     Nothing is returned until every batch has succeeded: a batch that
     exhausts its retries raises straight out of this function, with the
@@ -56,19 +45,17 @@ async def embed_texts(texts: list[str]) -> tuple[list[list[float]], str]:
     write-path consequence.
 
     Returns `([], provider.name)` for an empty input without ever calling
-    the provider -- `range(0, 0, batch_size)` is empty, so the loop below
-    does not execute, and calling a provider with an empty batch is not a
-    case any of them are obliged to handle sensibly.
+    the provider -- see `embed_batched`.
     """
     settings = get_settings()
     provider = get_embedding_provider()
-    batch_size = settings.embedding_batch_size
-    max_retries = settings.embedding_max_retries
-    backoff_seconds = settings.embedding_retry_backoff_seconds
-    vectors: list[list[float]] = []
-    for start in range(0, len(texts), batch_size):
-        batch = texts[start : start + batch_size]
-        vectors.extend(await _embed_batch_with_retry(provider, batch, max_retries, backoff_seconds))
+    vectors = await embed_batched(
+        texts,
+        provider,
+        settings.embedding_batch_size,
+        settings.embedding_max_retries,
+        settings.embedding_retry_backoff_seconds,
+    )
     return vectors, provider.name
 
 
@@ -89,7 +76,9 @@ async def embed_products(products: Sequence[Product]) -> tuple[list[list[float]]
     return await embed_texts([product_embedding_text(product) for product in products])
 
 
-async def embed_and_store(session: AsyncSession, products: Sequence[Product]) -> None:
+async def embed_and_store(
+    session: AsyncSession, tenant: TenantContext, products: Sequence[Product]
+) -> None:
     """Compute and persist embeddings for already-persisted `Product` rows
     -- the second phase of a two-phase import (docs/PHASE-5.md §5/§8: rows
     land first, an arq job embeds them separately) and what a future
@@ -102,6 +91,29 @@ async def embed_and_store(session: AsyncSession, products: Sequence[Product]) ->
     through the `ON CONFLICT` path would be overhead for what is actually a
     plain `UPDATE` of four columns.
 
+    **`tenant` is required and checked against every product before
+    anything is embedded or written** (docs/ARCHITECTURE.md §2.3's Layer 1
+    -- an explicit predicate, not just RLS). This mutates already-loaded
+    ORM objects by primary key rather than issuing a query with its own
+    `WHERE organization_id = ...`, so unlike every `ProductService` method
+    it had no Layer 1 of its own; RLS (Layer 2) still blocks a cross-tenant
+    write underneath it, but RLS is a database policy, not the tenancy
+    boundary itself, and nothing here should depend on a mechanism that
+    exists for a different purpose (Postgres's row security) continuing to
+    cover a case it was never written for. Checked up front, before the
+    loop, so a caller that hands in a mixed-tenant list gets a clean
+    refusal instead of a partially-applied embed.
+
+    The exact text embedded for each product is captured once, into
+    `texts`, before the (`await`-ing) call to `embed_texts` -- and that
+    same captured string, not a fresh read of `product.name`/`description`/
+    `attributes` afterward, is what gets hashed into
+    `embedding_source_hash` below. Re-reading the row's current attributes
+    after the `await` would let the hash and the vector describe different
+    text if anything mutated the row in between; hashing the string that
+    was actually sent to the provider makes that structurally impossible
+    rather than merely unlikely.
+
     All-or-nothing, transitively from `embed_texts`: no `Product` attribute
     is mutated until every vector in the batch has come back, so a batch
     that exhausts its retries raises with every row's ORM state exactly as
@@ -110,19 +122,21 @@ async def embed_and_store(session: AsyncSession, products: Sequence[Product]) ->
     """
     if not products:
         return
-    vectors, embedding_model = await embed_products(products)
-    for product, vector in zip(products, vectors, strict=True):
+    mismatched = [p.external_id for p in products if p.organization_id != tenant.organization_id]
+    if mismatched:
+        raise ValueError(
+            f"embed_and_store called for organization_id={tenant.organization_id} but "
+            f"these products belong to a different organization: {mismatched}"
+        )
+    texts = [product_embedding_text(product) for product in products]
+    vectors, embedding_model = await embed_texts(texts)
+    for product, vector, text in zip(products, vectors, texts, strict=True):
         product.embedding = vector
         product.embedding_model = embedding_model
-        # Computed fresh from this same write's content, exactly like
-        # `ProductService.upsert_many`'s "embedding supplied" branch: the
-        # vector was just computed from `product_embedding_text(product)`,
-        # so the hash of that same text is what "this vector is current"
-        # means, and staleness (relative to text that hasn't changed since)
-        # is false by construction.
-        product.embedding_source_hash = hash_embeddable_text(
-            product.name, product.description, product.attributes
-        )
+        # Hashes the captured `text` this vector was actually computed
+        # from, not a fresh `product.name`/`description`/`attributes` read
+        # -- see the docstring above.
+        product.embedding_source_hash = hash_text(text)
         product.embedding_stale = False
     await session.flush()
 

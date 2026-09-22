@@ -25,7 +25,7 @@ from app.products.embedding import (
     needs_reembedding_clause,
     product_embedding_text,
 )
-from app.products.embedding_text import embeddable_text, hash_embeddable_text
+from app.products.embedding_text import embeddable_text, hash_embeddable_text, hash_text
 from app.products.schemas import ProductInput
 from app.products.service import ProductService
 
@@ -222,7 +222,7 @@ async def test_embed_and_store_persists_vector_model_and_hash(tenant_a):
         product = await service.create(_input(external_id="sku-1", embedding=None))
         assert product.embedding is None
 
-        await embed_and_store(session, [product])
+        await embed_and_store(session, tenant_a, [product])
 
     assert product.embedding is not None
     assert len(product.embedding) == 1536
@@ -250,7 +250,7 @@ async def test_embed_and_store_clears_a_previously_stale_flag(tenant_a):
         )
         assert stale.embedding_stale is True
 
-        await embed_and_store(session, [stale])
+        await embed_and_store(session, tenant_a, [stale])
 
     assert stale.embedding_stale is False
     assert stale.embedding_source_hash == hash_embeddable_text(
@@ -276,9 +276,74 @@ async def test_embed_and_store_records_whichever_providers_name_is_active(tenant
     async with tenant_session(tenant_a) as session:
         service = ProductService(session, tenant_a)
         product = await service.create(_input(external_id="sku-1", embedding=None))
-        await embed_and_store(session, [product])
+        await embed_and_store(session, tenant_a, [product])
 
     assert product.embedding_model == "custom-provider-v2"
+
+
+async def test_embed_and_store_hash_matches_text_actually_embedded_despite_mid_flight_mutation(
+    tenant_a, monkeypatch
+):
+    """Regression for a review finding: `embed_and_store` used to derive the
+    embedded text (captured before the `await provider.embed(...)`) and the
+    stored hash (a fresh `product.name`/`description`/`attributes` read
+    AFTER it) from two separate reads. A provider whose `.embed()` mutates
+    the row mid-flight -- standing in for whatever could change it during
+    that await window, since `AsyncSession` forbids literal concurrent use
+    -- used to produce a hash describing the POST-mutation text while the
+    vector described the PRE-mutation text: exactly the divergence
+    `embedding_source_hash` exists to make impossible to have and not know
+    about. Now there is exactly one derivation (a captured string, hashed
+    directly), so the two cannot disagree no matter what happens during the
+    await."""
+
+    class _MutatesDuringEmbed:
+        name = "mutates-mid-flight"
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            product.description = "Mutated during the embed call."
+            return [[0.0] * 1536 for _ in texts]
+
+    monkeypatch.setattr(embedding_module, "get_embedding_provider", lambda: _MutatesDuringEmbed())
+
+    async with tenant_session(tenant_a) as session:
+        service = ProductService(session, tenant_a)
+        product = await service.create(
+            _input(external_id="sku-1", description="Original description.", embedding=None)
+        )
+        pre_mutation_text = product_embedding_text(product)
+
+        await embed_and_store(session, tenant_a, [product])
+
+    assert product.description == "Mutated during the embed call."
+    # The hash must describe the text that was ACTUALLY embedded -- captured
+    # before the mutation -- not the row's current (post-mutation) content.
+    assert product.embedding_source_hash == hash_text(pre_mutation_text)
+    assert product.embedding_source_hash != hash_text(product_embedding_text(product))
+
+
+async def test_embed_and_store_refuses_a_product_from_another_organization(tenant_a, tenant_b):
+    """docs/ARCHITECTURE.md §2.3's Layer 1: `embed_and_store` mutates
+    already-loaded ORM objects and flushes by primary key, with no query
+    predicate of its own for RLS (Layer 2) to sit behind -- so the explicit
+    `organization_id` check has to be the thing that stops this, not RLS
+    incidentally succeeding. Both sides of this test run under `tenant_a`'s
+    own session (RLS would happily allow the write), so only the explicit
+    check can be what raises."""
+    async with tenant_session(tenant_a) as session:
+        service = ProductService(session, tenant_a)
+        product = await service.create(_input(external_id="sku-1", embedding=None))
+
+        with pytest.raises(ValueError, match="different organization"):
+            await embed_and_store(session, tenant_b, [product])
+
+    assert product.embedding is None
+    assert product.embedding_model is None
+
+    async with tenant_session(tenant_a) as verify_session:
+        fresh = await ProductService(verify_session, tenant_a).get(product.id)
+    assert fresh.embedding is None
+    assert fresh.embedding_model is None
 
 
 async def test_embed_and_store_failed_batch_leaves_no_partial_writes(
@@ -312,7 +377,7 @@ async def test_embed_and_store_failed_batch_leaves_no_partial_writes(
         second = await service.create(_input(external_id="sku-2", embedding=None))
 
         with pytest.raises(RuntimeError):
-            await embed_and_store(session, [first, second])
+            await embed_and_store(session, tenant_a, [first, second])
 
     # One successful batch plus `embedding_max_retries` failed attempts on
     # the second -- proves the retry loop actually retried.
