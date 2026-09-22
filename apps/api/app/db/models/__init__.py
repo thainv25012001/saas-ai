@@ -18,6 +18,7 @@ from app.db.models.document import (
 from app.db.models.lead import Lead, LeadStatus
 from app.db.models.membership import Membership, MembershipRole
 from app.db.models.organization import Organization
+from app.db.models.product import Product, ProductAvailability
 from app.db.models.prompt import Prompt, PromptVersion
 from app.db.models.tool import AgentToolLink, MessageToolCall, Tool, ToolType
 from app.db.models.user import User
@@ -50,6 +51,8 @@ __all__ = [
     "MessageRole",
     "MessageToolCall",
     "Organization",
+    "Product",
+    "ProductAvailability",
     "Prompt",
     "PromptVersion",
     "Tool",

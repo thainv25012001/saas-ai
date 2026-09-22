@@ -65,6 +65,7 @@ async def test_identity_tables_do_not_have_rls(owner_connection, table):
         "agent_tools",
         "message_tool_calls",
         "leads",
+        "products",
     ],
 )
 async def test_tenant_tables_have_rls_enabled_with_a_tenant_isolation_policy(
@@ -112,3 +113,72 @@ async def test_tenant_tables_have_rls_enabled_with_a_tenant_isolation_policy(
 async def test_readiness_reports_dependencies_up(client):
     response = await client.get("/health/ready")
     assert response.json()["checks"] == {"database": True, "redis": True}
+
+
+@pytest.mark.parametrize(
+    ("index_name", "indexdef_fragment"),
+    [
+        # HNSW on embedding: Task 4's semantic arm.
+        ("ix_products_embedding", "USING hnsw (embedding vector_cosine_ops)"),
+        # GIN on search_tsv: Task 4's keyword arm.
+        ("ix_products_search_tsv", "USING gin (search_tsv)"),
+        # GIN on attributes: Task 4's jsonb filter arm depends on this one
+        # existing, not just on the column existing.
+        ("ix_products_attributes", "USING gin (attributes)"),
+        # Composite btree: (organization_id, category) equality plus a
+        # trailing price range, see 0010_products.py for why one index
+        # rather than two.
+        (
+            "ix_products_organization_id_category_price",
+            "(organization_id, category, price)",
+        ),
+    ],
+)
+async def test_products_has_the_indexes_task_4_depends_on(
+    owner_connection, index_name, indexdef_fragment
+):
+    result = await owner_connection.execute(
+        text("SELECT indexdef FROM pg_indexes WHERE tablename = 'products' AND indexname = :name"),
+        {"name": index_name},
+    )
+    indexdef = result.scalar_one_or_none()
+    assert indexdef is not None, f"missing index {index_name}"
+    assert indexdef_fragment in indexdef
+
+
+async def test_products_unique_constraint_covers_organization_id_and_external_id(
+    owner_connection,
+):
+    """This is the mechanism that makes Task 3's re-import an upsert rather
+    than a duplicate -- see ProductService.upsert_many."""
+    result = await owner_connection.execute(
+        text(
+            "SELECT COUNT(*) FROM pg_indexes "
+            "WHERE tablename = 'products' "
+            "AND indexdef LIKE '%UNIQUE%organization_id, external_id%'"
+        )
+    )
+    assert result.scalar_one() == 1
+
+
+async def test_products_search_tsv_generation_expression_excludes_volatile_columns(
+    owner_connection,
+):
+    """Pins docs/PHASE-5.md §4 at the schema level: whatever the service
+    layer does, the generated expression itself must never reference
+    price/stock_quantity/availability, or a price change could never be a
+    plain UPDATE."""
+    result = await owner_connection.execute(
+        text(
+            "SELECT generation_expression FROM information_schema.columns "
+            "WHERE table_name = 'products' AND column_name = 'search_tsv'"
+        )
+    )
+    expression = result.scalar_one()
+    assert "'english'" in expression
+    assert "name" in expression
+    assert "description" in expression
+    assert "category" in expression
+    assert "price" not in expression
+    assert "stock_quantity" not in expression
+    assert "availability" not in expression
