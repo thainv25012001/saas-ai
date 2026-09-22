@@ -416,32 +416,71 @@ async def test_get_product_also_records_a_product_citation(tenant_a):
 # constant string that fires identically on an excellent match and on
 # garbage, which the fix round's review correctly identified as carrying
 # no information at all.
+#
+# `_classify_distance_shape`'s own boundary correctness (sharp/flat/the
+# reviewer's leading-group regression example) is pinned directly against
+# literal distance lists in `tests/unit/test_product_shape_note.py`, not
+# here: `tests/integration`'s autouse `_dispose_shared_engine` fixture
+# (`tests/integration/conftest.py`) requires an event loop, and a pure
+# classification test over plain floats has no database and no loop to
+# give it. What remains here is the wiring, end to end, through a real
+# `HashingEmbedder` corpus and the real tool.
 # ---------------------------------------------------------------------------
 
-# A query with no stopwords, paired with distractor products that share
-# NONE of its words: with `HashingEmbedder`'s bag-of-words hashing, zero
-# shared tokens means an exactly deterministic dot product of 0.0 (every
-# term in the sum has a zero factor), so cosine distance from this query is
-# EXACTLY 1.0 for every one of them -- not approximately flat, genuinely
-# tied. That determinism is what makes the shape tests below exact rather
-# than a fragile approximation of "roughly similar distances".
 _SHAPE_QUERY = "hybrid sedan family safety"
 
-_DISTRACTORS = [
-    ("dist-1", "Bluetooth Speaker", "Waterproof outdoor speaker with deep bass output."),
-    ("dist-2", "Garden Hose", "Fifty foot expandable garden hose for watering plants."),
-    ("dist-3", "Office Chair", "Ergonomic mesh office chair with lumbar support."),
-    ("dist-4", "Coffee Maker", "Programmable drip coffee maker with thermal carafe."),
-]
 
-
-async def _seed_distractors(session: AsyncSession, tenant: TenantContext) -> None:
-    """Four products with zero vocabulary overlap with `_SHAPE_QUERY`.
-    `attributes={}` is deliberate -- `_seed_product`'s own default
-    attributes include the word "hybrid", which would contaminate every
-    one of these with the exact query term this helper exists to keep
-    them clear of."""
-    for external_id, name, description in _DISTRACTORS:
+async def _seed_two_close_matches_and_a_tail(session: AsyncSession, tenant: TenantContext) -> None:
+    """Two genuinely close matches to `_SHAPE_QUERY` (measured cosine
+    distance 0.25 and 0.3118 -- real embeddings, not a manufactured tie)
+    above four distractors that each share exactly one incidental query
+    word (measured 0.8664-0.8709) -- the real, HashingEmbedder-computed
+    version of `docs/PHASE-5.md` §3's "Camry LE vs Camry SE": a leading
+    GROUP of two, not a single item, sitting above a real tail. `_seed_product`'s
+    own default `attributes` include the word "hybrid", so every product
+    here sets `attributes={}` to keep the vocabulary exactly what each
+    product's own name/description says."""
+    await _seed_product(
+        session,
+        tenant,
+        external_id="near-1",
+        name="Aurora Hybrid Sedan",
+        slug="aurora-hybrid-sedan",
+        description="A safe family hybrid sedan with excellent safety ratings.",
+        attributes={},
+    )
+    await _seed_product(
+        session,
+        tenant,
+        external_id="near-2",
+        name="Aurora Hybrid Sedan Plus",
+        slug="aurora-hybrid-sedan-plus",
+        description="A very safe family hybrid sedan trim with excellent safety ratings.",
+        attributes={},
+    )
+    distractors = [
+        (
+            "dist-1",
+            "Bluetooth Speaker",
+            "Waterproof outdoor speaker with deep bass output for the whole family.",
+        ),
+        (
+            "dist-2",
+            "Garden Hose",
+            "Fifty foot expandable garden safety hose for watering plants.",
+        ),
+        (
+            "dist-3",
+            "Office Chair",
+            "Ergonomic mesh office sedan-style chair with lumbar support.",
+        ),
+        (
+            "dist-4",
+            "Coffee Maker",
+            "Programmable drip hybrid coffee maker with thermal carafe.",
+        ),
+    ]
+    for external_id, name, description in distractors:
         await _seed_product(
             session,
             tenant,
@@ -472,21 +511,18 @@ async def test_too_few_results_falls_back_to_the_ambiguous_note(tenant_a):
     assert "keyword_rank" in result.data["products"][0]
 
 
-async def test_sharp_leader_shape_produces_the_sharp_leader_note(tenant_a):
-    """One product shares real vocabulary with the query; four share none
-    at all, each at an exact cosine distance of 1.0 -- as sharp a leader as
-    this embedder can produce, and the shape `_SHARP_LEADER_NOTE` exists to
-    recognise."""
+async def test_a_real_leading_group_of_two_gets_the_sharp_leader_note_end_to_end(tenant_a):
+    """The real-embeddings version of the reviewer's regression example:
+    two genuinely close matches (measured 0.25, 0.3118) above a real tail
+    (measured 0.8664-0.8709) -- through the actual `ProductSearchService`
+    -> `SearchProductsTool` path, not a literal-number unit test. Fix round
+    1's algorithm (rank 1 vs rank 2 only) would have called this "flat":
+    the gap between the two leaders (0.3118-0.25=0.0618) is small next to
+    the big gap that actually separates the GROUP from the tail
+    (0.8664-0.3118=0.5546) -- exactly the shape that made a leading-group
+    comparison necessary instead of a leading-item one."""
     async with tenant_session(tenant_a) as session:
-        await _seed_product(
-            session,
-            tenant_a,
-            name="Aurora Hybrid Sedan",
-            slug="aurora-hybrid-sedan",
-            description="A safe family hybrid sedan with excellent safety ratings.",
-            attributes={},
-        )
-        await _seed_distractors(session, tenant_a)
+        await _seed_two_close_matches_and_a_tail(session, tenant_a)
         tool = SearchProductsTool(session, embedder=_embedder)
         result = await tool.execute(SearchProductsArgs(query=_SHAPE_QUERY), _ctx(tenant_a))
 
@@ -494,55 +530,6 @@ async def test_sharp_leader_shape_produces_the_sharp_leader_note(tenant_a):
     assert _SHARP_LEADER_NOTE in result.content
     assert _FLAT_BAND_NOTE not in result.content
     assert _AMBIGUOUS_MATCH_QUALITY_NOTE not in result.content
-
-
-async def test_flat_band_shape_produces_the_flat_band_note(tenant_a):
-    """No product shares any vocabulary with the query -- all four
-    distractors sit at an exact cosine distance of 1.0, the flattest
-    possible band, and the exact shape Task 4 measured for a wholly
-    unrelated query against a real catalogue (docs/PHASE-5.md §2:
-    0.9139-1.0000 across all ten rows)."""
-    async with tenant_session(tenant_a) as session:
-        await _seed_distractors(session, tenant_a)
-        tool = SearchProductsTool(session, embedder=_embedder)
-        result = await tool.execute(SearchProductsArgs(query=_SHAPE_QUERY), _ctx(tenant_a))
-
-    assert result.is_error is False
-    assert _FLAT_BAND_NOTE in result.content
-    assert _SHARP_LEADER_NOTE not in result.content
-    assert _AMBIGUOUS_MATCH_QUALITY_NOTE not in result.content
-
-
-async def test_the_note_differs_between_a_sharp_leader_and_a_flat_band(tenant_a, tenant_b):
-    """The assertion that makes this fix worth doing, in the fix round's own
-    words: if the note reads the same either way, nothing has changed. Two
-    organizations, so the two seedings (identical distractor `external_id`s)
-    cannot contaminate each other's candidate pool."""
-    async with tenant_session(tenant_a) as session:
-        await _seed_product(
-            session,
-            tenant_a,
-            name="Aurora Hybrid Sedan",
-            slug="aurora-hybrid-sedan",
-            description="A safe family hybrid sedan with excellent safety ratings.",
-            attributes={},
-        )
-        await _seed_distractors(session, tenant_a)
-        sharp_result = await SearchProductsTool(session, embedder=_embedder).execute(
-            SearchProductsArgs(query=_SHAPE_QUERY), _ctx(tenant_a)
-        )
-
-    async with tenant_session(tenant_b) as session:
-        await _seed_distractors(session, tenant_b)
-        flat_result = await SearchProductsTool(session, embedder=_embedder).execute(
-            SearchProductsArgs(query=_SHAPE_QUERY), _ctx(tenant_b)
-        )
-
-    sharp_note = sharp_result.content.split("\n\n")[0]
-    flat_note = flat_result.content.split("\n\n")[0]
-    assert sharp_note != flat_note
-    assert sharp_note == _SHARP_LEADER_NOTE
-    assert flat_note == _FLAT_BAND_NOTE
 
 
 async def test_filter_only_browse_carries_no_match_quality_note(tenant_a):

@@ -80,25 +80,44 @@ Three responses were on the table:
    degrades into noise a model learns to skip.
 
    The fix keys the note on a discriminator that needs no cross-embedder
-   calibration -- the ratio between the gap separating the best result from
-   the rest, and the total spread of the returned set's OWN `vector_distance`
-   values (`_SHARP_LEADER_GAP_RATIO`, `_match_shape_note` below). This is
+   calibration -- the ratio between a leading group's own trailing gap and
+   the total spread of the returned set's OWN `vector_distance` values
+   (`_SHARP_LEADER_GAP_RATIO`, `_classify_distance_shape` below). This is
    self-referential: it is computed from, and only ever compared against,
    the SAME query's own returned distances, so -- unlike an absolute cosine
    -distance cutoff -- it carries no assumption about what any one
    embedder's numbers mean, which is the exact constraint that ruled out
-   option 1 above. A sharp leader (one result meaningfully closer than
-   everything else) gets a note that says so, without claiming it is a
-   GOOD match in any absolute sense -- only that it stands out from its own
-   peers in this list. A flat band (nothing stands out) gets a more
-   pointed caution, because that is precisely the shape Task 4 measured
-   for a wholly unrelated query. Degrades safely to the original, uniform
-   note whenever the shape cannot be assessed honestly: too few results
-   with a real `vector_distance` to have a leader and a "rest" to compare
-   it against at all (`_MIN_SHAPE_SAMPLE`) -- which is every single-result
+   option 1 above. A sharp leader (one or more results meaningfully closer
+   than everything else) gets a note that says so, without claiming any of
+   them is a GOOD match in any absolute sense -- only that they stand out
+   from what follows. A flat band (nothing stands out) gets a more pointed
+   caution, because that is precisely the shape Task 4 measured for a
+   wholly unrelated query. Degrades safely to the original, uniform note
+   whenever the shape cannot be assessed honestly: too few results with a
+   real `vector_distance` to have a leader and a "rest" to compare it
+   against at all (`_MIN_SHAPE_SAMPLE`) -- which is every single-result
    set, and every result set the keyword arm alone produced. Never a
    confident claim the data does not support; the strong claim is the one
    that can be wrong.
+
+   **Fix round 2: a GROUP, not just an item.** The first version of this
+   heuristic compared only the best result to the second-best. A reviewer
+   built the realistic shape `docs/PHASE-5.md` §3 itself names as one of
+   three query types this subsystem exists to serve -- "Camry LE vs Camry
+   SE", two genuinely close matches sitting above a real noise tail
+   (`[0.13, 0.15, 0.70, 0.75, 0.79, 0.85, 0.91, 0.92, 0.93, 1.00]`) -- and
+   that version called it "flat", then told the model nothing stood out
+   about a set where two results plainly did. That is not merely
+   uninformative, the failure mode fix round 1 was about; it is a note
+   asserting something FALSE, which is worse, for the same reason a hash
+   that certifies the wrong text is worse than no hash -- it reads as a
+   finding. `_classify_distance_shape` now checks every candidate leading
+   -group boundary up to half the set (a structural bound derived from the
+   set's own size -- a "leading group" cannot be the majority of the list
+   and still be leading a tail -- not a second tuned number) and keeps
+   whichever boundary has the largest gap relative to the set's own total
+   spread. A single clear leader is still just this same loop's
+   `group_size == 1` case.
 
 **Citations.** `docs/ARCHITECTURE.md` §5.4 rule 3 ("message_citations
 records what was actually retrieved") is implemented for products the
@@ -170,17 +189,22 @@ _AMBIGUOUS_MATCH_QUALITY_NOTE = (
     "answers the question."
 )
 
-# A sharp leader: one result's vector_distance is clearly separated from
-# the rest of the returned set (see `_match_shape_note`). Deliberately does
-# NOT say the result is a good match -- only that it stands out from its
-# own peers here, which is the strongest claim this signal supports.
+# A sharp leader: one or more of the top results' vector_distance are
+# clearly separated from the rest of the returned set (see
+# `_match_shape_note`) -- a LEADING GROUP, not necessarily a single item:
+# "Camry LE vs Camry SE" (docs/PHASE-5.md §3's own named case) is two
+# genuinely close matches sitting above a noise tail, and a note that can
+# only ever recognise a single leader would call that shape "flat" and be
+# WRONG, not merely uninformative. Deliberately does NOT say any result is
+# a good match -- only that it (or they) stand out from what follows,
+# which is the strongest claim this signal supports.
 _SHARP_LEADER_NOTE = (
-    "The top result's vector_distance is clearly closer than the rest of "
-    "this list -- a real gap, not noise -- which is some evidence it is "
-    "more relevant than its peers here. That is not the same as being a "
-    "good match in an absolute sense: verify it actually answers the "
-    "question, and check its keyword_rank too, before presenting it as "
-    "the answer."
+    "The top result(s) in this list have a vector_distance clearly "
+    "separated from the rest -- a real gap, not noise -- which is some "
+    "evidence they are more relevant than what follows. That is not the "
+    "same as being a good match in an absolute sense: verify whichever "
+    "result(s) you rely on actually answer the question, and check their "
+    "keyword_rank too, before presenting one as the answer."
 )
 
 # A flat band: nothing in the returned set stands out from the rest (see
@@ -202,43 +226,54 @@ _FLAT_BAND_NOTE = (
 # returned set's shape says anything at all. Below this, "sharp leader" and
 # "flat band" are not merely unmeasured, they are UNKNOWABLE: one point has
 # no gap to speak of, and two points have exactly one gap with nothing of
-# its own to compare that gap against (`_match_shape_note`'s "rest" is a
-# single value, which has no spread). The honest answer below this many
+# its own to compare that gap against. The honest answer below this many
 # points is "I cannot tell", never a shape claim this data cannot support.
 _MIN_SHAPE_SAMPLE = 3
 
 # The fraction of the returned set's OWN distance range (worst minus best)
-# that the gap between the best and second-best result must occupy before
-# the set counts as having a genuine leader. A RATIO, not a cosine
-# distance: computed from, and only ever compared against, the SAME
-# query's own returned distances, so -- unlike a fixed cosine-distance
-# cutoff -- it carries no assumption about what any one embedder's numbers
-# mean in absolute terms, which is exactly the constraint that ruled out an
-# absolute cutoff in the first place (see this module's docstring). 0.5
-# says "the leader's own gap is at least as large as the entire spread of
-# everything behind it" -- a lopsided shape by construction, not a number
-# tuned against any one embedder's measurements.
+# that a leading group's own trailing gap must occupy before the set counts
+# as having a genuine leader. A RATIO, not a cosine distance: computed
+# from, and only ever compared against, the SAME query's own returned
+# distances, so -- unlike a fixed cosine-distance cutoff -- it carries no
+# assumption about what any one embedder's numbers mean in absolute terms,
+# which is exactly the constraint that ruled out an absolute cutoff in the
+# first place (see this module's docstring). 0.5 says "the gap behind the
+# leading group is at least as large as the entire spread of everything
+# else" -- a lopsided shape by construction, not a number tuned against any
+# one embedder's measurements.
 _SHARP_LEADER_GAP_RATIO = 0.5
 
 
-def _match_shape_note(matches: list[ProductMatch]) -> str:
-    """Which of the three notes above describes this returned set's own
-    `vector_distance` values -- self-referentially, with no cross-embedder
-    calibration, because nothing here is ever compared to anything but the
-    SAME set's own numbers (see this module's docstring).
+def _classify_distance_shape(sorted_distances: list[float]) -> str:
+    """The pure classification `_match_shape_note` wraps -- takes already
+    -sorted-ascending `vector_distance` values directly (never a
+    `ProductMatch`), specifically so it can be tested against a literal
+    list of numbers without constructing a full row for each one. This is
+    also exactly the seam a reviewer (or Phase 6) would want to call this
+    logic through directly, the same way they already did against the
+    fix round's first version.
 
-    Sorts the non-`None` distances ascending, then looks only at where the
-    single biggest gap in the WHOLE sorted list falls. The gap between the
-    best and second-best result is the one that matters (a leader separates
-    itself from EVERYTHING behind it, not just its immediate neighbour) --
-    checking any other adjacent pair would call a set "sharp" because of a
-    gap in the middle of an otherwise flat tail, which is not the shape
-    this note claims to describe.
+    **Why a leading GROUP, not a leading item (fix round 2).** The first
+    version compared only the best result to the second-best, which
+    called `[0.13, 0.15, 0.70, 0.75, ...]` -- two genuinely close matches
+    sitting above a real noise tail -- "flat", and then told the model
+    "nothing here stands out" about a set where two results plainly do.
+    That is `docs/PHASE-5.md` §3's own named case ("Camry LE vs Camry SE")
+    and a materially worse failure than the uninformative constant note
+    this whole mechanism replaced: a note that asserts something false
+    reads as a finding, where silence at least does not mislead.
+
+    The fix generalises "the gap after position 0" to "the largest gap
+    after any position up to half the set" -- checking every candidate
+    boundary for a leading group of size 1 up to `len(sorted_distances) //
+    2` (a group cannot be the MAJORITY of the set and still be "leading a
+    tail"; this is a structural bound derived from the set's own size, not
+    a second tuned constant) and keeping whichever boundary has the
+    biggest gap relative to the set's total spread. A single clear leader
+    is still just the `group_size == 1` case of this same loop -- nothing
+    about the sharp/flat classification for that shape changes.
     """
-    distances = sorted(m.vector_distance for m in matches if m.vector_distance is not None)
-    if len(distances) < _MIN_SHAPE_SAMPLE:
-        return _AMBIGUOUS_MATCH_QUALITY_NOTE
-    total_spread = distances[-1] - distances[0]
+    total_spread = sorted_distances[-1] - sorted_distances[0]
     if total_spread <= 1e-9:
         # Every embedded result is (near enough) equidistant from the
         # query -- the flattest possible band, and not merely "ambiguous":
@@ -249,10 +284,27 @@ def _match_shape_note(matches: list[ProductMatch]) -> str:
         # being used as "indistinguishable from zero", not as a threshold
         # on what the distances themselves mean.
         return _FLAT_BAND_NOTE
-    leader_gap_ratio = (distances[1] - distances[0]) / total_spread
-    if leader_gap_ratio >= _SHARP_LEADER_GAP_RATIO:
+
+    max_group_size = max(1, len(sorted_distances) // 2)
+    best_gap_ratio = max(
+        (sorted_distances[boundary] - sorted_distances[boundary - 1]) / total_spread
+        for boundary in range(1, max_group_size + 1)
+    )
+    if best_gap_ratio >= _SHARP_LEADER_GAP_RATIO:
         return _SHARP_LEADER_NOTE
     return _FLAT_BAND_NOTE
+
+
+def _match_shape_note(matches: list[ProductMatch]) -> str:
+    """Which of the three notes above describes this returned set's own
+    `vector_distance` values -- self-referentially, with no cross-embedder
+    calibration, because nothing here is ever compared to anything but the
+    SAME set's own numbers (see this module's docstring and
+    `_classify_distance_shape`, which does the actual classification)."""
+    distances = sorted(m.vector_distance for m in matches if m.vector_distance is not None)
+    if len(distances) < _MIN_SHAPE_SAMPLE:
+        return _AMBIGUOUS_MATCH_QUALITY_NOTE
+    return _classify_distance_shape(distances)
 
 
 class SearchProductsArgs(BaseModel):
