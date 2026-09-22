@@ -28,6 +28,13 @@ def _input(**overrides: object) -> ProductInput:
         "attributes": {"seats": 5, "fuel": "hybrid"},
         **overrides,
     }
+    # `ProductInput` requires `embedding_model` to travel with `embedding`
+    # (Task 2) -- this file's own tests are about the COALESCE/staleness
+    # mechanics, not about which provider computed a vector, so callers here
+    # only ever pass a bare `embedding=`. Filling the model in for them here
+    # keeps every one of those call sites unchanged.
+    if fields.get("embedding") is not None and "embedding_model" not in overrides:
+        fields["embedding_model"] = "hashing"
     return ProductInput(**fields)
 
 

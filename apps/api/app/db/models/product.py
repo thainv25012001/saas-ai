@@ -104,3 +104,14 @@ class Product(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
     # reconciliation job can select on this directly instead of
     # recomputing every row's hash to find the ones that need re-embedding.
     embedding_stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Which provider computed `embedding`, e.g. "hashing" or "openai" --
+    # `DocumentChunk.embedding_model`'s counterpart (app/db/models/document.py),
+    # recorded for the same reason: cosine similarity is only meaningful
+    # between two vectors from the same embedding space, and without this a
+    # catalogue re-embedded under a provider switch mid-import would mix
+    # incomparable vectors with nothing to detect it. Nullable, unlike
+    # `DocumentChunk`'s (non-nullable) column: a chunk is never persisted
+    # without an embedding, but a product can (no embedding yet), so there is
+    # sometimes no model to name. Moves in lockstep with `embedding` itself --
+    # see `ProductService.upsert_many`'s matching COALESCE.
+    embedding_model: Mapped[str | None] = mapped_column(String(100), nullable=True)

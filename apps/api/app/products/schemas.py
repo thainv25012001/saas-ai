@@ -1,7 +1,7 @@
 from decimal import Decimal
-from typing import Any
+from typing import Any, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.db.models import ProductAvailability
 
@@ -32,3 +32,17 @@ class ProductInput(BaseModel):
     is_active: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
     embedding: list[float] | None = None
+    # `DocumentChunk.embedding_model`'s counterpart -- see
+    # `Product.embedding_model`'s comment for why a mixed-provider catalogue
+    # needs this recorded rather than assumed. Required to travel with
+    # `embedding` (the validator below), never independently: a vector with
+    # no recorded provider is exactly the "which embedding space is this"
+    # ambiguity this column exists to remove, and a model name with no
+    # vector describes nothing.
+    embedding_model: str | None = None
+
+    @model_validator(mode="after")
+    def _embedding_and_model_travel_together(self) -> Self:
+        if (self.embedding is None) != (self.embedding_model is None):
+            raise ValueError("embedding and embedding_model must be set together, or not at all")
+        return self

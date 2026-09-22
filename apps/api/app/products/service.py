@@ -30,7 +30,11 @@ _MAX_LIST_LIMIT = 100
 # `embedding`: unlike the vector, their "preserve if omitted" case is
 # already resolved to a concrete value before this statement is built (see
 # the per-row loop in `upsert_many`), so they need no SQL-level COALESCE of
-# their own.
+# their own. `embedding_model` is the third exception, alongside `embedding`
+# itself (see the SQL-level COALESCE built below): it names the space
+# `embedding` lives in, so it must be preserved or replaced in the same
+# lockstep as the vector, not unconditionally overwritten from a row that
+# may be an embedding-less price/stock sync with no model to report.
 _UPSERT_COLUMNS = (
     "name",
     "slug",
@@ -83,6 +87,7 @@ class ProductService:
             metadata_=data.metadata,
             embedding=data.embedding,
             embedding_source_hash=source_hash,
+            embedding_model=data.embedding_model,
         )
         self.session.add(product)
         await self.session.flush()
@@ -149,6 +154,11 @@ class ProductService:
           content edit. Neither plain option is safe -- COALESCE is what
           makes "no embedding supplied" mean "unchanged" rather than
           "cleared".
+
+        `embedding_model` gets the identical `COALESCE`, for the identical
+        reason: it names the space `embedding` lives in, so it has to move
+        with the vector in lockstep, not be treated like the unconditionally
+        overwritten columns above.
 
         `search_tsv` needs no entry here: it is a generated column and
         Postgres recomputes it from the row's own `name`/`description`/
@@ -267,6 +277,7 @@ class ProductService:
                     "is_active": row.is_active,
                     "metadata": row.metadata,
                     "embedding": row.embedding,
+                    "embedding_model": row.embedding_model,
                     "embedding_source_hash": source_hash,
                     "embedding_stale": stale,
                 }
@@ -285,6 +296,16 @@ class ProductService:
         insert_stmt = pg_insert(table).values(values)
         set_ = {column: getattr(insert_stmt.excluded, column) for column in _UPSERT_COLUMNS}
         set_["embedding"] = func.coalesce(insert_stmt.excluded.embedding, table.c.embedding)
+        # Same COALESCE, same reason: `embedding_model` names the space
+        # `embedding` lives in, so an embedding-less write (`embedding=None`,
+        # preserved above) must preserve the model that vector was actually
+        # computed under too, rather than unconditionally overwriting it with
+        # this row's `embedding_model` (`None` for that same embedding-less
+        # write), which would leave a real, preserved vector with no
+        # recorded provider at all.
+        set_["embedding_model"] = func.coalesce(
+            insert_stmt.excluded.embedding_model, table.c.embedding_model
+        )
         set_["updated_at"] = func.now()
         upsert_stmt = insert_stmt.on_conflict_do_update(
             index_elements=[table.c.organization_id, table.c.external_id],
