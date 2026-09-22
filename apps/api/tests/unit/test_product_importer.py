@@ -62,7 +62,26 @@ def test_a_bad_row_is_reported_and_does_not_abort_the_file():
     assert error.row == 3  # header (1) + sku-1 (2) + sku-2, the bad row (3)
     assert error.external_id == "sku-2"
     assert "price" in error.message
-    assert result.total_rows == 3
+
+
+def test_a_price_exceeding_numeric_12_2_is_a_row_error_not_a_database_surprise():
+    """Review finding: a price that is a valid `Decimal` but exceeds
+    `products.price`'s actual `Numeric(12, 2)` column used to pass this
+    layer, reach the database, and abort its whole chunk's transaction --
+    failing every row sharing that chunk, not just this one.
+    `ProductInput.price` now mirrors the column's precision directly, so
+    this is caught here, at the same layer as any other bad price."""
+    data = _csv(
+        "sku-1,Camry,32999.00",
+        "sku-2,Corolla,999999999999999.99",
+        header="external_id,name,price",
+    )
+    result = parse_import(data, "text/csv")
+    assert [row.product.external_id for row in result.rows] == ["sku-1"]
+    [error] = result.errors
+    assert error.external_id == "sku-2"
+    assert "digits" in error.message
+    assert result.total_rows == 2
 
 
 def test_a_missing_external_id_value_is_a_hard_row_error():

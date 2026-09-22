@@ -22,7 +22,16 @@ class ProductInput(BaseModel):
     slug: str = Field(min_length=1, max_length=500)
     description: str | None = None
     category: str | None = None
-    price: Decimal | None = None
+    # `max_digits`/`decimal_places` mirror `products.price`'s actual column
+    # type, `Numeric(12, 2)` (0010_products.py) -- 10 integer digits, 2
+    # decimal. Without this, a value that fits `Decimal` but not the column
+    # (e.g. an import row with a stray extra digit) passes validation here
+    # and fails at the database instead, where Task 3's import can no
+    # longer tell "this specific row's price is bad" apart from "this
+    # chunk's write failed for some reason" -- see `app/products/importer.py`'s
+    # module docstring on why a database-level failure is handled with a
+    # fallback rather than relied on not to happen.
+    price: Decimal | None = Field(default=None, max_digits=12, decimal_places=2)
     currency: str | None = Field(default=None, min_length=3, max_length=3)
     attributes: dict[str, Any] = Field(default_factory=dict)
     availability: ProductAvailability = ProductAvailability.IN_STOCK

@@ -423,6 +423,46 @@ async def _write_chunk(
     await embed_and_store(session, tenant, to_embed)
 
 
+async def _write_rows_individually(
+    tenant: TenantContext, chunk: list[ParsedRow]
+) -> tuple[int, list[RowError]]:
+    """Fallback for a chunk whose batched `_write_chunk` call failed at the
+    database for a reason `ProductInput` did not catch -- re-run one row at
+    a time, each its own transaction, so the row(s) actually at fault are
+    the only ones reported failed.
+
+    This is what makes "one bad row does not abort the batch" hold for
+    *any* database-level failure, not just the ones Python-level validation
+    happens to anticipate today: convicting all 500 rows in a chunk for one
+    row's fault (the original behaviour) would be exactly the failure mode
+    the brief exists to prevent, just moved one layer down from where
+    per-row validation closes it. Deliberately only reached from the
+    chunk-level `except` in `run_import` -- a clean import never pays a
+    per-row round trip, only a chunk that has already failed once does.
+
+    If every row in the chunk fails identically (a connection outage, not
+    one row's fault) this still produces the correct outcome: every row is
+    reported failed, each with its own accurate message, rather than
+    reported failed as a side effect of a chunk-mate's problem.
+    """
+    succeeded = 0
+    errors: list[RowError] = []
+    for parsed in chunk:
+        try:
+            async with tenant_session(tenant) as session:
+                await _write_chunk(session, tenant, [parsed])
+            succeeded += 1
+        except Exception as exc:
+            errors.append(
+                RowError(
+                    row=parsed.row,
+                    external_id=parsed.product.external_id,
+                    message=bounded_error_message(exc),
+                )
+            )
+    return succeeded, errors
+
+
 class ProductImportService:
     """CRUD for `product_imports` -- `DocumentService`'s status-transition
     idiom, applied to a row that also carries counts and a per-row error
@@ -569,14 +609,21 @@ async def run_import(
     `tenant_session` has already closed *that* transaction by the time
     control reaches here), so nothing below ever tries to keep using it.
 
-    Each chunk gets its own `tenant_session` and its own try/except: a
-    chunk that fails (a genuine database error -- every row already passed
-    Python-level validation before reaching here, so this is not where a
-    bad price shows up) reports every row in that chunk as failed with the
-    same reason and the loop moves on to the next chunk, rather than
-    aborting the rest of the file. This is what "batch-level success" means
-    at the chunk granularity, not just the per-row one `parse_import`
-    already provides.
+    Each chunk gets its own `tenant_session` and its own try/except. A
+    chunk that fails is NOT simply reported as every one of its rows
+    failing: Python-level validation (`ProductInput`, including its
+    `Numeric(12, 2)`-mirroring `price` constraint) catches the overwhelming
+    majority of bad input before a chunk is ever built, but it cannot catch
+    every way a write can fail at the database -- a constraint this module
+    never anticipated, a connection blip, a value that is valid `Decimal`
+    but not valid for some column this module doesn't yet validate as
+    tightly. Convicting all 500 rows in the chunk for one row's fault would
+    be exactly the failure the brief exists to prevent, just moved one
+    layer down from where the report first closed it. So a failing chunk is
+    re-run through `_write_rows_individually`, one row per transaction,
+    and only the row(s) that actually fail alone are reported failed --
+    see that function's docstring. This fallback only runs on the error
+    path: a clean import never pays a per-row round trip for it.
     """
     async with tenant_session(tenant) as session:
         await ProductImportService(session, tenant).mark_processing(product_import_id)
@@ -594,21 +641,17 @@ async def run_import(
                     await _write_chunk(session, tenant, chunk)
                 succeeded += len(chunk)
             except Exception as exc:
-                message = f"batch write failed: {bounded_error_message(exc)}"
-                for parsed in chunk:
-                    errors.append(
-                        RowError(
-                            row=parsed.row, external_id=parsed.product.external_id, message=message
-                        )
-                    )
-                failed += len(chunk)
                 logger.warning(
-                    "product_import_chunk_failed",
+                    "product_import_chunk_failed_retrying_row_by_row",
                     product_import_id=str(product_import_id),
                     organization_id=str(tenant.organization_id),
                     rows=len(chunk),
-                    error=message,
+                    error=bounded_error_message(exc),
                 )
+                row_succeeded, row_errors = await _write_rows_individually(tenant, chunk)
+                succeeded += row_succeeded
+                errors.extend(row_errors)
+                failed += len(row_errors)
     except asyncio.CancelledError:
         async with tenant_session(tenant) as session:
             await ProductImportService(session, tenant).mark_failed(

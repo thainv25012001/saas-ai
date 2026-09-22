@@ -271,6 +271,76 @@ async def test_a_bad_row_imports_n_minus_1_and_reports_the_failure(api_client, c
     assert {p.external_id for p in products} == {"sku-1", "sku-3"}
 
 
+async def test_a_price_exceeding_the_db_columns_precision_is_a_row_error_not_a_chunk_failure(
+    api_client, clean_users, queue
+):
+    """Review finding: `ProductInput.price` used to have no digit-count
+    constraint mirroring `products.price`'s actual `Numeric(12, 2)` column,
+    so a price like this one (a valid `Decimal`, invalid for the column)
+    passed Python validation, reached the database, and aborted its whole
+    chunk's transaction -- failing two structurally good rows along with
+    the one bad one. `ProductInput` now mirrors the column's precision
+    directly, so this is caught as an ordinary per-row validation error
+    before the database ever sees it, and the other two rows are
+    unaffected."""
+    csv_with_an_out_of_range_price = (
+        b"external_id,name,price\n"
+        b"sku-1,Camry,32999.00\n"
+        b"sku-2,Corolla,999999999999999.99\n"
+        b"sku-3,RAV4,28999.00\n"
+    )
+    token = await _register(api_client, "impbigprice@example.com", "Ada Motors Import BigPrice")
+    org_id = await _organization_id(api_client, token)
+    upload = await _upload(api_client, token, content=csv_with_an_out_of_range_price)
+    import_id = uuid.UUID(upload.json()["id"])
+
+    await _run_import(org_id, import_id)
+
+    body = (await api_client.get(f"{IMPORT_URL}/{import_id}", headers=_auth(token))).json()
+    assert body["succeeded_count"] == 2
+    assert body["failed_count"] == 1
+    [error] = body["errors"]
+    assert error["external_id"] == "sku-2"
+    assert "digits" in error["message"]
+
+    products = await _products_for(org_id)
+    assert {p.external_id for p in products} == {"sku-1", "sku-3"}
+
+
+async def test_a_genuine_db_level_error_in_one_row_does_not_take_down_its_chunk_mates(
+    api_client, clean_users, queue
+):
+    """The general-purpose fix, not just the `price`-specific one above:
+    `stock_quantity` is a plain `int` with no bound mirroring Postgres
+    `integer`'s range, so a value like this one still reaches the database
+    and fails there -- proving the row-by-row fallback holds for a failure
+    *no* per-row validation added by this fix anticipated, not merely the
+    one case the review happened to name. Before the fallback, this would
+    have failed all three rows sharing the chunk; now only the row that
+    actually caused the database error is blamed."""
+    csv_with_a_db_level_bad_row = (
+        b"external_id,name,stock_quantity\n"
+        b"sku-1,Camry,10\n"
+        b"sku-2,Corolla,99999999999999\n"
+        b"sku-3,RAV4,20\n"
+    )
+    token = await _register(api_client, "impdblevel@example.com", "Ada Motors Import DbLevel")
+    org_id = await _organization_id(api_client, token)
+    upload = await _upload(api_client, token, content=csv_with_a_db_level_bad_row)
+    import_id = uuid.UUID(upload.json()["id"])
+
+    await _run_import(org_id, import_id)
+
+    body = (await api_client.get(f"{IMPORT_URL}/{import_id}", headers=_auth(token))).json()
+    assert body["succeeded_count"] == 2
+    assert body["failed_count"] == 1
+    [error] = body["errors"]
+    assert error["external_id"] == "sku-2"
+
+    products = await _products_for(org_id)
+    assert {p.external_id for p in products} == {"sku-1", "sku-3"}
+
+
 async def test_a_json_import_completes_end_to_end(api_client, clean_users, queue):
     payload = json.dumps(
         [
