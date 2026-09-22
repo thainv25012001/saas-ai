@@ -90,15 +90,17 @@ Three responses were on the table:
    option 1 above. A sharp leader (one or more results meaningfully closer
    than everything else) gets a note that says so, without claiming any of
    them is a GOOD match in any absolute sense -- only that they stand out
-   from what follows. A flat band (nothing stands out) gets a more pointed
-   caution, because that is precisely the shape Task 4 measured for a
-   wholly unrelated query. Degrades safely to the original, uniform note
-   whenever the shape cannot be assessed honestly: too few results with a
-   real `vector_distance` to have a leader and a "rest" to compare it
-   against at all (`_MIN_SHAPE_SAMPLE`) -- which is every single-result
-   set, and every result set the keyword arm alone produced. Never a
-   confident claim the data does not support; the strong claim is the one
-   that can be wrong.
+   from what follows. A flat verdict (no admissible boundary had a big
+   enough gap) gets a note stating only that narrower fact -- as of fix
+   round 4, deliberately NOT "nothing stands out" (see `_FLAT_BAND_NOTE`'s
+   own comment for why that stronger claim turned out to be false in a
+   shape this same classifier is asked to handle). Degrades safely to the
+   original, uniform note whenever the shape cannot be assessed honestly:
+   too few results with a real `vector_distance` to have a leader and a
+   "rest" to compare it against at all (`_MIN_SHAPE_SAMPLE`) -- which is
+   every single-result set, and every result set the keyword arm alone
+   produced. Never a confident claim the data does not support; the
+   strong claim is the one that can be wrong.
 
    **Fix round 2: a GROUP, not just an item.** The first version of this
    heuristic compared only the best result to the second-best. A reviewer
@@ -132,12 +134,40 @@ Three responses were on the table:
    actually needs to hold is not "the group is a minority of everything"
    but "the group does not outnumber its own REMAINDER too heavily" --
    `_classify_distance_shape` now admits a candidate boundary only when
-   `boundary * _SHARP_LEADER_GAP_RATIO <= remainder` (the group is at most
-   twice what it leaves behind), reusing the SAME constant that already
-   governs how big a gap must be, because both ask the identical question
-   ("is the thing claimed as dominant at least as substantial as what it
-   is weighed against") in different units. One rule, not a small-`n`
-   special case alongside a large-`n` one.
+   `boundary * _LEADING_GROUP_REMAINDER_RATIO <= remainder` (the group is
+   at most twice what it leaves behind). One rule, not a small-`n` special
+   case alongside a large-`n` one.
+
+   **Fix round 4: stop generalising the boundary, and weaken the FLAT
+   note instead.** A third sweep (`n = 2..12`) found the identical class
+   of false statement again -- at `n=7`, five good results near 0.10 and
+   two bad ones near 0.80 (a leading group of five, remainder two) fell
+   outside `_LEADING_GROUP_REMAINDER_RATIO`'s admission rule
+   (`5 * 0.5 = 2.5 > 2`), so `_FLAT_BAND_NOTE` fired and (in its fix
+   -round-3 wording) claimed nothing stood out, while five results
+   plainly did. Three rounds relocating the same cutoff -- `n // 2`, then
+   a remainder ratio -- is the pattern that says the cutoff itself is the
+   wrong kind of fix: "how large can a leading group be before it stops
+   leading" is a judgement call with no distance to recover it from, so
+   every count-based admission rule will have an edge, and every wider
+   sweep will find it. The exit is to stop asserting a claim strong
+   enough to need one: `_FLAT_BAND_NOTE` no longer says nothing stands
+   out. It says only what this branch actually establishes -- that no
+   SINGLE result clearly separates from the rest -- which stays true
+   whether the branch was reached because the set is genuinely
+   undifferentiated (Task 4's measured unrelated-query band, a smooth
+   gradient) or because a GROUP of several separated cleanly while no
+   individual one did. The SHARP path is untouched: every round's error
+   in that direction has been an under-claim (calling a real leading
+   group flat), never an over-claim, which is the safe direction to leave
+   alone. `_SHARP_LEADER_GAP_RATIO` (a distance ratio: how big a gap must
+   be) and `_LEADING_GROUP_REMAINDER_RATIO` (a count ratio: how large a
+   remainder a candidate group must leave) are now two separately named
+   constants rather than one reused number -- fix round 3's "these are
+   the same question in different units" reasoning was a coupling between
+   two conceptually distinct quantities that happened to share a value,
+   not a derived equivalence between them, and retuning one for its own
+   reasons would have silently moved the other.
 
 **Citations.** `docs/ARCHITECTURE.md` §5.4 rule 3 ("message_citations
 records what was actually retrieved") is implemented for products the
@@ -227,19 +257,34 @@ _SHARP_LEADER_NOTE = (
     "keyword_rank too, before presenting one as the answer."
 )
 
-# A flat band: nothing in the returned set stands out from the rest (see
-# `_match_shape_note`) -- the same shape Task 4 measured for a query with
-# no genuine match in the catalogue at all (docs/PHASE-5.md §2; all ten
-# rows at cosine distance 0.9139-1.0000). More pointed than the ambiguous
-# note above on purpose: this is not "too little data to tell", it is
-# "enough data to tell, and what it shows is that nothing stands out."
+# NOT "nothing stands out" (fix round 4). Three rounds of review each
+# found a shape where a stronger flat note was FALSE: a leading GROUP of
+# several results can separate cleanly from a tail while no SINGLE result
+# does (`n=7`, five good results near 0.10, two bad near 0.80-- the
+# classifier's own boundary search is capped by construction and cannot
+# recognise every such group without also wrongly recognising a lone
+# straggler as a "group", so somewhere a real group will fall outside
+# whatever boundary range is admitted). Chasing that boundary for a fourth
+# round would only relocate the same failure again -- "how large can a
+# leading group be before it stops leading" has no principled answer to
+# converge on; it is a judgment call, not a fact recoverable from the
+# distances. So this note now asserts only what the classifier actually
+# established when it takes this branch: no ONE result clearly separates
+# from the rest -- true in every shape this module has been tested
+# against, including the ones where several results plainly do cluster
+# near the top, where it is weaker than the classifier's own confidence,
+# deliberately. Do NOT strengthen this back into a claim about the whole
+# set having nothing worthwhile in it -- that is the exact claim three
+# rounds of review found a counterexample to.
 _FLAT_BAND_NOTE = (
-    "These results are packed closely together in vector_distance -- "
-    "nothing here stands out as a clearly stronger match than the rest, "
-    "the same shape a wholly unrelated query produces against this "
-    "catalogue. Ranking is not filtering: a closely bunched list is a "
-    "sign none of these may actually be relevant. Do not present the top "
-    "result as clearly relevant without other evidence."
+    "Ranking did not identify a single result whose vector_distance "
+    "clearly separates it from the rest of this list. That does not mean "
+    "every result is equally weak -- several results could still be "
+    "genuinely close matches as a group -- only that no ONE result stands "
+    "out on its own. Check each result's vector_distance and keyword_rank "
+    "before treating any of them as clearly relevant, and do not assume "
+    "the first result is meaningfully better than the others just because "
+    "it is listed first."
 )
 
 # How many results with a real `vector_distance` are needed before the
@@ -250,30 +295,42 @@ _FLAT_BAND_NOTE = (
 # points is "I cannot tell", never a shape claim this data cannot support.
 _MIN_SHAPE_SAMPLE = 3
 
-# Governs TWO structurally identical questions, reused rather than
-# duplicated as a second constant (fix round 3):
+# The fraction of the returned set's OWN distance range (worst minus best)
+# that a leading group's own trailing gap must occupy before the set
+# counts as having a genuine leader. A RATIO, not a cosine distance:
+# computed from, and only ever compared against, the SAME query's own
+# returned distances, so -- unlike a fixed cosine-distance cutoff -- it
+# carries no assumption about what any one embedder's numbers mean in
+# absolute terms, which is exactly the constraint that ruled out an
+# absolute cutoff in the first place (see this module's docstring). 0.5
+# says "the gap behind the leading group is at least as large as the
+# entire spread of everything else."
 #
-# 1. The fraction of the returned set's OWN distance range (worst minus
-#    best) that a leading group's own trailing gap must occupy before the
-#    set counts as having a genuine leader. A RATIO, not a cosine
-#    distance: computed from, and only ever compared against, the SAME
-#    query's own returned distances, so -- unlike a fixed cosine-distance
-#    cutoff -- it carries no assumption about what any one embedder's
-#    numbers mean in absolute terms, which is exactly the constraint that
-#    ruled out an absolute cutoff in the first place (see this module's
-#    docstring). 0.5 says "the gap behind the leading group is at least
-#    as large as the entire spread of everything else."
-# 2. (fix round 3) Whether a candidate GROUP SIZE is even worth checking
-#    at all: a group only "leads" a tail if the tail is at least half the
-#    group's own size (`_classify_distance_shape`'s `boundary *
-#    _SHARP_LEADER_GAP_RATIO <= remainder`) -- the identical question
-#    ("is X at least as substantial as what it is being weighed against")
-#    asked in a different unit (counts, not distance). Reusing the same
-#    number here rather than introducing a second one is deliberate: two
-#    independently-tuned constants would have been two chances for the
-#    next reviewer to ask "why THIS number", where one constant answering
-#    both questions only has to be justified once.
+# Fix round 3 reused this same value for a SECOND purpose -- whether a
+# candidate group size was even worth checking (see
+# `_LEADING_GROUP_REMAINDER_RATIO` below) -- reasoning that the two were
+# "the same question asked in a different unit". Fix round 4 undoes that:
+# a distance ratio and a count ratio are genuinely different quantities
+# that happened to share a value by choice, not by any equivalence
+# between them, and coupling them meant retuning one for its own reasons
+# would have silently moved the other. Two named constants, kept at the
+# same value because neither round has a reason yet to diverge them, not
+# because they are secretly one number.
 _SHARP_LEADER_GAP_RATIO = 0.5
+
+# How large a candidate leading group's own REMAINDER must be, relative to
+# the group's size, before that boundary is even considered as a
+# candidate "leader" (`_classify_distance_shape`'s `boundary *
+# _LEADING_GROUP_REMAINDER_RATIO <= remainder`) -- a count ratio, not a
+# distance ratio (see `_SHARP_LEADER_GAP_RATIO`'s own comment for why
+# these are two constants, not one, as of fix round 4). Self-referential
+# in the identical way: computed from, and only ever compared against, the
+# SAME returned set's own size, so it carries no assumption about how
+# large a "normal" result set is. 0.5 says "the group is at most twice
+# its own remainder" -- a structural bound on the shape of the candidate,
+# independent of whatever gap-strength threshold `_SHARP_LEADER_GAP_RATIO`
+# separately applies once a candidate is admitted.
+_LEADING_GROUP_REMAINDER_RATIO = 0.5
 
 
 def _classify_distance_shape(sorted_distances: list[float]) -> str:
@@ -311,12 +368,31 @@ def _classify_distance_shape(sorted_distances: list[float]) -> str:
     actually needs to be true is that the group leaves behind a REMAINDER
     substantial enough, relative to the group's OWN size, to plausibly
     call the group "leading" it -- not that the group is outright a
-    minority of everything. `boundary * _SHARP_LEADER_GAP_RATIO <=
+    minority of everything. `boundary * _LEADING_GROUP_REMAINDER_RATIO <=
     remainder` (equivalently: the group is at most twice the remainder)
     is that single rule, with no separate size regime for small `n`: it
     is what lets `n = 3`'s group of two (remainder one, exactly at the
     line) through while still excluding `n = 10`'s group of nine
     (remainder one, nowhere close for a group that size).
+
+    **Fix round 4: this boundary rule still has an edge, and that is why
+    `_FLAT_BAND_NOTE` no longer claims "nothing stands out" (see that
+    constant's own comment).** At `n = 7`, a leading group of five
+    (remainder two: `5 * 0.5 = 2.5 > 2`) is excluded by the SAME
+    reasoning that correctly excludes a group of nine at `n = 10` --
+    which is correct FOR THIS FUNCTION'S JOB (deciding whether a gap is
+    admissible as "the" leading boundary), but means this function
+    returning `False`-shaped ("no admissible boundary had a big enough
+    gap") does not mean "no group of any size separated", only "no group
+    this function was willing to call a genuine leader did." The caller
+    (`_FLAT_BAND_NOTE`) is written to be true of that narrower fact, not
+    the stronger one this function cannot actually support. Chasing the
+    boundary itself for a fourth round -- widening
+    `_LEADING_GROUP_REMAINDER_RATIO` further -- would only relocate the
+    same edge again; there is no value of it that admits every real
+    leading group while excluding every spurious one, because "how large
+    can a leading group be" is a judgement call, not a fact recoverable
+    from the distances.
 
     Checks every candidate boundary the remainder rule admits and keeps
     whichever has the biggest gap relative to the set's total spread. A
@@ -340,12 +416,12 @@ def _classify_distance_shape(sorted_distances: list[float]) -> str:
     best_gap_ratio = 0.0
     for boundary in range(1, sample_size):
         remainder = sample_size - boundary
-        if boundary * _SHARP_LEADER_GAP_RATIO > remainder:
+        if boundary * _LEADING_GROUP_REMAINDER_RATIO > remainder:
             # This group would outnumber its own remainder by more than
-            # `_SHARP_LEADER_GAP_RATIO` allows -- not a leading group, just
-            # most of the list with a few stragglers, and every LARGER
-            # boundary only shrinks the remainder further, so nothing past
-            # this point can pass either.
+            # `_LEADING_GROUP_REMAINDER_RATIO` allows -- not a leading
+            # group, just most of the list with a few stragglers, and
+            # every LARGER boundary only shrinks the remainder further, so
+            # nothing past this point can pass either.
             break
         gap = sorted_distances[boundary] - sorted_distances[boundary - 1]
         best_gap_ratio = max(best_gap_ratio, gap / total_spread)

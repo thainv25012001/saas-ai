@@ -1,6 +1,6 @@
 """`_match_shape_note`/`_classify_distance_shape` (`app/tools/products.py`),
 tested directly against literal `vector_distance` values -- the exact seam
-a reviewer used to find both fix round 1's and fix round 2's bugs:
+a reviewer used to find the bug across four rounds:
 
 - Fix round 1 compared only the best result to the second-best, so
   `[0.13, 0.15, 0.70, ...]` (two genuinely close matches sitting above a
@@ -14,11 +14,21 @@ a reviewer used to find both fix round 1's and fix round 2's bugs:
   at a set size (`search_products` with a small `limit`, or a filtered
   catalogue) that is entirely ordinary.
 - Fix round 3 replaced the majority cap with a single rule that scales
-  correctly at every `n`: a candidate leading group is only considered
-  when it does not outnumber its own remainder by more than
-  `_SHARP_LEADER_GAP_RATIO` allows (`boundary * _SHARP_LEADER_GAP_RATIO <=
-  remainder`) -- reusing the same constant that already governs how big a
-  gap must be, rather than introducing a second tuned number.
+  correctly at every `n` tried so far: a candidate leading group is only
+  considered when it does not outnumber its own remainder by more than
+  `_LEADING_GROUP_REMAINDER_RATIO` allows (`boundary *
+  _LEADING_GROUP_REMAINDER_RATIO <= remainder`).
+- A wider sweep (`n = 2..12`) found the SAME class of bug again: at
+  `n = 7`, a leading group of five (remainder two) is excluded by that
+  same rule (`5 * 0.5 = 2.5 > 2`), so five genuinely good results above
+  two bad ones still read as "flat". Fix round 4 stops trying to widen
+  the boundary rule -- "how large can a leading group be before it stops
+  leading" has no principled cutoff, so every rule will have an edge a
+  wider sweep finds -- and instead weakens `_FLAT_BAND_NOTE` itself to
+  assert only what this branch actually establishes: no SINGLE result
+  clearly separates from the rest. That is true in every shape below,
+  including the `n = 7` one, where it is weaker than what a human
+  reading the numbers could see, deliberately.
 
 Pure numbers, not a `HashingEmbedder` corpus, and in `tests/unit`, not
 `tests/integration`: fix round 2 established that a corpus built from
@@ -129,6 +139,26 @@ def test_a_lone_trailing_outlier_does_not_make_the_rest_a_leading_group() -> Non
     new rule too."""
     distances = [0.10, 0.12, 0.14, 0.16, 0.18, 0.20, 0.22, 0.24, 0.26, 0.90]
     assert _shape_note(distances) == _FLAT_BAND_NOTE
+
+
+def test_five_good_results_above_two_bad_ones_gets_a_note_true_of_that_shape() -> None:
+    """Fix round 4's own regression shape (`n=7`, a leading group of five,
+    two stragglers): the SAME rule that correctly excludes a group of nine
+    at `n=10` also excludes a group of five here (`5 * 0.5 = 2.5 > 2`,
+    the remainder of two is not large enough), so this still classifies
+    FLAT -- and that is fine, because fix round 4's point is not that the
+    verdict changes, it is that the WORDING must stay true regardless of
+    which verdict this shape gets. Fix round 3's wording ("nothing stands
+    out") would have been false here: five results plainly do. Fix round
+    4's wording ("no SINGLE result clearly separates") is true regardless
+    -- none of the five distinguishes itself from its four siblings, even
+    though the group of five collectively separates from the two."""
+    distances = [0.10, 0.11, 0.12, 0.13, 0.14, 0.80, 0.82]
+    note = _shape_note(distances)
+    assert note == _FLAT_BAND_NOTE
+    assert "nothing" not in note.lower()
+    assert "no result" not in note.lower()  # would falsely include the group of five
+    assert "single result" in note.lower()
 
 
 # ---------------------------------------------------------------------------
