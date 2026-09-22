@@ -2,6 +2,7 @@ import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import type { LeadStatus } from "@/graphql/generated";
 import { conversationLabel } from "@/lib/conversation-transcript";
+import { formatTimestamp } from "@/lib/format";
 import { leadStatusLabel, leadStatusTone } from "@/lib/lead-status";
 
 export type LeadRow = {
@@ -14,11 +15,6 @@ export type LeadRow = {
   createdAt: string;
   conversation: { id: string; title: string | null; preview: string | null } | null;
 };
-
-function formatCapturedAt(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
 
 /** `name`/`email`/`phone`/`interest` are all independently nullable on the
  * model -- a chat rarely yields a complete contact card in one turn, so a
@@ -93,7 +89,7 @@ export function LeadsTable({ leads }: { leads: readonly LeadRow[] }) {
                   {lead.conversation ? conversationLabel(lead.conversation) : "Deleted conversation"}
                 </span>
               </td>
-              <td className="px-5 py-3 text-ink-muted">{formatCapturedAt(lead.createdAt)}</td>
+              <td className="px-5 py-3 text-ink-muted">{formatTimestamp(lead.createdAt)}</td>
             </tr>
           ))}
         </tbody>

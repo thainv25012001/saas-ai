@@ -270,6 +270,14 @@ function PlaygroundContent() {
         // an untouched playground sends exactly the request it always did.
         override: overrideFields(selection, agentSelection),
         onEvent: (event) => {
+          // Every branch below patches the one assistant message this turn is
+          // streaming into. Naming that once keeps each case to the patch it
+          // actually applies, instead of six copies of the same id match --
+          // which is also six chances to compare the wrong id or forget to
+          // return `m` unchanged for everyone else.
+          const patchAssistant = (patch: (m: ChatMessageData) => ChatMessageData) =>
+            setMessages((prev) => prev.map((m) => (m.id === assistantId ? patch(m) : m)));
+
           switch (event.type) {
             case "message_start":
               seenConversationId = event.conversation_id;
@@ -283,107 +291,81 @@ function PlaygroundContent() {
               // `ChatMessage.tsx` and `ChatCitations`'s own docstring in
               // `apps/api/app/chat/service.py`). Merged in wherever it
               // arrives rather than assumed to be first.
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId
-                    ? {
-                        ...m,
-                        citations: event.citations.map((citation) => ({
-                          chunkId: citation.chunk_id,
-                          documentId: citation.document_id,
-                          documentTitle: citation.document_title,
-                          rank: citation.rank,
-                          score: citation.score,
-                          excerpt: citation.excerpt,
-                          page: citation.page,
-                        })),
-                      }
-                    : m,
-                ),
-              );
+              patchAssistant((m) => ({
+                ...m,
+                citations: event.citations.map((citation) => ({
+                  chunkId: citation.chunk_id,
+                  documentId: citation.document_id,
+                  documentTitle: citation.document_title,
+                  rank: citation.rank,
+                  score: citation.score,
+                  excerpt: citation.excerpt,
+                  page: citation.page,
+                })),
+              }));
               break;
             case "text_delta":
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId ? { ...m, text: m.text + event.text } : m,
-                ),
-              );
+              patchAssistant((m) => ({ ...m, text: m.text + event.text }));
               break;
             case "tool_call_start":
               // Appended in the order the calls started; `tool_call_end`
               // below matches each one back by id, so two calls in the same
               // step (a step can gather more than one) never get mixed up.
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId
-                    ? {
-                        ...m,
-                        toolCalls: [
-                          ...(m.toolCalls ?? []),
-                          ...event.calls.map((call) => ({
-                            id: call.id,
-                            name: call.name,
-                            arguments: call.arguments,
-                            status: "running" as const,
-                          })),
-                        ],
-                      }
-                    : m,
-                ),
-              );
+              patchAssistant((m) => ({
+                ...m,
+                toolCalls: [
+                  ...(m.toolCalls ?? []),
+                  ...event.calls.map((call) => ({
+                    id: call.id,
+                    name: call.name,
+                    arguments: call.arguments,
+                    status: "running" as const,
+                  })),
+                ],
+              }));
               break;
             case "tool_call_end":
-              setMessages((prev) =>
-                prev.map((m) => {
-                  if (m.id !== assistantId || !m.toolCalls) return m;
-                  const byId = new Map(event.results.map((result) => [result.tool_call_id, result]));
-                  return {
-                    ...m,
-                    toolCalls: m.toolCalls.map((call) => {
-                      const result = byId.get(call.id);
-                      return result
-                        ? {
-                            ...call,
-                            status: "done" as const,
-                            result: result.result,
-                            isError: result.is_error,
-                          }
-                        : call;
-                    }),
-                  };
-                }),
-              );
+              patchAssistant((m) => {
+                if (!m.toolCalls) return m;
+                const byId = new Map(event.results.map((result) => [result.tool_call_id, result]));
+                return {
+                  ...m,
+                  toolCalls: m.toolCalls.map((call) => {
+                    const result = byId.get(call.id);
+                    return result
+                      ? {
+                          ...call,
+                          status: "done" as const,
+                          result: result.result,
+                          isError: result.is_error,
+                        }
+                      : call;
+                  }),
+                };
+              });
               break;
             case "message_end":
               sawMessageEnd = true;
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId
-                    ? {
-                        ...m,
-                        status: "done",
-                        meta: {
-                          model: event.model,
-                          usage: event.usage,
-                          costUsd: event.cost_usd,
-                          latencyMs: event.latency_ms,
-                        },
-                      }
-                    : m,
-                ),
-              );
+              patchAssistant((m) => ({
+                ...m,
+                status: "done",
+                meta: {
+                  model: event.model,
+                  usage: event.usage,
+                  costUsd: event.cost_usd,
+                  latencyMs: event.latency_ms,
+                },
+              }));
               break;
             case "error":
               // Keep whatever partial text already arrived -- the user saw
               // those tokens, and (for the handled-error case) the server
               // has already persisted them.
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId
-                    ? { ...m, status: "error", error: { code: event.code, message: event.message } }
-                    : m,
-                ),
-              );
+              patchAssistant((m) => ({
+                ...m,
+                status: "error",
+                error: { code: event.code, message: event.message },
+              }));
               break;
           }
         },
