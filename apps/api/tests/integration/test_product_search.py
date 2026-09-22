@@ -282,6 +282,166 @@ async def test_chunk_found_by_both_arms_outranks_the_single_best_vector_match(te
     assert {r.product_id for r in results} == {vector_best.id, both.id}
 
 
+# --- Raw per-arm signals and the configurable relevance floor --------------
+#
+# `ProductMatch.vector_distance`/`keyword_rank` are the raw, un-fused
+# per-arm numbers -- added because the fused `score` alone forecloses ever
+# implementing a relevance floor: `top_fused`'s own docstring says a fused
+# RRF score carries no relevance information, only rank position, so
+# without these fields nothing a caller does with `settings.
+# product_search_max_cosine_distance`/`product_search_min_keyword_rank`
+# could ever be observed. These four tests pin the raw fields; the two
+# after them pin the floor settings as a *mechanism* (off by default,
+# effective once configured) rather than as calibrated numbers -- see
+# `app/rag/products.py`'s module docstring for why no default here is
+# measured against anything but `HashingEmbedder`, and is therefore not
+# calibrated at all.
+
+
+async def test_ranked_match_exposes_raw_vector_distance_and_keyword_rank(tenant_a):
+    query = "extended roadside assistance coverage plan"
+    query_vector = await _embed(query)
+
+    async with tenant_session(tenant_a) as session:
+        await _create(
+            session,
+            tenant_a,
+            external_id="both",
+            name="Roadside Assistance Plan",
+            description="Extended roadside assistance coverage plan for eligible vehicles.",
+            embedding=query_vector,
+        )
+
+    async with tenant_session(tenant_a) as session:
+        [result] = await ProductSearchService(session, tenant_a).search(query=query)
+
+    assert result.vector_distance == pytest.approx(0.0, abs=1e-6)
+    assert result.keyword_rank is not None
+    assert result.keyword_rank > 0.0
+
+
+async def test_vector_only_match_has_no_keyword_rank(tenant_a):
+    query = "aerodynamic carbon fiber road bicycle frame"
+    query_vector = await _embed(query)
+
+    async with tenant_session(tenant_a) as session:
+        await _create(
+            session,
+            tenant_a,
+            external_id="a",
+            name="Filler Item Alpha",
+            description="Completely unrelated filler content about nothing important.",
+            embedding=query_vector,
+        )
+
+    async with tenant_session(tenant_a) as session:
+        [result] = await ProductSearchService(session, tenant_a).search(query=query)
+
+    assert result.vector_distance == pytest.approx(0.0, abs=1e-6)
+    assert result.keyword_rank is None
+
+
+async def test_keyword_only_match_has_no_vector_distance(tenant_a):
+    async with tenant_session(tenant_a) as session:
+        await _create(
+            session,
+            tenant_a,
+            external_id="new-import",
+            name="Wireless Ergonomic Mouse",
+            description="A Bluetooth mouse with adjustable DPI settings.",
+            embedding=None,
+        )
+
+    async with tenant_session(tenant_a) as session:
+        [result] = await ProductSearchService(session, tenant_a).search(
+            query="wireless ergonomic mouse"
+        )
+
+    assert result.vector_distance is None
+    assert result.keyword_rank is not None
+
+
+async def test_query_less_match_has_no_raw_signals(tenant_a):
+    async with tenant_session(tenant_a) as session:
+        await _create(session, tenant_a, external_id="a", name="Alpha")
+
+    async with tenant_session(tenant_a) as session:
+        [result] = await ProductSearchService(session, tenant_a).search()
+
+    assert result.vector_distance is None
+    assert result.keyword_rank is None
+
+
+async def test_max_cosine_distance_floor_is_off_by_default_and_configurable(tenant_a, monkeypatch):
+    """The floor's mechanism, not a number: with
+    `product_search_max_cosine_distance` at its default (`None`, off), a
+    maximally-far, lexically unrelated product still surfaces (nothing
+    else in its corpus for RRF to rank it against); configuring any floor
+    excludes the identical product.
+    """
+    import app.rag.products as products_module
+    from app.core.config import get_settings
+
+    query = "aerodynamic carbon fiber road bicycle frame"
+    query_vector = await _embed(query)
+
+    async with tenant_session(tenant_a) as session:
+        far = await _create(
+            session,
+            tenant_a,
+            external_id="far",
+            name="Filler Item Beta",
+            description="Completely unrelated filler content about nothing important too.",
+            embedding=_negate(query_vector),
+        )
+
+    async with tenant_session(tenant_a) as session:
+        off_by_default = await ProductSearchService(session, tenant_a).search(query=query)
+    assert [r.product_id for r in off_by_default] == [far.id]
+
+    # `_negate` puts `far` at cosine distance exactly 2.0 from the query --
+    # any floor below that excludes it.
+    configured = get_settings().model_copy(update={"product_search_max_cosine_distance": 1.0})
+    monkeypatch.setattr(products_module, "get_settings", lambda: configured)
+
+    async with tenant_session(tenant_a) as session:
+        with_floor = await ProductSearchService(session, tenant_a).search(query=query)
+    assert with_floor == []
+
+
+async def test_min_keyword_rank_floor_is_off_by_default_and_configurable(tenant_a, monkeypatch):
+    """Same mechanism, for the keyword arm's OR fallback: a weak,
+    single-incidental-word match (the query's five words, only "chair"
+    shared) surfaces by default and is excluded once any positive floor is
+    configured -- unembedded so only the keyword arm is in play.
+    """
+    import app.rag.products as products_module
+    from app.core.config import get_settings
+
+    async with tenant_session(tenant_a) as session:
+        weak = await _create(
+            session,
+            tenant_a,
+            external_id="weak",
+            name="Dining Room Chair",
+            description="A simple wooden chair for the dining room.",
+            embedding=None,
+        )
+
+    query = "premium leather office chair ergonomic lumbar support"
+
+    async with tenant_session(tenant_a) as session:
+        off_by_default = await ProductSearchService(session, tenant_a).search(query=query)
+    assert [r.product_id for r in off_by_default] == [weak.id]
+
+    configured = get_settings().model_copy(update={"product_search_min_keyword_rank": 0.99})
+    monkeypatch.setattr(products_module, "get_settings", lambda: configured)
+
+    async with tenant_session(tenant_a) as session:
+        with_floor = await ProductSearchService(session, tenant_a).search(query=query)
+    assert with_floor == []
+
+
 # --- is_active and tenancy ---------------------------------------------------
 
 

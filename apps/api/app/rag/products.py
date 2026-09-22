@@ -44,6 +44,35 @@ tests for what this means in each of the three paths.
 Two-layer tenancy (`docs/ARCHITECTURE.md` §2.3) applies exactly as it does
 in `retrieve.py`: an explicit `organization_id` predicate on every
 statement, in addition to (never instead of) RLS on the caller's session.
+
+**No relevance floor by default, and the raw signal that makes turning
+one on possible.** `retrieve.py` filters each arm to a calibrated
+threshold before fusion (`settings.retrieval_max_cosine_distance`,
+`settings.retrieval_min_keyword_rank`) because an unrelated query would
+otherwise still return its nearest neighbours, confidently. The same
+failure mode applies here -- measured directly against a car catalogue:
+an unrelated query ("scuba diving gear") leaves the keyword arm silent
+(`ts_rank_cd` 0.0000 throughout) but the vector arm returns all ten rows
+at cosine distance 0.9139-1.0000, while a real query on the same corpus
+scores 0.1294 for the right answer, tailing to 0.9293 -- the noise band
+and the weak-real band overlap, exactly as `retrieve.py`'s own docstring
+reports for chunks. The difference is that `retrieve.py`'s numbers came
+from measuring a real embedder against a real corpus; every number
+available for products offline comes from `HashingEmbedder`, a hashed
+-bag-of-words test double with no principled relationship to a production
+embedding model's distances. Calibrating a default from that would be a
+guess wearing a measurement's clothes, so `settings.
+product_search_max_cosine_distance`/`product_search_min_keyword_rank`
+default to `None` (off) rather than to a number -- see their comments in
+`app/core/config.py`.
+
+Turning a floor on later needs the per-arm signal to survive past this
+module, which is why `ProductMatch` carries `vector_distance` and
+`keyword_rank` alongside the fused `score` -- `top_fused`'s own docstring
+is explicit that the fused score carries no relevance information (rank
+position only), so without the raw numbers a caller could never decide
+where to draw a line; the fields exist so that decision is deferred, not
+foreclosed by this contract.
 """
 
 import json
@@ -55,11 +84,13 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.rrf import fuse_rrf, top_fused
 from app.core.tenancy import TenantContext
 from app.db.models import ProductAvailability
 from app.embeddings.base import EmbeddingProvider
 from app.embeddings.registry import get_embedding_provider
+from app.rag.vector_sql import vector_literal
 
 # How many candidates each ranking arm contributes before fusion, relative
 # to the caller's requested `limit` -- the same "wider pool than the final
@@ -89,6 +120,16 @@ class ProductMatch:
     predicate and the deterministic tie-break order (see `_search_filtered`
     below), and pretending otherwise would invite a caller to treat filter
     order as relevance.
+
+    `vector_distance`/`keyword_rank` are the raw, un-fused per-arm signals
+    (cosine distance, `ts_rank_cd`) -- `None` when a product did not appear
+    in that arm's candidates at all (an unembedded row always has
+    `vector_distance is None`; a product the keyword arm never matched
+    always has `keyword_rank is None`), and both `None` together in a
+    query-less result. See this module's docstring for why these travel
+    on the contract rather than being fused away: a relevance floor is
+    deliberately not decided here, and a decision deferred to a value that
+    never reaches the caller is not actually deferred.
     """
 
     product_id: uuid.UUID
@@ -105,6 +146,8 @@ class ProductMatch:
     product_url: str | None
     score: float
     rank: int
+    vector_distance: float | None
+    keyword_rank: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,15 +179,6 @@ _SELECT_COLUMNS = (
     "p.availability AS availability, p.stock_quantity AS stock_quantity, "
     "p.image_url AS image_url, p.product_url AS product_url"
 )
-
-
-def _vector_literal(values: list[float]) -> str:
-    """Render an embedding as a pgvector text-input literal -- identical
-    approach to `retrieve.py`'s helper of the same name (no pgvector codec
-    is registered on this session's asyncpg connections, so the vector
-    travels as a string through `CAST(:param AS vector)` rather than a
-    driver-level type)."""
-    return "[" + ",".join(repr(value) for value in values) + "]"
 
 
 class _Filters:
@@ -185,8 +219,9 @@ class _Filters:
             # (0010_products.py) -- `{"seats": 7}` matches a row whose
             # attributes is a superset, e.g. `{"seats": 7, "fuel": "hybrid"}`.
             # Serialized to a JSON string and cast in SQL, the same pattern
-            # as `_vector_literal` above, rather than relying on a bind
-            # parameter's inferred type to become jsonb on its own.
+            # `app/rag/vector_sql.py`'s `vector_literal` uses for an
+            # embedding, rather than relying on a bind parameter's inferred
+            # type to become jsonb on its own.
             clauses.append("p.attributes @> CAST(:attributes AS jsonb)")
             params["attributes"] = json.dumps(attributes)
         self.sql = " AND ".join(clauses)
@@ -220,34 +255,33 @@ class _Filters:
 #
 #   `retrieve.py`'s OR arm additionally carries a *calibrated* floor
 #   (`settings.retrieval_min_keyword_rank`, 0.15) above `> 0`, to reject a
-#   single incidental shared word in a long document chunk. That
-#   calibration was measured against document-chunk-length prose; product
-#   `name`/`description` text is short enough (a few dozen words at most)
-#   that the same "one incidental word in a big bag of words" failure mode
-#   is far weaker, and there is no equivalent measurement for this corpus
-#   shape to justify a specific stricter number here. Introducing an
-#   uncalibrated threshold to look more careful would be worse than not
-#   having one: it would silently reject genuine short matches (a product
-#   name that shares exactly one distinctive word with the query) for a
-#   failure mode not established to exist at this scale. `> 0` on both
-#   forms is the one floor this module can justify without measurement,
-#   and it is sufficient to close the bare-negation hole either form is
-#   exposed to.
+#   single incidental shared word in a long document chunk. Products get
+#   the identical *mechanism*, `settings.product_search_min_keyword_rank`,
+#   but it defaults to `None` (off) rather than to a number -- see this
+#   module's own docstring and the setting's comment in `app/core/config.py`
+#   for why no default here is calibrated, only reachable.
 _AND_TSQUERY = "websearch_to_tsquery('english', :query_text)"
 _OR_TSQUERY = "replace(websearch_to_tsquery('english', :query_text)::text, '&', '|')::tsquery"
 
+# `rank_floor` is `"> 0"` (the fixed, unconditional bare-negation guard
+# described above) on the strict arm always, and either `"> 0"` or
+# `">= :min_rank"` on the OR fallback depending on whether
+# `settings.product_search_min_keyword_rank` is set -- built per call in
+# `_search_ranked`, not hardcoded here, since it is the one piece of this
+# template that is conditionally configurable rather than fixed.
 _KEYWORD_SQL_TEMPLATE = (
-    f"SELECT {_SELECT_COLUMNS} FROM products p WHERE {{filters}} "
-    "AND p.search_tsv @@ {tsquery} AND ts_rank_cd(p.search_tsv, {tsquery}) > 0 "
+    f"SELECT {_SELECT_COLUMNS}, ts_rank_cd(p.search_tsv, {{tsquery}}) AS keyword_rank "
+    "FROM products p WHERE {filters} "
+    "AND p.search_tsv @@ {tsquery} AND ts_rank_cd(p.search_tsv, {tsquery}) {rank_floor} "
     "ORDER BY ts_rank_cd(p.search_tsv, {tsquery}) DESC LIMIT :candidates"
 )
 
 
-def _keyword_sql(filters_sql: str, tsquery: str) -> str:
-    return _KEYWORD_SQL_TEMPLATE.format(filters=filters_sql, tsquery=tsquery)
+def _keyword_sql(filters_sql: str, tsquery: str, rank_floor: str) -> str:
+    return _KEYWORD_SQL_TEMPLATE.format(filters=filters_sql, tsquery=tsquery, rank_floor=rank_floor)
 
 
-def _vector_sql(filters_sql: str) -> str:
+def _vector_sql(filters_sql: str, *, distance_floor: bool) -> str:
     # `p.embedding IS NOT NULL` is the vector arm's half of the unembedded
     # -row decision (module docstring): a row with no embedding has nothing
     # for `<=>` to compare against and is excluded here, not scored as an
@@ -257,9 +291,22 @@ def _vector_sql(filters_sql: str) -> str:
     # (see `tests/integration/test_product_search.py::
     # test_smaller_cosine_distance_ranks_first`, built to fail if this ever
     # flips).
+    #
+    # `distance_floor` adds `AND ... <= :max_distance` only when
+    # `settings.product_search_max_cosine_distance` is set -- absent by
+    # default (this module's docstring explains why), present when a
+    # caller has actually calibrated one.
+    floor_clause = (
+        "AND p.embedding <=> CAST(:query_vector AS vector) <= :max_distance "
+        if distance_floor
+        else ""
+    )
     return (
-        f"SELECT {_SELECT_COLUMNS} FROM products p WHERE {filters_sql} "
+        f"SELECT {_SELECT_COLUMNS}, "
+        "p.embedding <=> CAST(:query_vector AS vector) AS vector_distance "
+        f"FROM products p WHERE {filters_sql} "
         "AND p.embedding IS NOT NULL "
+        f"{floor_clause}"
         "ORDER BY p.embedding <=> CAST(:query_vector AS vector) ASC "
         "LIMIT :candidates"
     )
@@ -286,7 +333,15 @@ def _row_to_info(row: Any) -> _CandidateInfo:
     )
 
 
-def _match(product_id: uuid.UUID, info: _CandidateInfo, score: float, rank: int) -> ProductMatch:
+def _match(
+    product_id: uuid.UUID,
+    info: _CandidateInfo,
+    score: float,
+    rank: int,
+    *,
+    vector_distance: float | None = None,
+    keyword_rank: float | None = None,
+) -> ProductMatch:
     return ProductMatch(
         product_id=product_id,
         external_id=info.external_id,
@@ -302,6 +357,8 @@ def _match(product_id: uuid.UUID, info: _CandidateInfo, score: float, rank: int)
         product_url=info.product_url,
         score=score,
         rank=rank,
+        vector_distance=vector_distance,
+        keyword_rank=keyword_rank,
     )
 
 
@@ -367,30 +424,45 @@ class ProductSearchService:
         candidates = max(limit * _CANDIDATE_MULTIPLIER, _MIN_CANDIDATES)
         [query_vector] = await self.embedder.embed([query])
 
+        # `None` by default (see the module docstring and
+        # `app/core/config.py`'s comment) -- resolved once per call, not
+        # cached on `self`, so a test (or a future admin setting) that
+        # changes these between calls is honoured immediately.
+        settings = get_settings()
+        max_distance = settings.product_search_max_cosine_distance
+        min_keyword_rank = settings.product_search_min_keyword_rank
+
+        vector_params = {
+            **filters.params,
+            "query_vector": vector_literal(query_vector),
+            "candidates": candidates,
+        }
+        if max_distance is not None:
+            vector_params["max_distance"] = max_distance
         vector_rows = (
             await self.session.execute(
-                text(_vector_sql(filters.sql)),
-                {
-                    **filters.params,
-                    "query_vector": _vector_literal(query_vector),
-                    "candidates": candidates,
-                },
+                text(_vector_sql(filters.sql, distance_floor=max_distance is not None)),
+                vector_params,
             )
         ).all()
 
         keyword_params = {**filters.params, "query_text": query, "candidates": candidates}
         keyword_rows = (
             await self.session.execute(
-                text(_keyword_sql(filters.sql, _AND_TSQUERY)), keyword_params
+                text(_keyword_sql(filters.sql, _AND_TSQUERY, "> 0")), keyword_params
             )
         ).all()
         if not keyword_rows:
             # Only on a miss, mirroring `retrieve.py`: an exact-ish query
             # keeps the strict form's precision, and the fallback statement
             # only runs when the strict form had nothing to give.
+            or_rank_floor = ">= :min_rank" if min_keyword_rank is not None else "> 0"
+            or_params = dict(keyword_params)
+            if min_keyword_rank is not None:
+                or_params["min_rank"] = min_keyword_rank
             keyword_rows = (
                 await self.session.execute(
-                    text(_keyword_sql(filters.sql, _OR_TSQUERY)), keyword_params
+                    text(_keyword_sql(filters.sql, _OR_TSQUERY, or_rank_floor)), or_params
                 )
             ).all()
 
@@ -400,10 +472,24 @@ class ProductSearchService:
                 if row.id not in info:
                     info[row.id] = _row_to_info(row)
 
+        # The raw per-arm signal, captured separately from `info` (which is
+        # "first arm to see this row wins") because a row found by *both*
+        # arms has a distance *and* a rank, and both must survive -- not
+        # just whichever arm happened to be iterated first.
+        vector_distance_by_id = {row.id: row.vector_distance for row in vector_rows}
+        keyword_rank_by_id = {row.id: row.keyword_rank for row in keyword_rows}
+
         scores = fuse_rrf([[row.id for row in vector_rows], [row.id for row in keyword_rows]])
         ordered = top_fused(scores, top_k=limit)
 
         return [
-            _match(product_id, info[product_id], score, rank)
+            _match(
+                product_id,
+                info[product_id],
+                score,
+                rank,
+                vector_distance=vector_distance_by_id.get(product_id),
+                keyword_rank=keyword_rank_by_id.get(product_id),
+            )
             for rank, (product_id, score) in enumerate(ordered, start=1)
         ]

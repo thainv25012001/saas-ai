@@ -217,6 +217,31 @@ class Settings(BaseSettings):
     # No test pins either case yet.
     retrieval_min_keyword_rank: float = 0.15
 
+    # The product-search counterparts of the two settings above -- and
+    # deliberately `None` (off), not a smaller/larger number in the same
+    # spirit. `retrieval_max_cosine_distance`/`retrieval_min_keyword_rank`
+    # are calibrated against measurements on a real ingested corpus with
+    # the shipped embedder (see their own comments). No equivalent
+    # measurement exists for products: every number available offline
+    # comes from `HashingEmbedder`, a hashed-bag-of-words test double whose
+    # distance distribution has no principled relationship to a real
+    # embedding model's. A threshold picked from that measurement would
+    # read as calibrated while being arbitrary -- worse than no threshold,
+    # because a number that looks measured is the one nobody re-examines.
+    # `None` is what "not calibrated yet" looks like when it is told the
+    # truth; a caller who has measured against their own production
+    # embedder and corpus can set one.
+    #
+    # Known cost of leaving this off: a wholly unrelated query returns the
+    # least-unrelated products in the catalogue rather than nothing (see
+    # `docs/PHASE-5.md` §8) -- `app/rag/products.py`'s `ProductMatch`
+    # carries the raw per-arm `vector_distance`/`keyword_rank` precisely so
+    # a caller who does set one of these has something to calibrate it
+    # against, and so a future reconciliation is a settings change, not a
+    # rewrite of what the query returns.
+    product_search_max_cosine_distance: float | None = None
+    product_search_min_keyword_rank: float | None = None
+
     @field_validator("database_url", "migration_database_url", mode="after")
     @classmethod
     def normalize_postgres_dsn(cls, value: str) -> str:

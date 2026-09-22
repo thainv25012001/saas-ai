@@ -81,6 +81,7 @@ from app.core.rrf import fuse_rrf, top_fused
 from app.core.tenancy import TenantContext
 from app.embeddings.base import EmbeddingProvider
 from app.embeddings.registry import get_embedding_provider
+from app.rag.vector_sql import vector_literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,18 +299,6 @@ _KEYWORD_ANY_TERM_SQL = text(
 )
 
 
-def _vector_literal(values: list[float]) -> str:
-    """Render an embedding as a pgvector text-input literal, e.g. "[0.1,-0.2]".
-
-    Passed through `CAST(:param AS vector)` rather than a driver-level
-    pgvector codec (none is registered on this session's asyncpg
-    connections) or `::vector` cast syntax (which does not parse through
-    SQLAlchemy's `:param` binding at all) -- the same pattern the ingestion
-    tests already use for seeding vector columns via raw SQL.
-    """
-    return "[" + ",".join(repr(value) for value in values) + "]"
-
-
 class RetrievalService:
     def __init__(
         self,
@@ -361,7 +350,7 @@ class RetrievalService:
             await self.session.execute(
                 _VECTOR_SQL,
                 {
-                    "query_vector": _vector_literal(query_vector),
+                    "query_vector": vector_literal(query_vector),
                     "candidates": candidates,
                     "organization_id": organization_id,
                     "max_distance": max_distance,
