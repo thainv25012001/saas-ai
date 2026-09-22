@@ -100,7 +100,9 @@ async def test_a_new_agent_shows_retrieve_knowledge_enabled_and_create_lead_off(
     """Task 7b's own default: `retrieve_knowledge` is linked and enabled at
     creation, `create_lead` is seeded globally but linked to no agent -- this
     is the exact gap Task 8 closes with a toggle rather than a database
-    write."""
+    write. Task 5 (Phase 5) adds `search_products`/`get_product` to the
+    same default-on set as `retrieve_knowledge`, for the identical reason:
+    both are reads with no risk `create_lead`'s write carries."""
     token = await _register(api_client, "new-agent-tools@example.com")
     org_id = await _organization_id(api_client, token)
     agent_id = await _agent(org_id)
@@ -112,8 +114,15 @@ async def test_a_new_agent_shows_retrieve_knowledge_enabled_and_create_lead_off(
     body = response.json()
     assert "errors" not in body, body
     by_name = {row["name"]: row for row in body["data"]["agentTools"]}
-    assert set(by_name) == {"retrieve_knowledge", "create_lead"}
+    assert set(by_name) == {
+        "retrieve_knowledge",
+        "create_lead",
+        "search_products",
+        "get_product",
+    }
     assert by_name["retrieve_knowledge"]["isEnabled"] is True
+    assert by_name["search_products"]["isEnabled"] is True
+    assert by_name["get_product"]["isEnabled"] is True
     assert by_name["create_lead"]["isEnabled"] is False
 
 

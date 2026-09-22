@@ -1,13 +1,20 @@
 """Task 7b: make the tools reachable.
 
+Extended by Task 5 (Phase 5): `search_products`/`get_product` (migration
+`0013_seed_product_tools`) are seeded, backfilled and resolved by the
+identical mechanism Task 7b built for `retrieve_knowledge`/`create_lead`
+(migration `0009_seed_builtin_tools`) -- see that migration's own docstring
+for Ruling 2 (task-5-brief.md), the argument that a new builtin is not done
+until it is seeded, linked, AND constructible, all three, together.
+
 Phase 4's own review found it shipped inert: a freshly migrated database had
 zero `tools` rows and zero `agent_tools` rows, nothing but a test helper
 (`tests/conftest.py::enable_builtin_tool`) could create either, and an agent
 created the normal way reached the provider with `tools=None`. This module
 covers the brief's numbered tests directly:
 
-1. `test_seed_migration_creates_both_global_builtins` -- a freshly migrated
-   database has both builtins, globally scoped.
+1. `test_seed_migrations_create_all_four_global_builtins` -- a freshly
+   migrated database has all four builtins, globally scoped.
 2. The critical "no longer inert" assertion lives in
    `tests/integration/test_agent_service.py::
    test_an_agent_created_through_create_agent_reaches_the_provider_with_tools_set`
@@ -49,51 +56,61 @@ from app.db.builtin_tools import (
 )
 from app.llm.fake_provider import FakeProvider
 from app.tools.leads import CreateLeadTool
+from app.tools.products import GetProductTool, SearchProductsTool
 from app.tools.retrieve import RetrieveKnowledgeTool
 from tests.conftest import enable_builtin_tool
 from tests.factories import agent_input
 
 pytestmark = pytest.mark.anyio
 
+# All four builtins ever seeded, global, by name -- `retrieve_knowledge`/
+# `create_lead` from migration 0009 (Task 7b), `search_products`/
+# `get_product` from migration 0013 (Task 5, this module's newer half).
+_ALL_BUILTIN_NAMES = {"retrieve_knowledge", "create_lead", "search_products", "get_product"}
+
 
 # ---------------------------------------------------------------------------
-# Test 1: freshly migrated, both builtins present and global.
+# Test 1: freshly migrated, all four builtins present and global.
 # ---------------------------------------------------------------------------
 
 
-async def test_seed_migration_creates_both_global_builtins(owner_connection):
+async def test_seed_migrations_create_all_four_global_builtins(owner_connection):
     rows = (
         await owner_connection.execute(
             text(
                 "SELECT name, type, is_enabled FROM tools WHERE organization_id IS NULL "
-                "AND name IN ('retrieve_knowledge', 'create_lead')"
-            )
+                "AND name = ANY(:names)"
+            ),
+            {"names": list(_ALL_BUILTIN_NAMES)},
         )
     ).all()
     by_name = {row.name: row for row in rows}
-    assert set(by_name) == {"retrieve_knowledge", "create_lead"}
+    assert set(by_name) == _ALL_BUILTIN_NAMES
     for row in by_name.values():
         assert row.type == "builtin"
         assert row.is_enabled is True
 
 
 async def test_seeded_descriptions_match_the_tools_own_declared_descriptions(owner_connection):
-    """Migration 0009 copies each description as literal text rather than
-    importing the tool classes (see that migration's module docstring for
-    why) -- this is the CI-enforced check that the copy has not drifted
-    from what the tool itself declares. A drift here means the model is
-    told one thing by its tool spec and the code does another."""
+    """Migrations 0009/0013 copy each description as literal text rather
+    than importing the tool classes (see either migration's module
+    docstring for why) -- this is the CI-enforced check that the copy has
+    not drifted from what the tool itself declares. A drift here means the
+    model is told one thing by its tool spec and the code does another."""
     rows = (
         await owner_connection.execute(
             text(
                 "SELECT name, description FROM tools WHERE organization_id IS NULL "
-                "AND name IN ('retrieve_knowledge', 'create_lead')"
-            )
+                "AND name = ANY(:names)"
+            ),
+            {"names": list(_ALL_BUILTIN_NAMES)},
         )
     ).all()
     seeded = {row.name: row.description for row in rows}
     assert seeded["retrieve_knowledge"] == RetrieveKnowledgeTool.description
     assert seeded["create_lead"] == CreateLeadTool.description
+    assert seeded["search_products"] == SearchProductsTool.description
+    assert seeded["get_product"] == GetProductTool.description
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +139,7 @@ async def test_create_lead_is_reachable_once_explicitly_linked(tenant_a, owner_c
     assert provider.last_request is not None
     assert provider.last_request.tools is not None
     names = {t.name for t in provider.last_request.tools}
-    assert names == {"retrieve_knowledge", "create_lead"}
+    assert names == {"retrieve_knowledge", "create_lead", "search_products", "get_product"}
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +210,9 @@ async def test_backfill_sql_is_safe_to_run_twice(tenant_a, owner_connection):
             text("SELECT count(*) FROM agent_tools WHERE agent_id = :id"), {"id": agent_id}
         )
     ).scalar_one()
-    assert count == 1
+    # One row per name in `DEFAULT_ENABLED_TOOL_NAMES` (three, since Task 5),
+    # not duplicated by the second run.
+    assert count == len(DEFAULT_ENABLED_TOOL_NAMES)
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +296,7 @@ async def test_a_pre_existing_agent_is_backfilled_onto_the_default_builtin(
 
     async with tenant_session(tenant_a) as session:
         names = await ChatService(session, tenant_a)._resolve_enabled_tool_names(agent_id)
-    assert names == ["retrieve_knowledge"]
+    assert names == ["get_product", "retrieve_knowledge", "search_products"]
 
 
 # ---------------------------------------------------------------------------
@@ -311,5 +330,5 @@ async def test_an_orgs_agent_cannot_resolve_another_orgs_tool_link(
         names_a = await ChatService(session, tenant_a)._resolve_enabled_tool_names(agent_a_id)
     async with tenant_session(tenant_b) as session:
         names_b = await ChatService(session, tenant_b)._resolve_enabled_tool_names(agent_b_id)
-    assert names_a == ["retrieve_knowledge"]
-    assert set(names_b) == {"retrieve_knowledge", "create_lead"}
+    assert names_a == ["get_product", "retrieve_knowledge", "search_products"]
+    assert set(names_b) == {"retrieve_knowledge", "create_lead", "search_products", "get_product"}

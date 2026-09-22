@@ -178,7 +178,10 @@ async def test_create_agent_links_the_default_builtin_tool_in_the_same_flush(ten
             )
         ).all()
     names = {name for name, _org in rows}
-    assert names == {"retrieve_knowledge"}
+    # Task 5, Ruling 1: `search_products`/`get_product` joined the default
+    # set alongside `retrieve_knowledge` -- both are reads, so neither
+    # carries the risk that keeps `create_lead` off by default.
+    assert names == {"retrieve_knowledge", "search_products", "get_product"}
     # Linked to the GLOBAL builtin (seeded by migration 0009), not a
     # per-org copy: every new agent shares the one platform-wide row.
     assert all(org is None for _name, org in rows)
@@ -209,7 +212,12 @@ async def test_an_agent_created_through_create_agent_reaches_the_provider_with_t
     assert any(getattr(e, "text", None) for e in events)
     assert provider.last_request is not None
     assert provider.last_request.tools is not None
-    assert [t.name for t in provider.last_request.tools] == ["retrieve_knowledge"]
+    # Alphabetical -- `_resolve_enabled_tool_names` orders by `Tool.name`.
+    assert [t.name for t in provider.last_request.tools] == [
+        "get_product",
+        "retrieve_knowledge",
+        "search_products",
+    ]
 
 
 async def test_an_agent_with_its_tool_links_explicitly_cleared_is_offered_nothing(tenant_a):

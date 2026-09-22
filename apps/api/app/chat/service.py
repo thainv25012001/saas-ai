@@ -53,6 +53,7 @@ from app.rag.retrieve import CitationPayload
 from app.rag.retrieve import excerpt as excerpt_text
 from app.tools.base import AgentTool, ToolContext, ToolResult
 from app.tools.leads import CreateLeadTool
+from app.tools.products import GetProductTool, SearchProductsTool
 from app.tools.registry import ToolRegistry
 from app.tools.retrieve import RetrieveKnowledgeTool
 
@@ -98,7 +99,21 @@ _LOCK_WAIT_BUDGET_SECONDS = 30.0
 # `app/db/builtin_tools.py` seeds. A `tools` row naming something not listed
 # here resolves to no Python class and is skipped (logged by
 # `AgentRunner._resolve_specs`), exactly as a stale row always was.
-_BUILTIN_TOOL_CLASSES: tuple[type[AgentTool], ...] = (RetrieveKnowledgeTool, CreateLeadTool)
+#
+# `SearchProductsTool`/`GetProductTool` (Task 5) are listed here for the
+# same reason Phase 4's review made this tuple the thing it is: a `tools`
+# row and a `DEFAULT_ENABLED_TOOL_NAMES` entry are both necessary but not
+# sufficient -- without an entry here, `_build_registry` below can never
+# construct the class, so a granted agent still could not call it. This is
+# the one of Ruling 2's three required places that a migration cannot
+# express at all; see `alembic/versions/0013_seed_product_tools.py` for the
+# other two.
+_BUILTIN_TOOL_CLASSES: tuple[type[AgentTool], ...] = (
+    RetrieveKnowledgeTool,
+    CreateLeadTool,
+    SearchProductsTool,
+    GetProductTool,
+)
 
 # How much longer than a tool's OWN budget the event-loop net in
 # `_LockedSessionTool._run_bounded` is allowed to run. Deliberately small,
@@ -375,8 +390,9 @@ def _serialize_tool_result(result: ToolResult) -> dict[str, Any]:
         "data": result.data,
         "citations": [
             {
-                "chunk_id": str(c.chunk_id),
-                "document_id": str(c.document_id),
+                "chunk_id": str(c.chunk_id) if c.chunk_id is not None else None,
+                "document_id": str(c.document_id) if c.document_id is not None else None,
+                "product_id": str(c.product_id) if c.product_id is not None else None,
                 "document_title": c.document_title,
                 "rank": c.rank,
                 "score": c.score,
@@ -1303,6 +1319,11 @@ class ChatService:
         `RetrieveKnowledgeTool`/`build_citation`), which is itself two-layer
         tenant-scoped (see `app/rag/retrieve.py`), so a value reaching here
         has already been proven to belong to this organization.
+        `product_id` (Task 5) is the identical argument, one level down: it
+        comes straight out of `ProductSearchService`/`ProductService` (via
+        `app/tools/products.py`), both two-layer tenant-scoped in exactly
+        the same way, so a citation naming a product has already been
+        proven to belong to this organization before it ever reaches here.
 
         `document_title` and `excerpt` are written alongside those ids
         rather than left to a join, because the ids are `ON DELETE SET
@@ -1341,6 +1362,7 @@ class ChatService:
                     message_id=message_id,
                     chunk_id=chunk.chunk_id,
                     document_id=chunk.document_id,
+                    product_id=chunk.product_id,
                     document_title=chunk.document_title,
                     excerpt=chunk.excerpt,
                     rank=rank,

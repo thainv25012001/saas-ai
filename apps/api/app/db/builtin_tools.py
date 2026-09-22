@@ -39,7 +39,20 @@ from collections.abc import Iterable, Sequence
 # whole-branch review's Critical 1 fix that default is genuinely enforced:
 # the per-turn tool registry is built from these links, so a tool the agent
 # is not linked to cannot run even if the model names it.
-DEFAULT_ENABLED_TOOL_NAMES: Sequence[str] = ("retrieve_knowledge",)
+#
+# Task 5, Ruling 1 (task-5-brief.md): `search_products` and `get_product`
+# join the default set here, unlike `create_lead`. Both are reads -- neither
+# writes a row anywhere, so the one risk that justifies `create_lead`
+# staying off (ordinary playground testing polluting a real customer-facing
+# table) simply does not apply to them. Defaulting them off anyway would
+# just be Phase 4's "reviewed, tested, unreachable" mistake paid for again,
+# in the one phase whose entire point is that the agent can finally state a
+# price it is allowed to state (docs/PHASE-5.md §2).
+DEFAULT_ENABLED_TOOL_NAMES: Sequence[str] = (
+    "retrieve_knowledge",
+    "search_products",
+    "get_product",
+)
 
 
 def seed_tools_sql() -> str:

@@ -160,8 +160,9 @@ def _event_payload(event: ChatEvent) -> dict[str, object]:
             "type": "citations",
             "citations": [
                 {
-                    "chunk_id": str(c.chunk_id),
-                    "document_id": str(c.document_id),
+                    "chunk_id": str(c.chunk_id) if c.chunk_id is not None else None,
+                    "document_id": str(c.document_id) if c.document_id is not None else None,
+                    "product_id": str(c.product_id) if c.product_id is not None else None,
                     "document_title": c.document_title,
                     "rank": c.rank,
                     "score": c.score,

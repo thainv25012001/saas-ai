@@ -111,10 +111,28 @@ class CitationPayload:
     rather than through two shapes that drift, and `app/chat/service.py`
     imports `app/tools` (Phase 4's tool layer), so the reverse import would
     cycle.
+
+    Widened in Phase 5 (Task 5) to also carry a **product** grounding
+    source, rather than inventing a second, parallel payload type:
+    `docs/ARCHITECTURE.md` §5.4 rule 3 asks for "message_citations records
+    what was actually retrieved" for a product exactly as it already does
+    for a chunk, and `ChatService._record_citations` is the one place that
+    fact is persisted -- a second citation shape would mean that method (and
+    the SSE/`message_tool_calls` serializers downstream of it) branching on
+    which kind of citation it has, for no benefit a `product_id | None`
+    field does not already give more simply. `chunk_id`/`document_id` widen
+    to `| None` for the same reason: a product citation has neither, and a
+    citation naming a product must not fabricate one. Exactly one of
+    `(chunk_id, product_id)` is ever set in practice -- `app/tools/retrieve.
+    py::build_citation` always supplies the former, `app/tools/products.py`
+    always supplies the latter -- but nothing here enforces that as a type
+    -- level invariant; both are `| None` because both true absences (a
+    deleted chunk/document, a citation that was never about one) are
+    already meaningful and must stay representable independently.
     """
 
-    chunk_id: uuid.UUID
-    document_id: uuid.UUID
+    chunk_id: uuid.UUID | None
+    document_id: uuid.UUID | None
     document_title: str
     rank: int
     score: float
@@ -124,6 +142,10 @@ class CitationPayload:
     # `app/rag/chunk.py` only ever gets a page list from `extract()` for a
     # PDF. Absent is the honest state, not a value to fake as `1`.
     page: int | None
+    # Defaulted, so `build_citation` below (every existing caller) needs no
+    # change: a chunk citation simply never sets it. `app/tools/products.py`
+    # is the only place that ever passes a real value.
+    product_id: uuid.UUID | None = None
 
 
 # Public (no leading underscore): `app/chat/service.py` imports this pair
