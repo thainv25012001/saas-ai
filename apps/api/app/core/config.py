@@ -200,21 +200,28 @@ class Settings(BaseSettings):
     # `retrieval_max_cosine_distance`: real questions score 0.2-0.5 against
     # the section that answers them, single-word coincidences score 0.1.
     #
-    # This one is load-bearing for *correctness*, not just quality, and
-    # setting it to 0 is not merely "less filtering". `websearch_to_tsquery`
-    # turns a leading hyphen into negation, so a query combining a negated
-    # term with a term the corpus lacks -- "-cat dog" -> `!'cat' & 'dog'` --
-    # matches nothing in the strict form, falls back to the OR form
-    # `!'cat' | 'dog'`, and *that* matches every chunk not containing "cat":
-    # the entire corpus. `ts_rank_cd` scores a negated match 0.0, so this
-    # floor is the only thing standing between such a query and citing
-    # everything. Measured, not inferred.
+    # `websearch_to_tsquery` turns a leading hyphen into negation, so a
+    # query combining a negated term with a term the corpus lacks --
+    # "-cat dog" -> `!'cat' & 'dog'` -- matches nothing in the strict
+    # form, falls back to this OR form, `!'cat' | 'dog'`, which matches
+    # every chunk not containing "cat": the entire corpus, at `ts_rank_cd`
+    # exactly 0.0 (a negated match is never scored positive). The strict
+    # arm carries its own fixed, unconditional `> 0` for the identical
+    # *bare*-negation shape ("-cat" alone) -- see
+    # `app/rag/retrieve.py`'s `_KEYWORD_ALL_TERMS_SQL` comment and
+    # `tests/integration/test_retrieve.py::
+    # test_bare_leading_hyphen_query_does_not_match_the_whole_corpus`.
     #
-    # Known limit, not covered by this floor: a *bare* negation ("-cat",
-    # "-warranty") matches the whole corpus through the **strict** form,
-    # which has no rank floor at all, so it still returns up to `top_k`
-    # arbitrary chunks. The fix belongs on the strict arm, not here.
-    # No test pins either case yet.
+    # This setting's own `> 0` is written into `_KEYWORD_ANY_TERM_SQL`
+    # unconditionally, with this value only ever able to *add* a second,
+    # stricter `AND` clause on top of it -- never replace it. That is
+    # deliberate, not incidental: `ts_rank_cd` is never negative, so
+    # `0.0` -- a legal `float` value, reachable simply by setting this
+    # environment variable to `0` -- would otherwise make `>= min_rank`
+    # true for every already-matched row, including a bare negation's
+    # exact-0.0 score, and silently reopen the same hole on this arm. A
+    # comment warning against `0` would have been a weaker guarantee than
+    # a structure that value cannot break.
     retrieval_min_keyword_rank: float = 0.15
 
     # The product-search counterparts of the two settings above -- and

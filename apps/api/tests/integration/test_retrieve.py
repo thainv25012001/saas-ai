@@ -808,6 +808,49 @@ async def test_bare_leading_hyphen_query_does_not_match_the_whole_corpus(tenant_
     assert results == []
 
 
+@pytest.mark.parametrize("min_keyword_rank", [0.0, -1.0])
+async def test_bare_negation_excluded_regardless_of_min_keyword_rank_value(
+    tenant_a, min_keyword_rank
+):
+    """Fix-round regression, ported from Phase 5 Task 4's identical fix on
+    `app/rag/products.py`: a prior version of `_KEYWORD_ANY_TERM_SQL` used
+    `>= :min_rank` in place of the bare-negation `> 0` guard, not in
+    addition to it. `ts_rank_cd` is never negative, so
+    `retrieval_min_keyword_rank = 0.0` -- a legal `float`, reachable simply
+    by setting that environment variable to `0` -- made `>= min_rank` true
+    for every already-`@@`-matched row, including a bare negation's
+    exact-0.0 score, silently reopening the hole the test above pins. A
+    negative value has the identical effect for the same reason.
+
+    Same isolation as the test above (`max_distance=-1.0`) so a
+    coincidental vector-arm hit cannot hide a still-broken keyword floor.
+    """
+    async with tenant_session(tenant_a) as session:
+        document = await _document(session, tenant_a)
+        await _seed(
+            session,
+            tenant_a,
+            document.id,
+            [
+                (
+                    "The quarterly sales report is due at the end of the month.",
+                    await _embed("unrelated filler one"),
+                ),
+                (
+                    "Employees may request remote work with manager approval.",
+                    await _embed("unrelated filler two"),
+                ),
+            ],
+        )
+
+    async with tenant_session(tenant_a) as session:
+        results = await RetrievalService(session, tenant_a).retrieve(
+            "-cat", max_distance=-1.0, min_keyword_rank=min_keyword_rank
+        )
+
+    assert results == []
+
+
 async def test_single_term_keyword_query_still_matches_its_chunk(tenant_a):
     """The regression a review round caught: fixing the bare-negation hole
     by reusing `settings.retrieval_min_keyword_rank` (0.15) on the strict

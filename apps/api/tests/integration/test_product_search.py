@@ -650,7 +650,7 @@ async def test_bare_leading_hyphen_query_does_not_match_the_whole_catalogue(tena
     checks it, so all three products would come back as though `-cat` named
     a positive term -- ported from `app/rag/retrieve.py`'s identical guard,
     written fresh against `products` per this module's own reasoning (see
-    `_KEYWORD_SQL_TEMPLATE`'s comment).
+    `_keyword_sql`'s docstring).
 
     Found by mutation-verification, not written up front: deleting the
     `> 0` floor from `_KEYWORD_SQL_TEMPLATE` passed the rest of this suite
@@ -669,6 +669,47 @@ async def test_bare_leading_hyphen_query_does_not_match_the_whole_catalogue(tena
         await _create(
             session, tenant_a, external_id="c", name="Parking Garage Hours", embedding=None
         )
+
+    async with tenant_session(tenant_a) as session:
+        results = await ProductSearchService(session, tenant_a).search(query="-cat")
+
+    assert results == []
+
+
+@pytest.mark.parametrize("min_keyword_rank", [0.0, -1.0, None])
+async def test_bare_negation_excluded_regardless_of_min_keyword_rank_value(
+    tenant_a, monkeypatch, min_keyword_rank
+):
+    """Fix-round regression: a prior version built the OR arm's floor as
+    *either* the unconditional `"> 0"` guard *or* the configurable
+    `">= :min_rank"`, never both. `product_search_min_keyword_rank = 0.0`
+    is a legal, entirely plausible "no floor" value for someone reading
+    `float | None` -- and `ts_rank_cd(...) >= 0.0` is true for every row
+    `@@` already matched, including a bare negation's exact-0.0 score, so
+    that one legal value silently reopened the hole the test above pins.
+    A negative value has the identical effect for the same reason.
+
+    `_keyword_sql` now writes `> 0` unconditionally into the SQL and
+    treats `min_rank` as a second, additive `AND` clause on top of it, so
+    every value below -- including `None`, the default, checked here for
+    completeness -- must behave identically: still zero results.
+    """
+    import app.rag.products as products_module
+    from app.core.config import get_settings
+
+    async with tenant_session(tenant_a) as session:
+        await _create(
+            session, tenant_a, external_id="a", name="Quarterly Sales Report", embedding=None
+        )
+        await _create(session, tenant_a, external_id="b", name="Remote Work Policy", embedding=None)
+        await _create(
+            session, tenant_a, external_id="c", name="Parking Garage Hours", embedding=None
+        )
+
+    configured = get_settings().model_copy(
+        update={"product_search_min_keyword_rank": min_keyword_rank}
+    )
+    monkeypatch.setattr(products_module, "get_settings", lambda: configured)
 
     async with tenant_session(tenant_a) as session:
         results = await ProductSearchService(session, tenant_a).search(query="-cat")

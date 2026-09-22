@@ -263,22 +263,39 @@ class _Filters:
 _AND_TSQUERY = "websearch_to_tsquery('english', :query_text)"
 _OR_TSQUERY = "replace(websearch_to_tsquery('english', :query_text)::text, '&', '|')::tsquery"
 
-# `rank_floor` is `"> 0"` (the fixed, unconditional bare-negation guard
-# described above) on the strict arm always, and either `"> 0"` or
-# `">= :min_rank"` on the OR fallback depending on whether
-# `settings.product_search_min_keyword_rank` is set -- built per call in
-# `_search_ranked`, not hardcoded here, since it is the one piece of this
-# template that is conditionally configurable rather than fixed.
-_KEYWORD_SQL_TEMPLATE = (
-    f"SELECT {_SELECT_COLUMNS}, ts_rank_cd(p.search_tsv, {{tsquery}}) AS keyword_rank "
-    "FROM products p WHERE {filters} "
-    "AND p.search_tsv @@ {tsquery} AND ts_rank_cd(p.search_tsv, {tsquery}) {rank_floor} "
-    "ORDER BY ts_rank_cd(p.search_tsv, {tsquery}) DESC LIMIT :candidates"
-)
 
+def _keyword_sql(filters_sql: str, tsquery: str, *, min_rank: float | None) -> str:
+    """The keyword arm's SQL for one tsquery form (`_AND_TSQUERY` or
+    `_OR_TSQUERY`).
 
-def _keyword_sql(filters_sql: str, tsquery: str, rank_floor: str) -> str:
-    return _KEYWORD_SQL_TEMPLATE.format(filters=filters_sql, tsquery=tsquery, rank_floor=rank_floor)
+    `ts_rank_cd(...) > 0` is written unconditionally into the SQL text
+    itself, never as a value this function's caller could omit or
+    override -- it is the bare-negation guard described above, and a
+    review round found that a prior version instead built the floor as
+    either `"> 0"` *or* `">= :min_rank"` depending on whether a caller had
+    configured `min_rank`. `0.0` is a legal, entirely plausible value for
+    someone reading `float | None` and wanting "no floor", and
+    `ts_rank_cd(...) >= 0.0` is true for every row `@@` already matched,
+    including a bare negation's exact-0.0 score -- so that one legal
+    setting value silently reopened the exact hole `> 0` exists to close.
+
+    The fix is structural, not a validator rejecting `0.0`: `min_rank`,
+    when supplied, can only ever *add* a second, stricter AND clause on
+    top of the unconditional `> 0` -- never replace it -- so no value of
+    `min_rank` (`0.0`, negative, or omitted) can ever admit a row `> 0`
+    would have rejected. A validator would have defended one bad value;
+    this makes the whole class of bad values structurally unreachable.
+    """
+    extra_floor = (
+        f"AND ts_rank_cd(p.search_tsv, {tsquery}) >= :min_rank " if min_rank is not None else ""
+    )
+    return (
+        f"SELECT {_SELECT_COLUMNS}, ts_rank_cd(p.search_tsv, {tsquery}) AS keyword_rank "
+        f"FROM products p WHERE {filters_sql} "
+        f"AND p.search_tsv @@ {tsquery} AND ts_rank_cd(p.search_tsv, {tsquery}) > 0 "
+        f"{extra_floor}"
+        f"ORDER BY ts_rank_cd(p.search_tsv, {tsquery}) DESC LIMIT :candidates"
+    )
 
 
 def _vector_sql(filters_sql: str, *, distance_floor: bool) -> str:
@@ -447,22 +464,29 @@ class ProductSearchService:
         ).all()
 
         keyword_params = {**filters.params, "query_text": query, "candidates": candidates}
+        # The strict (AND) arm never takes `min_keyword_rank` -- reaching
+        # this arm at all already means every content word matched, which
+        # `retrieve.py`'s own reasoning (ported in this module's comment
+        # above `_keyword_sql`) establishes as a relevance predicate that
+        # a calibrated-for-the-OR-arm number would only ever wrongly
+        # tighten. `min_rank=None` here still gets the unconditional `> 0`
+        # guard from inside `_keyword_sql` -- that part is never optional.
         keyword_rows = (
             await self.session.execute(
-                text(_keyword_sql(filters.sql, _AND_TSQUERY, "> 0")), keyword_params
+                text(_keyword_sql(filters.sql, _AND_TSQUERY, min_rank=None)), keyword_params
             )
         ).all()
         if not keyword_rows:
             # Only on a miss, mirroring `retrieve.py`: an exact-ish query
             # keeps the strict form's precision, and the fallback statement
             # only runs when the strict form had nothing to give.
-            or_rank_floor = ">= :min_rank" if min_keyword_rank is not None else "> 0"
             or_params = dict(keyword_params)
             if min_keyword_rank is not None:
                 or_params["min_rank"] = min_keyword_rank
             keyword_rows = (
                 await self.session.execute(
-                    text(_keyword_sql(filters.sql, _OR_TSQUERY, or_rank_floor)), or_params
+                    text(_keyword_sql(filters.sql, _OR_TSQUERY, min_rank=min_keyword_rank)),
+                    or_params,
                 )
             ).all()
 

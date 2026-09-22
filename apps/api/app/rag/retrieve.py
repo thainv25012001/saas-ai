@@ -290,11 +290,29 @@ _KEYWORD_ALL_TERMS_SQL = text(
     )
 )
 # The OR form keeps `settings.retrieval_min_keyword_rank` -- this is the
-# floor that setting was actually calibrated against (see its docstring).
+# floor that setting was actually calibrated against (see its docstring) --
+# but, per a later review round (Phase 5 Task 4's fix round 2, ported back
+# here in the same commit), *additively* to an unconditional `> 0`, never
+# in its place. A prior version used `>= :min_rank` alone: since
+# `ts_rank_cd` is never negative, `retrieval_min_keyword_rank = 0.0` (or a
+# negative value -- either reachable by setting the environment variable,
+# not merely a value this code could assume nobody would choose) made
+# `>= :min_rank` true for every row `@@` already matched, including a bare
+# negation's exact-0.0 score -- silently reopening the exact hole `> 0`
+# exists to close on the strict arm, on this arm instead. Writing `> 0`
+# into the SQL unconditionally, with `>= :min_rank` only ever able to add
+# a second, stricter clause on top of it, makes that structurally
+# unreachable rather than merely undocumented (the settings comment used
+# to carry a "do not set this to 0" warning instead -- a real but weaker
+# guarantee, since it defends against one bad value by asking nicely
+# rather than making the whole class of bad values inert).
 _KEYWORD_ANY_TERM_SQL = text(
     _KEYWORD_SQL_TEMPLATE.format(
         tsquery=_OR_TSQUERY,
-        rank_floor=f"AND ts_rank_cd(dc.content_tsv, {_OR_TSQUERY}) >= :min_rank ",
+        rank_floor=(
+            f"AND ts_rank_cd(dc.content_tsv, {_OR_TSQUERY}) > 0 "
+            f"AND ts_rank_cd(dc.content_tsv, {_OR_TSQUERY}) >= :min_rank "
+        ),
     )
 )
 
