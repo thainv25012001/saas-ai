@@ -7,19 +7,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import NotFoundError
 from app.core.ids import uuid7
+from app.core.logging import get_logger
 from app.core.tenancy import TenantContext
 from app.db.models import Product
+from app.products.embedding_text import hash_embeddable_text
 from app.products.schemas import ProductInput
+
+logger = get_logger(__name__)
 
 # Ceiling on `list_products`'s `limit`, same reasoning as
 # DocumentService._MAX_LIST_LIMIT: an unbounded limit from an authenticated
 # but otherwise untrusted caller is a full-table scan-and-serialize away.
 _MAX_LIST_LIMIT = 100
 
-# Columns `upsert_many` overwrites unconditionally on conflict -- every
-# column except `embedding`, which gets its own COALESCE (see
-# `upsert_many`'s docstring), and `search_tsv`, which is a generated column
-# Postgres recomputes itself and cannot appear in a SET list at all.
+# Columns `upsert_many` overwrites unconditionally on conflict, taking
+# whatever value it already computed in Python for that row -- everything
+# except `embedding` itself, which gets its own SQL-level COALESCE (see
+# `upsert_many`'s docstring), and `search_tsv`, a generated column Postgres
+# recomputes itself and cannot appear in a SET list at all.
+#
+# `embedding_source_hash`/`embedding_stale` belong here, not with
+# `embedding`: unlike the vector, their "preserve if omitted" case is
+# already resolved to a concrete value before this statement is built (see
+# the per-row loop in `upsert_many`), so they need no SQL-level COALESCE of
+# their own.
 _UPSERT_COLUMNS = (
     "name",
     "slug",
@@ -34,6 +45,8 @@ _UPSERT_COLUMNS = (
     "product_url",
     "is_active",
     "metadata",
+    "embedding_source_hash",
+    "embedding_stale",
 )
 
 
@@ -43,6 +56,14 @@ class ProductService:
         self.tenant = tenant
 
     async def create(self, data: ProductInput) -> Product:
+        # A hash iff there is an embedding to describe -- a brand-new row
+        # with no embedding yet has nothing that can go stale. See
+        # `upsert_many`'s docstring and `Product.embedding_source_hash`.
+        source_hash = (
+            hash_embeddable_text(data.name, data.description, data.attributes)
+            if data.embedding is not None
+            else None
+        )
         product = Product(
             id=uuid7(),
             organization_id=self.tenant.organization_id,
@@ -61,6 +82,7 @@ class ProductService:
             is_active=data.is_active,
             metadata_=data.metadata,
             embedding=data.embedding,
+            embedding_source_hash=source_hash,
         )
         self.session.add(product)
         await self.session.flush()
@@ -131,32 +153,124 @@ class ProductService:
         `search_tsv` needs no entry here: it is a generated column and
         Postgres recomputes it from the row's own `name`/`description`/
         `category` on every INSERT and UPDATE, including this one.
+
+        **The gap `COALESCE` opens, and how this closes it.** Preserving a
+        stale `embedding` on purpose is only safe if staleness stays
+        detectable. Without `embedding_source_hash`, an embedding-less
+        upsert whose `name`/`description`/`attributes` actually changed
+        (a caller that should have re-embedded but didn't, or a legitimate
+        two-phase import mid-way between "metadata written" and "embedding
+        job ran") leaves a vector describing content that no longer exists
+        -- silently, with no exception, no log, and nothing to query for it.
+        `docs/PHASE-5.md` §8 lists price/stock going stale; it does not
+        cover this, because until this hash existed there was nothing to
+        observe.
+
+        So: every row's `embedding_source_hash`/`embedding_stale` are
+        computed in Python before the statement is built (not left to
+        `COALESCE`), using a pre-fetch of each `external_id`'s currently
+        stored hash. `embedding_stale` is a live comparison recomputed on
+        every write, not memoised state carried from the previous row: it
+        is `stored_hash is not None and stored_hash != this_write's_content_hash`,
+        nothing more. That matters for a row that drifted and was then
+        edited back to matching content -- it must read fresh again on
+        that same write, not stay flagged because it was flagged once
+        before with nothing since to un-flag it.
+
+        - `embedding` supplied: the new vector demonstrably matches the new
+          content (the caller just computed one from it), so
+          `embedding_source_hash` becomes that content's hash and
+          `embedding_stale` clears.
+        - `embedding` omitted and the new content's hash still matches what
+          is stored: `embedding_stale` is false; nothing to report.
+        - `embedding` omitted and the new content's hash does NOT match what
+          is stored: the row is about to start (or continue) describing
+          something its vector was never computed from.
+          `embedding_stale` is set and a `product.embedding_stale` warning
+          is logged with the organization and external id. This is a
+          decision, not a default: **raising here was rejected** because
+          Task 3's own architecture (`docs/PHASE-5.md` §5 -- upload returns
+          immediately, an arq job embeds separately) makes "metadata
+          updated, embedding not yet recomputed" a normal, expected
+          transient state, not a caller error; raising would make that
+          two-phase design impossible without every metadata-only caller
+          first threading through an escape hatch. Recording keeps the
+          write available and makes the state queryable
+          (`WHERE embedding_stale`) for a reconciliation job instead of
+          requiring one to recompute every row's hash from scratch.
         """
         if not rows:
             return []
 
-        values = [
-            {
-                "id": uuid7(),
-                "organization_id": self.tenant.organization_id,
-                "external_id": row.external_id,
-                "name": row.name,
-                "slug": row.slug,
-                "description": row.description,
-                "category": row.category,
-                "price": row.price,
-                "currency": row.currency,
-                "attributes": row.attributes,
-                "availability": row.availability,
-                "stock_quantity": row.stock_quantity,
-                "image_url": row.image_url,
-                "product_url": row.product_url,
-                "is_active": row.is_active,
-                "metadata": row.metadata,
-                "embedding": row.embedding,
-            }
-            for row in rows
-        ]
+        existing_rows = await self.session.execute(
+            select(Product.external_id, Product.embedding_source_hash).where(
+                Product.organization_id == self.tenant.organization_id,
+                Product.external_id.in_([row.external_id for row in rows]),
+            )
+            # Two rows in this batch cannot both be "the" prior state for
+            # one external_id, so this predicate is belt-and-braces, not
+            # load-bearing -- kept for the same reason every other read in
+            # this service states organization_id explicitly (§2.3, Layer 1).
+        )
+        prior_hash_by_external_id = {
+            row.external_id: row.embedding_source_hash for row in existing_rows
+        }
+
+        values = []
+        for row in rows:
+            content_hash = hash_embeddable_text(row.name, row.description, row.attributes)
+            if row.embedding is not None:
+                # A fresh embedding demonstrably matches the content it was
+                # just computed from.
+                source_hash: str | None = content_hash
+                stale = False
+            else:
+                # `embedding` (and therefore what it was computed from) is
+                # unchanged by this write -- `source_hash` stays whatever it
+                # already was (None for a brand-new row with no embedding
+                # yet). `stale` is a live comparison, not remembered state:
+                # it is recomputed from scratch on every write as "does the
+                # content this row has right now match the text its stored
+                # embedding was computed from", so a row that drifted and
+                # was then edited BACK to matching content correctly clears
+                # on this same write, with no separate "un-stale" path
+                # needed.
+                source_hash = prior_hash_by_external_id.get(row.external_id)
+                stale = source_hash is not None and source_hash != content_hash
+                if stale:
+                    logger.warning(
+                        "product.embedding_stale",
+                        organization_id=str(self.tenant.organization_id),
+                        external_id=row.external_id,
+                        reason=(
+                            "content changed on an embedding-less upsert; "
+                            "stored embedding no longer matches"
+                        ),
+                    )
+
+            values.append(
+                {
+                    "id": uuid7(),
+                    "organization_id": self.tenant.organization_id,
+                    "external_id": row.external_id,
+                    "name": row.name,
+                    "slug": row.slug,
+                    "description": row.description,
+                    "category": row.category,
+                    "price": row.price,
+                    "currency": row.currency,
+                    "attributes": row.attributes,
+                    "availability": row.availability,
+                    "stock_quantity": row.stock_quantity,
+                    "image_url": row.image_url,
+                    "product_url": row.product_url,
+                    "is_active": row.is_active,
+                    "metadata": row.metadata,
+                    "embedding": row.embedding,
+                    "embedding_source_hash": source_hash,
+                    "embedding_stale": stale,
+                }
+            )
 
         # The raw Table, not the ORM class: passing the mapped class to
         # `pg_insert()` routes through SQLAlchemy's ORM-aware bulk-insert key

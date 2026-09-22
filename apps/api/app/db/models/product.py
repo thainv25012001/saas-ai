@@ -84,3 +84,23 @@ class Product(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
     # creation. Nullable: a product can exist (created by hand, or queued
     # for import) before anything has embedded it.
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+    # A SHA-256 of `embedding_text.embeddable_text(name, description,
+    # attributes)` as of whichever write last set `embedding` -- i.e. "the
+    # text this row's *currently stored* vector was computed from", not
+    # necessarily this row's *current* content. `upsert_many` is the only
+    # writer, and it is also the only place that can compare the two: an
+    # embedding-less upsert (a price/stock sync passing `embedding=None`,
+    # deliberately allowed -- see `upsert_many`'s docstring) can change
+    # name/description/attributes without anyone re-embedding, and without
+    # this column that divergence has zero observability -- the stored
+    # vector goes on describing a product that no longer exists, silently,
+    # forever. `upsert_many` sets `embedding_stale` when it detects exactly
+    # that.
+    embedding_source_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # True when `embedding_source_hash` no longer matches the row's current
+    # name/description/attributes -- set by `upsert_many` at the moment it
+    # detects the mismatch (not by a scheduled scan), and cleared the next
+    # time a caller supplies a fresh embedding for the current content. A
+    # reconciliation job can select on this directly instead of
+    # recomputing every row's hash to find the ones that need re-embedding.
+    embedding_stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

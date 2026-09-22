@@ -64,6 +64,19 @@ def upgrade() -> None:
         # -- see 0006_documents.py). Nullable: a product can exist (created
         # by hand, or queued for import) before anything has embedded it.
         sa.Column("embedding", Vector(1536), nullable=True),
+        # A SHA-256 of the exact text `embedding` was computed from (see
+        # app/products/embedding_text.py::embeddable_text) as of whichever
+        # write last set `embedding` -- NOT necessarily a hash of this row's
+        # *current* name/description/attributes. `ProductService.upsert_many`
+        # deliberately allows an embedding-less upsert (a price/stock sync,
+        # docs/PHASE-5.md §4) to change those columns without re-embedding;
+        # without this column, that leaves a stored vector silently
+        # describing content that no longer exists -- undetectable by
+        # anything, ever. `upsert_many` compares this against a freshly
+        # computed hash on every embedding-less write and flips
+        # `embedding_stale` below when they no longer match.
+        sa.Column("embedding_source_hash", sa.String(64), nullable=True),
+        sa.Column("embedding_stale", sa.Boolean(), nullable=False, server_default=sa.false()),
         # Generated over name/description/category ONLY -- deliberately not
         # price, stock_quantity or availability. Those three change on their
         # own schedule (a nightly stock sync, a price update), and if they

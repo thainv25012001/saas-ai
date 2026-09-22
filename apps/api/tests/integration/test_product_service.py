@@ -1,9 +1,11 @@
 import pytest
 from sqlalchemy import text
+from structlog.testing import capture_logs
 
 from app.core.errors import NotFoundError
 from app.core.tenancy import tenant_session
 from app.db.models import ProductAvailability
+from app.products.embedding_text import hash_embeddable_text
 from app.products.schemas import ProductInput
 from app.products.service import ProductService
 
@@ -144,6 +146,146 @@ async def test_upsert_many_with_new_embedding_replaces_the_stale_vector(tenant_a
         )
 
     assert list(updated.embedding) == pytest.approx(_vector(0.9))
+
+
+async def test_create_with_an_embedding_stores_its_source_hash(tenant_a):
+    async with tenant_session(tenant_a) as session:
+        product = await _product(session, tenant_a, embedding=_vector(0.1))
+    assert product.embedding_source_hash == hash_embeddable_text(
+        product.name, product.description, product.attributes
+    )
+    assert product.embedding_stale is False
+
+
+async def test_create_without_an_embedding_stores_no_hash(tenant_a):
+    """Nothing to be stale relative to yet -- a hash here would claim the
+    (nonexistent) embedding was computed from this text, which is false."""
+    async with tenant_session(tenant_a) as session:
+        product = await _product(session, tenant_a, embedding=None)
+    assert product.embedding_source_hash is None
+    assert product.embedding_stale is False
+
+
+async def test_upsert_many_content_change_without_a_new_embedding_marks_it_stale(tenant_a):
+    """The hole the COALESCE-preserved embedding opens: a caller changes
+    `description` (an embedded field) but -- bug, or a two-phase import
+    caught between "metadata written" and "embed job ran" -- does not
+    supply a new embedding. The stored vector, now describing text this row
+    no longer has, must become visible as stale rather than silently
+    correct-looking."""
+    async with tenant_session(tenant_a) as session:
+        service = ProductService(session, tenant_a)
+        await service.upsert_many(
+            [
+                _input(
+                    external_id="sku-1",
+                    description="An old description about sedans.",
+                    embedding=_vector(0.2),
+                )
+            ]
+        )
+
+        with capture_logs() as entries:
+            [updated] = await service.upsert_many(
+                [
+                    _input(
+                        external_id="sku-1",
+                        description="A totally different product: a luxury electric SUV.",
+                        embedding=None,
+                    )
+                ]
+            )
+
+    assert updated.embedding_stale is True
+    # The vector itself is untouched -- COALESCE preserved it, as designed;
+    # staleness is a signal on top of that preserved value, not a
+    # correction of it.
+    assert list(updated.embedding) == pytest.approx(_vector(0.2))
+    events = [entry["event"] for entry in entries]
+    assert "product.embedding_stale" in events
+    stale_entry = next(e for e in entries if e["event"] == "product.embedding_stale")
+    assert stale_entry["external_id"] == "sku-1"
+    assert stale_entry["organization_id"] == str(tenant_a.organization_id)
+
+
+async def test_upsert_many_content_change_with_a_matching_embedding_stays_fresh(tenant_a):
+    """The same content change as above, but the caller did its job: a new
+    embedding accompanies the new content. Must not be flagged stale."""
+    async with tenant_session(tenant_a) as session:
+        service = ProductService(session, tenant_a)
+        await service.upsert_many(
+            [_input(external_id="sku-1", description="Old.", embedding=_vector(0.2))]
+        )
+
+        [updated] = await service.upsert_many(
+            [_input(external_id="sku-1", description="New.", embedding=_vector(0.9))]
+        )
+
+    assert updated.embedding_stale is False
+    assert updated.embedding_source_hash == hash_embeddable_text(
+        updated.name, "New.", updated.attributes
+    )
+
+
+async def test_upsert_many_price_only_change_does_not_mark_it_stale(tenant_a):
+    """Sanity check against a false positive: price is not part of
+    `embeddable_text`, so an embedding-less price update must not trip the
+    staleness detector at all -- this is the exact case §4/COALESCE exist
+    to keep as a plain UPDATE."""
+    async with tenant_session(tenant_a) as session:
+        service = ProductService(session, tenant_a)
+        await service.upsert_many([_input(external_id="sku-1", embedding=_vector(0.2))])
+
+        with capture_logs() as entries:
+            [updated] = await service.upsert_many(
+                [_input(external_id="sku-1", price="1.00", embedding=None)]
+            )
+
+    assert updated.embedding_stale is False
+    assert [e for e in entries if e["event"] == "product.embedding_stale"] == []
+
+
+async def test_upsert_many_repeated_stale_writes_stay_flagged(tenant_a):
+    """A further embedding-less write over the SAME (already diverged)
+    content must re-detect and stay flagged -- staleness is a live
+    comparison against the stored hash on every write, not a one-shot
+    alarm that a later, still-mismatched write could silently clear."""
+    async with tenant_session(tenant_a) as session:
+        service = ProductService(session, tenant_a)
+        await service.upsert_many(
+            [_input(external_id="sku-1", description="Old.", embedding=_vector(0.2))]
+        )
+        await service.upsert_many([_input(external_id="sku-1", description="New.", embedding=None)])
+        [updated] = await service.upsert_many(
+            [_input(external_id="sku-1", description="New.", price="5.00", embedding=None)]
+        )
+
+    assert updated.embedding_stale is True
+
+
+async def test_upsert_many_reverting_content_without_a_new_embedding_clears_staleness(tenant_a):
+    """The other side of "staleness is a live comparison, not memoised
+    state": a row that drifted (flagged stale) and is then edited BACK to
+    matching the stored embedding's original text -- still without a new
+    embedding -- is genuinely fresh again, because the content it has now
+    is exactly what the stored vector was computed from. It must read as
+    fresh on that same write, not stay flagged from having been flagged
+    once before."""
+    async with tenant_session(tenant_a) as session:
+        service = ProductService(session, tenant_a)
+        await service.upsert_many(
+            [_input(external_id="sku-1", description="Old.", embedding=_vector(0.2))]
+        )
+        [drifted] = await service.upsert_many(
+            [_input(external_id="sku-1", description="New.", embedding=None)]
+        )
+        assert drifted.embedding_stale is True
+
+        [reverted] = await service.upsert_many(
+            [_input(external_id="sku-1", description="Old.", embedding=None)]
+        )
+
+    assert reverted.embedding_stale is False
 
 
 async def test_upsert_many_is_scoped_to_the_tenant(tenant_a, tenant_b):

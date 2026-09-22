@@ -182,3 +182,25 @@ async def test_products_search_tsv_generation_expression_excludes_volatile_colum
     assert "price" not in expression
     assert "stock_quantity" not in expression
     assert "availability" not in expression
+
+
+async def test_products_has_embedding_staleness_columns(owner_connection):
+    """`embedding_source_hash`/`embedding_stale` are what make an
+    embedding-less upsert's stale vector observable instead of a silent
+    assumption -- see ProductService.upsert_many. Pinned at the schema
+    level because a migration edit that dropped or mistyped either would
+    otherwise only surface as a mypy/runtime error in the service, not a
+    reddened test naming the actual missing guarantee."""
+    result = await owner_connection.execute(
+        text(
+            "SELECT column_name, data_type, is_nullable, column_default "
+            "FROM information_schema.columns "
+            "WHERE table_name = 'products' "
+            "AND column_name IN ('embedding_source_hash', 'embedding_stale')"
+        )
+    )
+    columns = {row.column_name: row for row in result}
+    assert columns["embedding_source_hash"].is_nullable == "YES"
+    assert columns["embedding_stale"].is_nullable == "NO"
+    assert columns["embedding_stale"].data_type == "boolean"
+    assert columns["embedding_stale"].column_default == "false"
