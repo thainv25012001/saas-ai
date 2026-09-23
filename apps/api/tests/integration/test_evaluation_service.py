@@ -166,6 +166,41 @@ async def test_get_dataset_from_another_tenant_raises_not_found(tenant_a, tenant
             await EvaluationService(session, tenant_b).get_dataset(dataset.id)
 
 
+async def test_create_dataset_conflicting_with_a_concurrently_inserted_row_raises_conflict(
+    tenant_a, owner_connection
+):
+    """`create_dataset` has no SELECT-then-INSERT pre-check -- it relies
+    solely on `uq_eval_dataset_org_name` plus a `try/except IntegrityError`
+    around the flush (same pattern as `AgentService.create_agent`). This
+    inserts the conflicting row through a wholly separate connection, after
+    this test's own session has already started, to prove the conflict is
+    caught even when nothing in this session's own history could have seen
+    it coming -- the scenario a pre-check would silently race under."""
+    async with tenant_session(tenant_a) as session:
+        # A "concurrent" writer -- a different connection entirely -- claims
+        # the name first.
+        await owner_connection.execute(
+            text("INSERT INTO eval_datasets (id, organization_id, name) VALUES (:id, :org, :name)"),
+            {"id": uuid7(), "org": tenant_a.organization_id, "name": "Pricing FAQ"},
+        )
+        await owner_connection.commit()
+
+        with pytest.raises(ConflictError):
+            await EvaluationService(session, tenant_a).create_dataset(
+                CreateDatasetInput(name="Pricing FAQ")
+            )
+
+
+async def test_update_dataset_rename_to_an_existing_name_raises_conflict(tenant_a):
+    async with tenant_session(tenant_a) as session:
+        service = EvaluationService(session, tenant_a)
+        await service.create_dataset(CreateDatasetInput(name="Dataset A"))
+        dataset_b = await service.create_dataset(CreateDatasetInput(name="Dataset B"))
+
+        with pytest.raises(ConflictError):
+            await service.update_dataset(dataset_b.id, UpdateDatasetInput(name="Dataset A"))
+
+
 # ---------------------------------------------------------------------------
 # Cases
 # ---------------------------------------------------------------------------

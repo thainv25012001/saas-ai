@@ -8,6 +8,7 @@ names here are final; Task 4 must not rename them.
 import uuid
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, NotFoundError, ValidationError
@@ -58,19 +59,7 @@ class EvaluationService:
             raise NotFoundError("dataset not found")
         return dataset
 
-    async def _dataset_name_taken(self, name: str, *, exclude_id: uuid.UUID | None = None) -> bool:
-        query = select(EvalDataset.id).where(
-            EvalDataset.organization_id == self.tenant.organization_id,
-            EvalDataset.name == name,
-        )
-        if exclude_id is not None:
-            query = query.where(EvalDataset.id != exclude_id)
-        result = await self.session.execute(query)
-        return result.scalar_one_or_none() is not None
-
     async def create_dataset(self, data: CreateDatasetInput) -> EvalDataset:
-        if await self._dataset_name_taken(data.name):
-            raise ConflictError(f"a dataset named '{data.name}' already exists")
         dataset = EvalDataset(
             id=uuid7(),
             organization_id=self.tenant.organization_id,
@@ -78,18 +67,31 @@ class EvaluationService:
             description=data.description,
         )
         self.session.add(dataset)
-        await self.session.flush()
+        try:
+            await self.session.flush()
+        except IntegrityError as exc:
+            # `uq_eval_dataset_org_name` is what actually enforces this --
+            # relying on it (rather than a SELECT-then-INSERT pre-check) is
+            # what keeps two concurrent creates of the same name from both
+            # racing past a check and one of them surfacing a raw
+            # IntegrityError as an unhandled 500. Same pattern as
+            # AgentService.create_agent.
+            raise ConflictError(f"a dataset named '{data.name}' already exists") from exc
         return dataset
 
     async def update_dataset(self, dataset_id: uuid.UUID, data: UpdateDatasetInput) -> EvalDataset:
         dataset = await self.get_dataset(dataset_id)
-        if data.name is not None and data.name != dataset.name:
-            if await self._dataset_name_taken(data.name, exclude_id=dataset_id):
-                raise ConflictError(f"a dataset named '{data.name}' already exists")
+        if data.name is not None:
             dataset.name = data.name
         if data.description is not None:
             dataset.description = data.description
-        await self.session.flush()
+        try:
+            await self.session.flush()
+        except IntegrityError as exc:
+            # Same race as `create_dataset`: two concurrent renames onto the
+            # same name must not let the second one raise a raw
+            # IntegrityError. See AgentService.update_agent.
+            raise ConflictError(f"a dataset named '{dataset.name}' already exists") from exc
         return dataset
 
     async def delete_dataset(self, dataset_id: uuid.UUID) -> None:
