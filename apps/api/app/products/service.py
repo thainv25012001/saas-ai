@@ -1,7 +1,7 @@
 import uuid
 from typing import cast
 
-from sqlalchemy import Table, func, select
+from sqlalchemy import Table, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,7 +9,7 @@ from app.core.errors import NotFoundError
 from app.core.ids import uuid7
 from app.core.logging import get_logger
 from app.core.tenancy import TenantContext
-from app.db.models import Product
+from app.db.models import Product, ProductAvailability
 from app.products.embedding_text import hash_embeddable_text
 from app.products.schemas import ProductInput
 
@@ -52,6 +52,13 @@ _UPSERT_COLUMNS = (
     "embedding_source_hash",
     "embedding_stale",
 )
+
+
+def _escape_like(value: str) -> str:
+    """`value` as a literal inside an `ILIKE` pattern whose escape character
+    is a backslash: the escape character itself first, then both
+    wildcards."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 class ProductService:
@@ -110,21 +117,75 @@ class ProductService:
     async def list_products(
         self,
         *,
+        search: str | None = None,
         category: str | None = None,
+        availability: ProductAvailability | None = None,
         is_active: bool | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[Product]:
+        """The dashboard's catalogue listing (Phase 5 Task 6).
+
+        `search` is a plain case-insensitive substring match on `name` or
+        `external_id` -- what someone scanning their own catalogue types
+        ("camry", "CAM-0"), not the agent's three-way semantic search: a
+        dashboard filter has no reason to spend an embedding call per
+        keystroke, and a partial SKU is exactly what `search_tsv`'s
+        whole-word stemming would miss. `%`, `_` and backslashes in it are
+        escaped, so they are text to find rather than wildcards.
+
+        `id` breaks ties in the ordering: an import chunk commits every row
+        in one transaction, so they share a `created_at` to the microsecond,
+        and without a total order `offset` paging could show a row twice
+        and another never.
+        """
         limit = max(1, min(limit, _MAX_LIST_LIMIT))
         offset = max(0, offset)
         query = select(Product).where(Product.organization_id == self.tenant.organization_id)
+        if search is not None and search.strip():
+            pattern = f"%{_escape_like(search.strip())}%"
+            query = query.where(
+                or_(
+                    Product.name.ilike(pattern, escape="\\"),
+                    Product.external_id.ilike(pattern, escape="\\"),
+                )
+            )
         if category is not None:
             query = query.where(Product.category == category)
+        if availability is not None:
+            query = query.where(Product.availability == availability)
         if is_active is not None:
             query = query.where(Product.is_active == is_active)
-        query = query.order_by(Product.created_at.desc()).limit(limit).offset(offset)
+        query = (
+            query.order_by(Product.created_at.desc(), Product.id.desc()).limit(limit).offset(offset)
+        )
         result = await self.session.execute(query)
         return list(result.scalars().all())
+
+    async def list_categories(
+        self, *, active_only: bool = False, limit: int | None = None
+    ) -> list[str]:
+        """Every distinct, non-null category this organization's catalogue
+        uses, alphabetically -- the options for the dashboard's category
+        filter, so it offers only values that can match something.
+
+        `active_only`/`limit` exist for `search_products`' no-results
+        message (`app/tools/products.py`), which lists the categories a
+        model can retry with: only categories an active product carries can
+        ever match a search (`_Filters` pins `is_active = true`), and the
+        list reaches a prompt, so it is bounded there rather than growing
+        with the catalogue."""
+        statement = select(Product.category).where(
+            Product.organization_id == self.tenant.organization_id,
+            Product.category.is_not(None),
+        )
+        if active_only:
+            statement = statement.where(Product.is_active.is_(True))
+        statement = statement.distinct().order_by(Product.category)
+        if limit is not None:
+            statement = statement.limit(max(1, limit))
+        result = await self.session.execute(statement)
+        return [category for category in result.scalars().all() if category is not None]
 
     async def upsert_many(self, rows: list[ProductInput]) -> list[Product]:
         """Bulk `INSERT ... ON CONFLICT (organization_id, external_id) DO

@@ -61,7 +61,7 @@ query Conversation($id: UUID!) {
     title
     messages {
       id seq role content model inputTokens outputTokens costUsd latencyMs error
-      citations { chunkId documentId documentTitle excerpt rank score }
+      citations { chunkId documentId productId documentTitle excerpt rank score }
     }
   }
 }
@@ -80,5 +80,36 @@ query AgentTools($agentId: UUID!) {
 mutation SetAgentToolEnabled($agentId: UUID!, $toolId: UUID!, $isEnabled: Boolean!) {
   setAgentToolEnabled(agentId: $agentId, toolId: $toolId, isEnabled: $isEnabled) {
     id name description isEnabled
+  }
+}
+
+query Products(
+  $search: String
+  $category: String
+  $availability: ProductAvailability
+  $limit: Int
+  $offset: Int
+) {
+  products(
+    search: $search
+    category: $category
+    availability: $availability
+    limit: $limit
+    offset: $offset
+  ) {
+    id externalId name description category price currency
+    attributes { key value }
+    availability stockQuantity isActive searchIndex updatedAt
+  }
+}
+
+query ProductCategories {
+  productCategories
+}
+
+query ProductImports($limit: Int) {
+  productImports(limit: $limit) {
+    id filename status totalRows succeededCount failedCount error createdAt completedAt
+    errors { row externalId message }
   }
 }

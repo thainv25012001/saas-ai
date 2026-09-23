@@ -145,6 +145,7 @@ describe("parseSSEStream", () => {
     const citation = {
       chunk_id: "c1",
       document_id: "doc1",
+      product_id: null,
       document_title: "Pricing sheet.pdf",
       rank: 1,
       score: 0.87,
@@ -188,6 +189,7 @@ describe("parseSSEStream", () => {
     const citation = {
       chunk_id: "c1",
       document_id: "doc1",
+      product_id: null,
       document_title: "FAQ.md",
       rank: 1,
       score: 0.6,
@@ -196,6 +198,99 @@ describe("parseSSEStream", () => {
     };
     const events = await collect(chunksOf(frame({ type: "citations", citations: [citation] })));
     expect(events).toEqual([{ type: "citations", citations: [citation] }]);
+  });
+
+  it("keeps document and product citations mixed in one event", async () => {
+    // Final review I1: one `citations` event aggregates every tool in a
+    // step, so a `retrieve_knowledge` chunk and a `search_products` row
+    // arrive together. A product citation has null chunk/document ids; that
+    // must not drop the event, and with it the document citation too.
+    const documentCitation = {
+      chunk_id: "c1",
+      document_id: "doc1",
+      product_id: null,
+      document_title: "Pricing sheet.pdf",
+      rank: 1,
+      score: 0.87,
+      excerpt: "Our starter plan is $19/mo.",
+      page: 3,
+    };
+    const productCitation = {
+      chunk_id: null,
+      document_id: null,
+      product_id: "prod1",
+      document_title: "Aurora Sedan",
+      rank: 1,
+      score: 0.03,
+      excerpt: "28499.00 USD · in_stock",
+      page: null,
+    };
+    const events = await collect(
+      chunksOf(frame({ type: "citations", citations: [documentCitation, productCitation] })),
+    );
+    expect(events).toEqual([
+      { type: "citations", citations: [documentCitation, productCitation] },
+    ]);
+  });
+
+  it("reads a citation with no product_id key as a document citation", async () => {
+    const wire = {
+      chunk_id: "c1",
+      document_id: "doc1",
+      document_title: "FAQ.md",
+      rank: 1,
+      score: 0.6,
+      excerpt: "x",
+      page: null,
+    };
+    const events = await collect(chunksOf(frame({ type: "citations", citations: [wire] })));
+    expect(events).toEqual([{ type: "citations", citations: [{ ...wire, product_id: null }] }]);
+  });
+
+  it("drops a citation that names neither a chunk nor a product", async () => {
+    const events = await collect(
+      chunksOf(
+        frame({
+          type: "citations",
+          citations: [
+            {
+              chunk_id: null,
+              document_id: null,
+              product_id: null,
+              document_title: "Nothing",
+              rank: 1,
+              score: 0,
+              excerpt: "x",
+              page: null,
+            },
+          ],
+        }) + frame({ type: "text_delta", text: "ok" }),
+      ),
+    );
+    expect(events).toEqual([{ type: "text_delta", text: "ok" }]);
+  });
+
+  it("drops a citation whose product_id is neither a string nor null", async () => {
+    const events = await collect(
+      chunksOf(
+        frame({
+          type: "citations",
+          citations: [
+            {
+              chunk_id: null,
+              document_id: null,
+              product_id: 7,
+              document_title: "Aurora Sedan",
+              rank: 1,
+              score: 0,
+              excerpt: "x",
+              page: null,
+            },
+          ],
+        }) + frame({ type: "text_delta", text: "ok" }),
+      ),
+    );
+    expect(events).toEqual([{ type: "text_delta", text: "ok" }]);
   });
 
   it("drops a citation whose page is neither a number nor null", async () => {

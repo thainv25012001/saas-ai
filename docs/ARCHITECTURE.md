@@ -279,7 +279,7 @@ products
   attributes jsonb,                 -- {"seats": 7, "fuel": "hybrid", "mpg": 44}
   availability enum(in_stock, out_of_stock, preorder, discontinued), stock_quantity,
   image_url, product_url, is_active, metadata jsonb,
-  embedding vector(1536),           -- over name + description + key attributes
+  embedding vector(1536),           -- over name + description + attributes
   search_tsv tsvector,
   created_at, updated_at
   UNIQUE (organization_id, external_id)
@@ -895,6 +895,26 @@ repository.
 | Retrieval | `app/rag/retrieve.py` — two candidate lists (pgvector cosine distance; `websearch_to_tsquery` + `ts_rank_cd`, with an OR-joined fallback when the strict form matches nothing), each with its own relevance floor applied *before* Reciprocal Rank Fusion, because an RRF score is rank-derived and carries no relevance information. Both queries bind `organization_id` on the chunk table and again on the `documents` join. |
 | Grounding | `ChatService` retrieves only for an organization with a ready document, wraps the passages in a per-turn `secrets.token_hex(8)` fence (so a document cannot forge a closing tag or a passage header), emits a `citations` SSE event before the first token, and writes `message_citations` on both the success and the failed-stream paths. Citations outlive their chunks (`ON DELETE SET NULL`, with the title and excerpt denormalised onto the row). |
 | Frontend | `/dashboard/knowledge` — upload dropzone with client-side type/size checks, a documents table with status badges and chunk counts, retry and delete, and polling that stops when every row has settled or the tab is hidden. |
+
+---
+
+### 9.7 Phase 5 in detail, as delivered
+
+The design argument is in [`docs/PHASE-5.md`](PHASE-5.md), including §2's honest statement
+that these tools narrow, but do not close, the gap between "the model quoted a price from a
+tool" and "the model quoted a price from a document chunk that happened to mention one." This
+is what exists in the repository.
+
+| Area | Deliverable |
+|---|---|
+| Schema | `products` (`0010`) and `product_imports` (`0012`), both RLS-enabled; `0011` adds `embedding_model`. `products.embedding` is `vector(1536)`; `search_tsv` is a **generated** `tsvector` column over name/description/category (not attributes), the same drift-proof pattern Phase 3 used for `document_chunks.content_tsv`. `attributes` is `jsonb`, GIN-indexed and filterable, unvalidated by design — no per-vertical schema. `UNIQUE (organization_id, external_id)` makes re-import an upsert. `embedding_source_hash`/`embedding_stale` (added alongside the table) record whether the stored vector still matches the row's current text. |
+| Embedding | `app/products/embedding.py` embeds `embeddable_text`: name, description and the whole `attributes` object (sorted-key JSON) — not category (that is in `search_tsv`), and never price, stock or availability, which have their own columns — so a price change is a plain `UPDATE`, not a re-embed (`docs/PHASE-5.md` §4). Every attribute is embedded, so a volatile value a customer puts *in* `attributes` does force a re-embed. `ProductService.upsert_many` recomputes `embedding_source_hash` on every embedding-less write and sets `embedding_stale` on a mismatch, logging `product.embedding_stale`; only a re-import re-embeds a stale row — nothing walks `WHERE embedding_stale` (§9, "Not delivered"). |
+| Import | `POST /api/v1/products/import` (multipart CSV/JSON) writes a `product_imports` row and enqueues `import_products_task` onto the same arq worker and Redis queue Phase 3's document ingestion uses (`app/workers/settings.py`). The job runs in two phases: it upserts every chunk of rows (each chunk committed on its own), then embeds the rows that need a vector in separate transactions. An embedding-provider failure leaves those rows imported but unembedded — findable by filters and full text, badged in the dashboard — and records a warning on the completed import; re-importing retries. Rows that fail validation, or fail alone at the database, are recorded per row (`product_imports.errors`, capped at 200 on the GraphQL wire, unbounded in the database) and do not abort the batch. A `.csv` reported as `application/vnd.ms-excel` (Excel on Windows) or `text/plain` is accepted as CSV. |
+| Search | `app/rag/products.py` — exact filters (`category`, `min_price`, `max_price`, `attributes`) rendered into the `WHERE` clause of every arm, so a filter narrows the candidate set before ranking rather than after it; full-text and vector arms fused with the same RRF helpers Phase 3 built (`app/core/rrf`). No default relevance floor (`product_search_max_cosine_distance`/`product_search_min_keyword_rank` default `None`) — calibrating one from `HashingEmbedder`'s distances would be a guess, not a measurement; the raw per-arm signal (`vector_distance`, `keyword_rank`) is exposed instead so a caller can decide. |
+| Tools | `search_products`/`get_product` (`app/tools/products.py`), seeded and defaulted **on** for every agent (migration `0013`) — unlike `create_lead`, because neither tool writes. `search_products` prefixes ranked results with a note keyed on the *shape* of the returned distances (a sharp leader vs. a flat band), not a fixed threshold, since no offline measurement can calibrate one. An empty result echoes the applied filters and lists the catalogue's active categories (bounded) so the model can retry a mis-guessed filter; the category filter ignores case. `get_product` treats an inactive product as not found, as search never surfaces one. |
+| Citations | `message_citations.product_id` (added in `0013`) is populated for every product a tool call surfaces — one citation per `search_products` result and one for `get_product` — the same mechanism Phase 3 built for document chunks. |
+| GraphQL | `Query.products(search, category, availability, limit, offset)`, `Query.productCategories`, `Query.productImports(limit, offset)` with `ProductImport.errors(limit)` sorted and capped. Dashboard search is a plain ILIKE on `name`/`external_id`, not the agent's vector search — a keystroke-driven filter has no reason to call an embedding provider, and there is no trigram index behind it yet. |
+| Frontend | `/dashboard/products` — an import dropzone (`.csv`/`.json`) with recent imports underneath, a catalogue table (search, category and availability filters, paging) with search-index and availability badges, and a per-import row-error table. Polls running imports and stops when the tab is hidden, the same pattern as `/dashboard/knowledge`. |
 
 ---
 

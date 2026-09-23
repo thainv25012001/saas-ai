@@ -1,6 +1,8 @@
 import enum
+import json
 import uuid
 from datetime import datetime
+from typing import Any
 
 import strawberry
 
@@ -13,6 +15,8 @@ from app.db.models import Document as DocumentModel
 from app.db.models import Lead as LeadModel
 from app.db.models import MessageCitation as MessageCitationModel
 from app.db.models import Organization as OrganizationModel
+from app.db.models import Product as ProductModel
+from app.db.models import ProductImport as ProductImportModel
 from app.db.models import Prompt as PromptModel
 from app.db.models import PromptVersion as PromptVersionModel
 from app.db.models import Tool as ToolModel
@@ -265,9 +269,15 @@ class MessageCitation:
     id: uuid.UUID
     chunk_id: uuid.UUID | None
     document_id: uuid.UUID | None
-    #: Untrusted -- the uploaded document's own title, never escaped by the
-    #: server. Rendering it must go through JSX text interpolation only; see
-    #: the same warning on `Citation` in `apps/web/src/lib/sse.ts`.
+    #: Set for a product citation (`search_products`/`get_product`), where
+    #: `chunk_id`/`document_id` are `None`. `ON DELETE SET NULL` like the
+    #: other two, so a citation of a since-deleted product has all three
+    #: `None`.
+    product_id: uuid.UUID | None
+    #: Untrusted -- the uploaded document's own title (or, for a product
+    #: citation, the product's name), never escaped by the server.
+    #: Rendering it must go through JSX text interpolation only; see the
+    #: same warning on `Citation` in `apps/web/src/lib/sse.ts`.
     document_title: str
     excerpt: str
     rank: int
@@ -279,6 +289,7 @@ class MessageCitation:
             id=model.id,
             chunk_id=model.chunk_id,
             document_id=model.document_id,
+            product_id=model.product_id,
             document_title=model.document_title,
             excerpt=model.excerpt,
             rank=model.rank,
@@ -459,6 +470,180 @@ class AgentTool:
     @classmethod
     def from_pair(cls, tool: ToolModel, is_enabled: bool) -> "AgentTool":
         return cls(id=tool.id, name=tool.name, description=tool.description, is_enabled=is_enabled)
+
+
+@strawberry.enum
+class ProductAvailability(enum.Enum):
+    IN_STOCK = "in_stock"
+    OUT_OF_STOCK = "out_of_stock"
+    PREORDER = "preorder"
+    DISCONTINUED = "discontinued"
+
+
+@strawberry.enum
+class ProductSearchIndex(enum.Enum):
+    """Whether the agent's semantic search can find this product by meaning
+    -- `app.products.embedding.needs_reembedding`'s three states, named for
+    the dashboard. Keyword and structured search reach every row regardless;
+    only the vector arm depends on this."""
+
+    #: Embedded, from the text the row has now.
+    INDEXED = "indexed"
+    #: Never embedded (`embedding_source_hash IS NULL`): the vector arm
+    #: cannot match it at all.
+    NOT_INDEXED = "not_indexed"
+    #: Embedded from text the row no longer has (`embedding_stale`): the
+    #: vector arm ranks it on a description that is out of date.
+    STALE = "stale"
+
+
+def _search_index(model: ProductModel) -> ProductSearchIndex:
+    if model.embedding_source_hash is None:
+        return ProductSearchIndex.NOT_INDEXED
+    if model.embedding_stale:
+        return ProductSearchIndex.STALE
+    return ProductSearchIndex.INDEXED
+
+
+@strawberry.type
+class ProductAttribute:
+    """One `attributes` entry. Untrusted in both halves -- the key and the
+    value are each whatever a customer's CSV/JSON said."""
+
+    key: str
+    value: str
+
+
+def _attribute_value(value: Any) -> str:
+    """A string arrives as itself; anything else (a number, a bool, a nested
+    list or object) as its JSON text. Flattened here so the dashboard
+    receives one shape and renders it as text, instead of walking an
+    arbitrary customer-shaped object client-side."""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+@strawberry.type
+class Product:
+    id: uuid.UUID
+    external_id: str
+    #: Untrusted -- `name`, `description`, `category` and every
+    #: `attributes` key and value come straight from a customer's uploaded
+    #: catalogue with no server-side escaping. Render as JSX text only: no
+    #: `dangerouslySetInnerHTML`, no markdown pass (docs/DESIGN.md
+    #: "Untrusted text, beyond citations").
+    name: str
+    description: str | None
+    category: str | None
+    #: A string, not a float, for the reason `Message.cost_usd` is one:
+    #: `Numeric(12, 2)` is exact and a float is not.
+    price: str | None
+    currency: str | None
+    attributes: list[ProductAttribute]
+    availability: ProductAvailability
+    stock_quantity: int | None
+    is_active: bool
+    search_index: ProductSearchIndex
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_model(cls, model: ProductModel) -> "Product":
+        return cls(
+            id=model.id,
+            external_id=model.external_id,
+            name=model.name,
+            description=model.description,
+            category=model.category,
+            price=None if model.price is None else str(model.price),
+            currency=model.currency,
+            attributes=[
+                ProductAttribute(key=key, value=_attribute_value(value))
+                for key, value in model.attributes.items()
+            ],
+            availability=ProductAvailability(model.availability.value),
+            stock_quantity=model.stock_quantity,
+            is_active=model.is_active,
+            search_index=_search_index(model),
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
+
+@strawberry.enum
+class ProductImportStatus(enum.Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@strawberry.type
+class ProductImportRowError:
+    """One failed row. `row` is Task 3's human-visible number -- 1-based and
+    header-aware for a CSV, so it is the line a customer would point at in
+    their own spreadsheet. `external_id` and `message` may quote the row's
+    own content, so they are untrusted like `Product`'s fields."""
+
+    row: int
+    external_id: str | None
+    message: str
+
+
+# Ceiling on `ProductImport.errors`' `limit`. A 20 MB file of bad rows can
+# record tens of thousands of row errors, and the dashboard re-reads the
+# import list on a poll -- `failed_count` already carries the total.
+_MAX_IMPORT_ERRORS = 200
+
+
+@strawberry.type
+class ProductImport:
+    id: uuid.UUID
+    filename: str | None
+    status: ProductImportStatus
+    #: `None` until parsing finishes, alongside the two counts below.
+    total_rows: int | None
+    succeeded_count: int
+    failed_count: int
+    #: On a FAILED import, the whole-file failure (bad JSON, a missing
+    #: required column), set instead of any per-row error. On a COMPLETED
+    #: import, a non-fatal warning about the import as a whole -- today only
+    #: that the rows landed but could not all be embedded.
+    error: str | None
+    created_at: datetime
+    completed_at: datetime | None
+    row_errors: strawberry.Private[list[dict[str, Any]]]
+
+    @classmethod
+    def from_model(cls, model: ProductImportModel) -> "ProductImport":
+        return cls(
+            id=model.id,
+            filename=model.filename,
+            status=ProductImportStatus(model.status.value),
+            total_rows=model.total_rows,
+            succeeded_count=model.succeeded_count,
+            failed_count=model.failed_count,
+            error=model.error,
+            created_at=model.created_at,
+            completed_at=model.completed_at,
+            row_errors=model.errors,
+        )
+
+    @strawberry.field
+    def errors(self, limit: int = 50) -> list[ProductImportRowError]:
+        """The first `limit` failed rows, by row number. Sorted here because
+        the importer records them by the phase that caught them (parse, then
+        duplicate, then write), not by position in the file. Bounded because
+        the list is unbounded in the database; `failed_count` says how many
+        there are in all."""
+        limit = max(0, min(limit, _MAX_IMPORT_ERRORS))
+        return [
+            ProductImportRowError(
+                row=entry["row"], external_id=entry.get("external_id"), message=entry["message"]
+            )
+            for entry in sorted(self.row_errors, key=lambda entry: entry["row"])[:limit]
+        ]
 
 
 @strawberry.input

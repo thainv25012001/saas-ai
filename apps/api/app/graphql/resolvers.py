@@ -14,6 +14,7 @@ from app.core.errors import ValidationError as AppValidationError
 from app.db.models import ConversationChannel as ConversationChannelModel
 from app.db.models import DocumentStatus as DocumentStatusModel
 from app.db.models import Membership, Organization
+from app.db.models import ProductAvailability as ProductAvailabilityModel
 from app.db.models import User as UserModel
 from app.documents.service import DocumentService
 from app.graphql import types as gql
@@ -21,6 +22,8 @@ from app.graphql.context import Context
 from app.leads.service import LeadService
 from app.llm.catalog import models_for
 from app.llm.registry import KNOWN_PROVIDERS, provider_is_configured
+from app.products.importer import ProductImportService
+from app.products.service import ProductService
 from app.prompts import schemas as prompt_schemas
 from app.prompts.service import PromptService
 
@@ -95,6 +98,20 @@ def _leads(info: Info) -> LeadService:
     assert info.context.tenant is not None
     assert info.context.session is not None
     return LeadService(info.context.session, info.context.tenant)
+
+
+def _products(info: Info) -> ProductService:
+    _require_tenant(info)
+    assert info.context.tenant is not None
+    assert info.context.session is not None
+    return ProductService(info.context.session, info.context.tenant)
+
+
+def _product_imports(info: Info) -> ProductImportService:
+    _require_tenant(info)
+    assert info.context.tenant is not None
+    assert info.context.session is not None
+    return ProductImportService(info.context.session, info.context.tenant)
 
 
 @strawberry.type
@@ -273,6 +290,47 @@ class Query:
         does not exist, and an error would confirm it does."""
         rows = await _leads(info).list_for_agent(agent_id, limit=limit, offset=offset)
         return [gql.Lead.from_model(row) for row in rows]
+
+    @strawberry.field
+    async def products(
+        self,
+        info: Info,
+        search: str | None = None,
+        category: str | None = None,
+        availability: gql.ProductAvailability | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[gql.Product]:
+        """The dashboard's catalogue listing, newest first. `search` is a
+        substring match on name or SKU -- see `ProductService.list_products`
+        for why this is not the agent's semantic search."""
+        model_availability = (
+            ProductAvailabilityModel(availability.value) if availability is not None else None
+        )
+        rows = await _products(info).list_products(
+            search=search,
+            category=category,
+            availability=model_availability,
+            limit=limit,
+            offset=offset,
+        )
+        return [gql.Product.from_model(row) for row in rows]
+
+    @strawberry.field
+    async def product_categories(self, info: Info) -> list[str]:
+        """The distinct categories in the caller's catalogue, for the
+        dashboard's category filter."""
+        return await _products(info).list_categories()
+
+    @strawberry.field
+    async def product_imports(
+        self, info: Info, limit: int = 20, offset: int = 0
+    ) -> list[gql.ProductImport]:
+        """The caller's catalogue imports, newest first, with counts and
+        per-row errors. The upload itself is REST
+        (`POST /api/v1/products/import`), exactly like documents."""
+        rows = await _product_imports(info).list_imports(limit=limit, offset=offset)
+        return [gql.ProductImport.from_model(row) for row in rows]
 
     @strawberry.field
     async def agent_tools(self, info: Info, agent_id: uuid.UUID) -> list[gql.AgentTool]:

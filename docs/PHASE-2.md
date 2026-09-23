@@ -205,7 +205,7 @@ with the model, token counts, and cost at the point this is discarded, but nothi
 reconciles it. Fixing this for real means recording usage in a write that survives the
 request's own transaction being rolled back — e.g. writing `usage_events` immediately after
 the provider call returns, outside the conversation's transaction — which is real work that
-belongs with billing (Phase 7), not a small fix here.
+belongs with billing (Phase 8), not a small fix here.
 
 ---
 
@@ -217,7 +217,7 @@ summarization arrives when conversations get long enough to need it, which the p
 alone will not produce.
 
 `prompt_version_id` is stamped on every assistant message, so any answer can be traced to
-the exact prompt text that produced it. That is what makes Phase 5's evaluation possible.
+the exact prompt text that produced it. That is what makes Phase 6's evaluation possible.
 
 ---
 

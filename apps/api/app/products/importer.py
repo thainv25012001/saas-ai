@@ -15,17 +15,22 @@ already built them:
   see that module's docstring for the three states) go to `embed_and_store`.
   A re-import whose content did not change re-embeds nothing.
 
-**One arq job, not two.** The brief's own wording -- "the arq worker does
-the parsing, validation, upsert and embedding" -- already names one job;
-splitting parse+upsert and embed into two separately-queued jobs would add
-an ordering dependency (the embed job must not start before the upsert job
-commits) for no benefit, since `docs/PHASE-5.md` §5/§8 already treat
-"metadata written, embedding not yet recomputed" as a normal, expected
-transient state -- which is exactly what a crash between this job's own
-upsert-commit and its own embed-commit produces, no second job required to
-explain it. A future reconciliation job (`needs_reembedding_clause`) is
-what would pick up rows left in that state, whether this job crashed
-mid-way or was never run again for some other reason.
+**Two phases in one arq job: product data first, embedding afterwards
+(final review I3).** Phase 1 upserts every chunk, each committed on its
+own, with no embedding provider involved. Phase 2 then embeds the rows
+phase 1 reported as needing it, in separate transactions. The split is
+what keeps an embedding outage from costing the customer their prices and
+stock: `docs/PHASE-5.md` §5/§8 treat "metadata written, embedding not yet
+recomputed" as a normal state, search serves unembedded rows through
+filters and full text, and the dashboard badges them "Not yet searchable
+by meaning". So when the provider fails, phase 2 stops (it does not keep
+calling a provider that is down), leaves the remaining rows unembedded,
+and records a warning on the import -- the import still completes with
+every valid row in the table. Re-importing the file retries the embedding,
+because an unembedded row still answers `needs_reembedding`. One job, not
+two queued jobs: a second job would add an ordering dependency (it must
+not start before the upserts commit) for nothing phase 2 cannot already
+do here.
 
 **Per-row validation, chunked writes, no giant single transaction and no
 one-row-per-transaction either.** Every row is validated independently in
@@ -35,8 +40,7 @@ being considered at all -- this is what makes "batch-level success"
 possible in the first place, not a database-level retry of anything.
 Valid rows are then written in chunks of `_IMPORT_CHUNK_SIZE`, each chunk
 its own `ProductService.upsert_many` call (one INSERT ... ON CONFLICT
-statement) followed by embedding whatever in that chunk needs it, committed
-together in one transaction per chunk. A transaction per row would turn a
+statement) in its own transaction. A transaction per row would turn a
 4,000-row import into 4,000+ round trips for no isolation benefit --
 `upsert_many` already validated every row in Python, so the only thing left
 that can fail per-chunk is a genuine database error (a connection blip, a
@@ -59,6 +63,7 @@ from typing import Any
 
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -66,8 +71,12 @@ from app.core.errors import AppError, NotFoundError, format_validation_errors
 from app.core.ids import uuid7
 from app.core.logging import get_logger
 from app.core.tenancy import TenantContext, tenant_session
-from app.db.models import ProductImport, ProductImportStatus
-from app.products.embedding import embed_and_store, needs_reembedding
+from app.db.models import Product, ProductImport, ProductImportStatus
+from app.products.embedding import (
+    embed_and_store,
+    needs_reembedding,
+    needs_reembedding_clause,
+)
 from app.products.schemas import ProductInput
 from app.products.service import ProductService
 from app.rag.ingest import bounded_error_message
@@ -113,19 +122,44 @@ _EXTENSION_MIME_TYPES: dict[str, str] = {
     ".json": "application/json",
 }
 
+# Types browsers and operating systems report for a file that is really a
+# `.csv` (final review I4). Chromium and Firefox on Windows take `.csv`'s
+# type from the registry, which is `application/vnd.ms-excel` whenever Excel
+# is installed -- the most common source of a customer's catalogue -- and
+# other platforms report `text/plain` or one of the older CSV spellings.
+# For these, and only when the filename ends in `.csv`, the extension is
+# authoritative. Anything else reported is still believed over the
+# extension, as before.
+_CSV_ALIAS_MIME_TYPES: frozenset[str] = frozenset(
+    {
+        "application/vnd.ms-excel",
+        "text/plain",
+        "text/x-csv",
+        "application/csv",
+        "application/x-csv",
+        "text/comma-separated-values",
+    }
+)
+
 
 def resolve_import_mime_type(reported: str | None, filename: str | None) -> str:
     """What to treat this upload as -- see `resolve_mime_type`'s docstring
     in app/rag/extract.py for why the reported type wins whenever it is
     anything other than empty/octet-stream, and the extension is only ever
-    a fallback for the browsers that report nothing useful."""
+    a fallback for the browsers that report nothing useful. The one
+    exception is `_CSV_ALIAS_MIME_TYPES` on a `.csv` file. MIME parameters
+    (`text/csv; charset=utf-8`) are stripped before any comparison."""
     reported = reported or ""
-    if reported.lower() not in _GENERIC_MIME_TYPES:
-        return reported
-    if not filename:
-        return reported
-    _, _, suffix = filename.rpartition(".")
-    return _EXTENSION_MIME_TYPES.get(f".{suffix.lower()}", reported)
+    base = reported.split(";", 1)[0].strip().lower()
+    suffix_type: str | None = None
+    if filename:
+        _, _, suffix = filename.rpartition(".")
+        suffix_type = _EXTENSION_MIME_TYPES.get(f".{suffix.lower()}")
+    if base in _GENERIC_MIME_TYPES:
+        return suffix_type or reported
+    if base in _CSV_ALIAS_MIME_TYPES and suffix_type == "text/csv":
+        return suffix_type
+    return base
 
 
 # ---------------------------------------------------------------------------
@@ -399,60 +433,70 @@ def _dedupe_by_external_id(rows: list[ParsedRow]) -> tuple[list[ParsedRow], list
 # the file rather than the whole thing.
 _IMPORT_CHUNK_SIZE = 500
 
+# Ceiling on `ProductImportService.list_imports`'s `limit` -- same
+# reasoning as `ProductService`'s own `_MAX_LIST_LIMIT`. Each record can
+# carry a per-row error list thousands long, so an unbounded page is a
+# large serialize, not just a large scan.
+_MAX_LIST_LIMIT = 100
 
-def _chunks(rows: list[ParsedRow], size: int) -> list[list[ParsedRow]]:
+
+def _chunks[T](rows: list[T], size: int) -> list[list[T]]:
     return [rows[index : index + size] for index in range(0, len(rows), size)]
 
 
-async def _write_chunk(
-    session: AsyncSession, tenant: TenantContext, chunk: list[ParsedRow]
-) -> None:
-    """Upsert one chunk and embed whatever in it actually needs a vector.
+async def _upsert_chunk(tenant: TenantContext, chunk: list[ParsedRow]) -> list[uuid.UUID]:
+    """Phase 1 for one chunk: upsert it in its own committed transaction and
+    return the ids of the rows that need a vector.
 
     `needs_reembedding` (app/products/embedding.py) is what keeps a
     re-import cheap: a row whose upsert changed nothing embeddable (a
     price-only sync riding along in the same file, or a genuinely identical
     re-import) comes back with its previous, still-current embedding and is
-    filtered out here before `embed_and_store` ever sees it -- no wasted
-    embedding call, no wasted write.
+    left out here, so phase 2 never embeds it. A row that is still
+    unembedded from an earlier import whose embedding failed comes back
+    with no hash and IS returned -- that is how re-importing retries it.
     """
-    results = await ProductService(session, tenant).upsert_many(
-        [parsed.product for parsed in chunk]
-    )
-    to_embed = [product for product in results if needs_reembedding(product)]
-    await embed_and_store(session, tenant, to_embed)
+    async with tenant_session(tenant) as session:
+        results = await ProductService(session, tenant).upsert_many(
+            [parsed.product for parsed in chunk]
+        )
+        return [product.id for product in results if needs_reembedding(product)]
 
 
-async def _write_rows_individually(
+async def _upsert_rows_individually(
     tenant: TenantContext, chunk: list[ParsedRow]
-) -> tuple[int, list[RowError]]:
-    """Fallback for a chunk whose batched `_write_chunk` call failed at the
-    database for a reason `ProductInput` did not catch -- re-run one row at
-    a time, each its own transaction, so the row(s) actually at fault are
-    the only ones reported failed.
+) -> tuple[list[uuid.UUID], int, list[RowError]]:
+    """Fallback for a chunk whose batched upsert failed at the database for
+    a reason `ProductInput` did not catch -- re-run one row at a time, each
+    its own transaction, so the row(s) actually at fault are the only ones
+    reported failed.
 
     This is what makes "one bad row does not abort the batch" hold for
     *any* database-level failure, not just the ones Python-level validation
     happens to anticipate today: convicting all 500 rows in a chunk for one
-    row's fault (the original behaviour) would be exactly the failure mode
-    the brief exists to prevent, just moved one layer down from where
-    per-row validation closes it. Deliberately only reached from the
-    chunk-level `except` in `run_import` -- a clean import never pays a
-    per-row round trip, only a chunk that has already failed once does.
+    row's fault would be exactly the failure mode the brief exists to
+    prevent, just moved one layer down from where per-row validation closes
+    it. Deliberately only reached from the chunk-level `except DBAPIError`
+    in `run_import` -- a clean import never pays a per-row round trip.
+
+    Catches `DBAPIError` only. No embedding provider is called in phase 1
+    any more, and anything else escaping an upsert is not one row's fault,
+    so it propagates and fails the import rather than being retried 500
+    times (final review I3: the old catch-all turned one provider outage
+    into a single-row provider call per row).
 
     If every row in the chunk fails identically (a connection outage, not
     one row's fault) this still produces the correct outcome: every row is
-    reported failed, each with its own accurate message, rather than
-    reported failed as a side effect of a chunk-mate's problem.
+    reported failed, each with its own accurate message.
     """
+    pending: list[uuid.UUID] = []
     succeeded = 0
     errors: list[RowError] = []
     for parsed in chunk:
         try:
-            async with tenant_session(tenant) as session:
-                await _write_chunk(session, tenant, [parsed])
+            pending.extend(await _upsert_chunk(tenant, [parsed]))
             succeeded += 1
-        except Exception as exc:
+        except DBAPIError as exc:
             errors.append(
                 RowError(
                     row=parsed.row,
@@ -460,7 +504,68 @@ async def _write_rows_individually(
                     message=bounded_error_message(exc),
                 )
             )
-    return succeeded, errors
+    return pending, succeeded, errors
+
+
+async def _embed_rows(tenant: TenantContext, product_ids: list[uuid.UUID]) -> None:
+    """Phase 2 for one batch: embed the rows phase 1 upserted, in their own
+    transaction.
+
+    Re-selected rather than reusing phase 1's ORM objects (whose session is
+    gone), with both tenancy layers: the explicit `organization_id`
+    predicate here, and RLS on the session. `needs_reembedding_clause`
+    re-checks each row, so a row something else embedded in between is
+    skipped. `FOR UPDATE` holds the rows until the vectors are written, so
+    an upsert that changes a row's text concurrently waits and then marks
+    the fresh vector stale against its new text, rather than this write
+    certifying old text as current after that upsert has landed.
+    """
+    async with tenant_session(tenant) as session:
+        result = await session.execute(
+            select(Product)
+            .where(
+                Product.organization_id == tenant.organization_id,
+                Product.id.in_(product_ids),
+                needs_reembedding_clause(),
+            )
+            .order_by(Product.id)
+            .with_for_update()
+        )
+        await embed_and_store(session, tenant, list(result.scalars().all()))
+
+
+async def _embed_imported_rows(
+    tenant: TenantContext, product_import_id: uuid.UUID, product_ids: list[uuid.UUID]
+) -> str | None:
+    """Phase 2: embed `product_ids` in batches of `_IMPORT_CHUNK_SIZE`.
+    Returns `None` when every batch was embedded, or a warning for the
+    import record when one failed.
+
+    Stops at the first failed batch: `embed_and_store` already retried it
+    (`embed_batched`), so the provider is down or throttling, and calling
+    it again for every remaining batch would only make that worse and eat
+    into the job's timeout. The rows already committed in phase 1 stay as
+    they are -- present, and simply not yet searchable by meaning.
+    """
+    for index, batch in enumerate(_chunks(product_ids, _IMPORT_CHUNK_SIZE)):
+        try:
+            await _embed_rows(tenant, batch)
+        except Exception as exc:
+            unembedded = len(product_ids) - index * _IMPORT_CHUNK_SIZE
+            logger.warning(
+                "product_import_embedding_failed",
+                product_import_id=str(product_import_id),
+                organization_id=str(tenant.organization_id),
+                unembedded_rows=unembedded,
+                error=bounded_error_message(exc),
+            )
+            return (
+                f"All valid rows were imported, but {unembedded} could not be embedded "
+                f"for search by meaning ({bounded_error_message(exc)}). They can still be "
+                "found by name, category and filters. Importing the file again retries "
+                "the embedding."
+            )
+    return None
 
 
 class ProductImportService:
@@ -498,6 +603,21 @@ class ProductImportService:
             raise NotFoundError("product import not found")
         return record
 
+    async def list_imports(self, *, limit: int = 20, offset: int = 0) -> list[ProductImport]:
+        """This organization's imports, newest first -- the dashboard's
+        import history. Clamped like `ProductService.list_products`; `id`
+        breaks `created_at` ties for a stable page order."""
+        limit = max(1, min(limit, _MAX_LIST_LIMIT))
+        offset = max(0, offset)
+        result = await self.session.execute(
+            select(ProductImport)
+            .where(ProductImport.organization_id == self.tenant.organization_id)
+            .order_by(ProductImport.created_at.desc(), ProductImport.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars().all())
+
     async def mark_processing(self, product_import_id: uuid.UUID) -> ProductImport:
         record = await self.get(product_import_id)
         record.status = ProductImportStatus.PROCESSING
@@ -512,13 +632,19 @@ class ProductImportService:
         succeeded_count: int,
         failed_count: int,
         errors: list[dict[str, Any]],
+        warning: str | None = None,
     ) -> ProductImport:
+        """`warning` lands in `error`: on a completed import it is a
+        non-fatal problem with the import as a whole (today, only phase 2's
+        embedding failure), not the whole-file failure it means on a
+        failed one."""
         record = await self.get(product_import_id)
         record.status = ProductImportStatus.COMPLETED
         record.total_rows = total_rows
         record.succeeded_count = succeeded_count
         record.failed_count = failed_count
         record.errors = errors
+        record.error = warning
         record.completed_at = datetime.now(UTC)
         await self.session.flush()
         return record
@@ -594,8 +720,10 @@ async def enqueue_product_import(product_import_id: uuid.UUID, organization_id: 
 async def run_import(
     tenant: TenantContext, product_import_id: uuid.UUID, data: bytes, mime_type: str
 ) -> ProductImport:
-    """Parse `data`, upsert every valid row in chunks, embed whatever needs
-    it, and record the outcome on `product_imports`.
+    """Parse `data`, upsert every valid row in chunks (phase 1), then embed
+    whatever needs it (phase 2), and record the outcome on
+    `product_imports`. An embedding failure in phase 2 does not fail the
+    import -- see `_embed_imported_rows` and the module docstring.
 
     Commit discipline mirrors `app/rag/ingest.py::ingest_document`, for the
     same reason: `status=processing` is committed through its own
@@ -610,8 +738,8 @@ async def run_import(
     control reaches here), so nothing below ever tries to keep using it.
 
     Each chunk gets its own `tenant_session` and its own try/except. A
-    chunk that fails is NOT simply reported as every one of its rows
-    failing: Python-level validation (`ProductInput`, including its
+    chunk that fails at the database is NOT simply reported as every one
+    of its rows failing: Python-level validation (`ProductInput`, including its
     `Numeric(12, 2)`-mirroring `price` constraint) catches the overwhelming
     majority of bad input before a chunk is ever built, but it cannot catch
     every way a write can fail at the database -- a constraint this module
@@ -620,7 +748,7 @@ async def run_import(
     tightly. Convicting all 500 rows in the chunk for one row's fault would
     be exactly the failure the brief exists to prevent, just moved one
     layer down from where the report first closed it. So a failing chunk is
-    re-run through `_write_rows_individually`, one row per transaction,
+    re-run through `_upsert_rows_individually`, one row per transaction,
     and only the row(s) that actually fail alone are reported failed --
     see that function's docstring. This fallback only runs on the error
     path: a clean import never pays a per-row round trip for it.
@@ -634,13 +762,14 @@ async def run_import(
         errors: list[RowError] = [*parse_result.errors, *duplicate_errors]
         succeeded = 0
         failed = len(errors)
+        pending_embedding: list[uuid.UUID] = []
 
+        # Phase 1: product data, committed chunk by chunk.
         for chunk in _chunks(deduped_rows, _IMPORT_CHUNK_SIZE):
             try:
-                async with tenant_session(tenant) as session:
-                    await _write_chunk(session, tenant, chunk)
+                pending_embedding.extend(await _upsert_chunk(tenant, chunk))
                 succeeded += len(chunk)
-            except Exception as exc:
+            except DBAPIError as exc:
                 logger.warning(
                     "product_import_chunk_failed_retrying_row_by_row",
                     product_import_id=str(product_import_id),
@@ -648,10 +777,16 @@ async def run_import(
                     rows=len(chunk),
                     error=bounded_error_message(exc),
                 )
-                row_succeeded, row_errors = await _write_rows_individually(tenant, chunk)
+                row_pending, row_succeeded, row_errors = await _upsert_rows_individually(
+                    tenant, chunk
+                )
+                pending_embedding.extend(row_pending)
                 succeeded += row_succeeded
                 errors.extend(row_errors)
                 failed += len(row_errors)
+
+        # Phase 2: vectors for whatever phase 1 said needs one.
+        warning = await _embed_imported_rows(tenant, product_import_id, pending_embedding)
     except asyncio.CancelledError:
         async with tenant_session(tenant) as session:
             await ProductImportService(session, tenant).mark_failed(
@@ -674,4 +809,5 @@ async def run_import(
             succeeded_count=succeeded,
             failed_count=failed,
             errors=[error.to_dict() for error in errors],
+            warning=warning,
         )

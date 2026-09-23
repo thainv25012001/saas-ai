@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useMutation, useQuery } from "urql";
 import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
@@ -13,23 +13,8 @@ import { API_URL, type ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { retryDocument, uploadDocument, validateDocumentFile } from "@/lib/documents";
 import { useDocumentPolling } from "@/lib/use-document-polling";
+import { useTabHidden } from "@/lib/use-tab-hidden";
 import { firstGraphQLError } from "@/lib/graphql-errors";
-
-/** Tracks page visibility so the poll effect can stop while no one is
- * looking at this tab -- see `shouldPollDocuments`. Kept as its own hook
- * (rather than inlined) so the effect below only has to reason about one
- * boolean, not the listener wiring. */
-function useTabHidden(): boolean {
-  const [hidden, setHidden] = useState(() => typeof document !== "undefined" && document.hidden);
-  useEffect(() => {
-    function onVisibilityChange() {
-      setHidden(document.hidden);
-    }
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
-  }, []);
-  return hidden;
-}
 
 export default function KnowledgePage() {
   const { user, accessToken, setAccessToken, loading } = useAuth();

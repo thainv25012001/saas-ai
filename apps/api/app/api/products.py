@@ -130,7 +130,10 @@ async def import_products(
             )
             raise UnsupportedImportType(f"unsupported import type '{mime_type}'")
 
-        filename = upload.filename
+        # `product_imports.filename` is `String(255)`; a longer upload name
+        # would fail the INSERT with a 500 after the bytes were read. Cut to
+        # fit, the way `upload_document` cuts a document title.
+        filename = upload.filename[:255] if upload.filename else upload.filename
 
     async with tenant_session(tenant) as session:
         record = await ProductImportService(session, tenant).create(

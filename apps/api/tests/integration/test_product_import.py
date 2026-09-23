@@ -563,3 +563,200 @@ async def test_layer_1_predicate_holds_even_when_rls_is_bypassed(api_client, cle
     async with tenant_session(tenant_a) as session:
         still_there = await ProductImportService(session, tenant_a).get(import_id)
     assert still_there.id == import_id
+
+
+# ---------------------------------------------------------------------------
+# 6. Final review I3: product data lands even when the embedding provider is
+# down. Phase 1 (upserts) commits first; phase 2 (embedding) failing leaves
+# the rows present and unembedded, and says so, instead of rolling back.
+# ---------------------------------------------------------------------------
+
+
+class _DownProvider:
+    name = "down"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        self.calls += 1
+        raise RuntimeError("embedding provider unavailable (429)")
+
+
+def _no_backoff(monkeypatch) -> int:
+    settings = embedding_module.get_settings().model_copy(
+        update={"embedding_retry_backoff_seconds": 0.0}
+    )
+    monkeypatch.setattr(embedding_module, "get_settings", lambda: settings)
+    return settings.embedding_max_retries
+
+
+async def test_an_embedding_outage_still_imports_every_row_unembedded(
+    api_client, clean_users, queue, monkeypatch
+):
+    from structlog.testing import capture_logs
+
+    from app.products import importer as importer_module
+
+    max_retries = _no_backoff(monkeypatch)
+    provider = _DownProvider()
+    monkeypatch.setattr(embedding_module, "get_embedding_provider", lambda: provider)
+    # Two chunks (and so two phase-2 batches) for three rows: proves phase 2
+    # stops at the first failed batch rather than calling a down provider
+    # again for every remaining one.
+    monkeypatch.setattr(importer_module, "_IMPORT_CHUNK_SIZE", 2)
+
+    token = await _register(api_client, "impdown@example.com", "Ada Motors Import Down")
+    org_id = await _organization_id(api_client, token)
+    upload = await _upload(api_client, token, content=_VALID_CSV)
+    import_id = uuid.UUID(upload.json()["id"])
+
+    with capture_logs() as entries:
+        await _run_import(org_id, import_id)
+
+    body = (await api_client.get(f"{IMPORT_URL}/{import_id}", headers=_auth(token))).json()
+    assert body["status"] == "completed"
+    assert body["total_rows"] == 3
+    assert body["succeeded_count"] == 3
+    assert body["failed_count"] == 0
+    assert body["errors"] == []
+    # The import record says embedding failed, and how to retry it.
+    assert body["error"] is not None
+    assert "3 could not be embedded" in body["error"]
+    assert "Importing the file again retries" in body["error"]
+
+    # One batch, retried `embedding_max_retries` times, then phase 2 stops:
+    # not one call per row (the old catch-all fallback's fan-out), and not
+    # a second batch against a provider that is already down.
+    assert provider.calls == max_retries
+
+    failures = [e for e in entries if e["event"] == "product_import_embedding_failed"]
+    assert len(failures) == 1
+    assert failures[0]["unembedded_rows"] == 3
+
+    products = await _products_for(org_id)
+    assert {p.external_id for p in products} == {"sku-1", "sku-2", "sku-3"}
+    assert {str(p.price) for p in products} == {"32999.00", "24999.00", "28999.00"}
+    for product in products:
+        assert product.embedding is None
+        assert product.embedding_source_hash is None
+
+
+async def test_reimporting_after_an_embedding_outage_embeds_the_rows(
+    api_client, clean_users, queue, monkeypatch
+):
+    """An unembedded row still answers `needs_reembedding`, so re-importing
+    the same (unchanged) file once the provider is back embeds it -- the
+    retry path the warning promises."""
+    _no_backoff(monkeypatch)
+    real_get_provider = embedding_module.get_embedding_provider
+    monkeypatch.setattr(embedding_module, "get_embedding_provider", lambda: _DownProvider())
+
+    token = await _register(api_client, "impretry@example.com", "Ada Motors Import Retry")
+    org_id = await _organization_id(api_client, token)
+    first = await _upload(api_client, token, content=_VALID_CSV)
+    await _run_import(org_id, uuid.UUID(first.json()["id"]))
+    assert all(p.embedding is None for p in await _products_for(org_id))
+
+    monkeypatch.setattr(embedding_module, "get_embedding_provider", real_get_provider)
+    second = await _upload(api_client, token, content=_VALID_CSV)
+    second_id = uuid.UUID(second.json()["id"])
+    await _run_import(org_id, second_id)
+
+    body = (await api_client.get(f"{IMPORT_URL}/{second_id}", headers=_auth(token))).json()
+    assert body["status"] == "completed"
+    assert body["error"] is None
+    for product in await _products_for(org_id):
+        assert product.embedding is not None
+        assert product.embedding_model == "hashing"
+        assert product.embedding_source_hash is not None
+        assert product.embedding_stale is False
+
+
+async def test_a_db_error_row_is_isolated_and_its_chunk_mates_are_still_embedded(
+    api_client, clean_users, queue
+):
+    """The per-row fallback (DB errors only) feeds phase 2 too: the rows
+    that survived it are embedded, not just present."""
+    csv_with_a_db_level_bad_row = (
+        b"external_id,name,stock_quantity\n"
+        b"sku-1,Camry,10\n"
+        b"sku-2,Corolla,99999999999999\n"
+        b"sku-3,RAV4,20\n"
+    )
+    token = await _register(api_client, "impdbembed@example.com", "Ada Motors Import DbEmbed")
+    org_id = await _organization_id(api_client, token)
+    upload = await _upload(api_client, token, content=csv_with_a_db_level_bad_row)
+    import_id = uuid.UUID(upload.json()["id"])
+
+    await _run_import(org_id, import_id)
+
+    body = (await api_client.get(f"{IMPORT_URL}/{import_id}", headers=_auth(token))).json()
+    assert body["status"] == "completed"
+    assert body["error"] is None
+    assert body["succeeded_count"] == 2
+    [error] = body["errors"]
+    assert error["external_id"] == "sku-2"
+    products = await _products_for(org_id)
+    assert {p.external_id for p in products} == {"sku-1", "sku-3"}
+    assert all(p.embedding is not None for p in products)
+
+
+async def test_a_non_database_error_in_phase_1_fails_the_import_instead_of_a_row_by_row_retry(
+    api_client, clean_users, queue, monkeypatch
+):
+    """The per-row fallback catches `DBAPIError` only: anything else is not
+    one row's fault, so it fails the import once rather than being retried
+    for every row."""
+    from app.products import importer as importer_module
+
+    calls = {"n": 0}
+
+    async def _boom(self, rows):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        raise RuntimeError("not a database error")
+
+    monkeypatch.setattr(importer_module.ProductService, "upsert_many", _boom)
+
+    token = await _register(api_client, "impnondb@example.com", "Ada Motors Import NonDb")
+    org_id = await _organization_id(api_client, token)
+    upload = await _upload(api_client, token, content=_VALID_CSV)
+    import_id = uuid.UUID(upload.json()["id"])
+
+    with pytest.raises(RuntimeError):
+        await _run_import(org_id, import_id)
+
+    body = (await api_client.get(f"{IMPORT_URL}/{import_id}", headers=_auth(token))).json()
+    assert body["status"] == "failed"
+    assert calls["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 7. The door: Excel-on-Windows CSVs (final review I4) and over-long
+# filenames (final review M4).
+# ---------------------------------------------------------------------------
+
+
+async def test_a_csv_reported_as_vnd_ms_excel_is_accepted_and_imports(
+    api_client, clean_users, queue
+):
+    token = await _register(api_client, "impexcel@example.com", "Ada Motors Import Excel")
+    org_id = await _organization_id(api_client, token)
+    response = await _upload(
+        api_client, token, content=_VALID_CSV, content_type="application/vnd.ms-excel"
+    )
+    assert response.status_code == 202, response.text
+    assert response.json()["mime_type"] == "text/csv"
+
+    await _run_import(org_id, uuid.UUID(response.json()["id"]))
+    products = await _products_for(org_id)
+    assert {p.external_id for p in products} == {"sku-1", "sku-2", "sku-3"}
+
+
+async def test_an_over_long_filename_is_truncated_not_a_500(api_client, clean_users, queue):
+    token = await _register(api_client, "implongname@example.com", "Ada Motors Import LongName")
+    long_name = "c" * 400 + ".csv"
+    response = await _upload(api_client, token, content=_VALID_CSV, filename=long_name)
+    assert response.status_code == 202, response.text
+    assert response.json()["filename"] == long_name[:255]
+    assert len(queue.calls) == 1

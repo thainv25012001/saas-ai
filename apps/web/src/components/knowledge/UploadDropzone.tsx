@@ -6,18 +6,33 @@ import { focusRing, cn } from "@/components/ui/cn";
 import { Icon } from "@/components/ui/icons";
 import { LoadingState } from "@/components/ui/Spinner";
 import type { ApiError } from "@/lib/api";
-import {
-  ACCEPTED_DOCUMENT_EXTENSIONS,
-  ACCEPTED_DOCUMENT_TYPES,
-  formatByteLimit,
-  MAX_UPLOAD_BYTES,
-} from "@/lib/documents";
+import { ACCEPTED_DOCUMENT_TYPES, formatByteLimit, MAX_UPLOAD_BYTES } from "@/lib/documents";
 
 export type UploadDropzoneProps = {
   uploading?: boolean;
   error?: ApiError | null;
   onUpload: (file: File) => void;
+  /** Mime type -> extension. Defaults to the document types; the Products
+   * page passes the catalogue import's `.csv`/`.json`. */
+  acceptedTypes?: Record<string, string>;
+  /** The usable budget to state up front. */
+  maxBytes?: number;
+  /** The hidden file input's accessible name. */
+  pickLabel?: string;
+  /** The line under the zone. Defaults to the Knowledge page's note on how
+   * matching works; another page says what its own files must contain. */
+  note?: React.ReactNode;
 };
+
+// Requirement 3 (Phase 3): the default embedder's honesty belongs where the
+// user uploads, not only in docs/PHASE-3.md §2.3. Framed as a fact about
+// matching, not a warning -- nothing here is broken.
+const LEXICAL_NOTE = (
+  <>
+    Matching today is by shared wording, not meaning — “car” and “automobile” will not match each
+    other yet.
+  </>
+);
 
 /**
  * Drag-and-drop plus a plain file picker, both funnelling into the same
@@ -31,7 +46,15 @@ export type UploadDropzoneProps = {
  * fetching/error state, this owns the pointer/keyboard interaction. Same
  * split as `CreateAgentForm`.
  */
-export function UploadDropzone({ uploading = false, error = null, onUpload }: UploadDropzoneProps) {
+export function UploadDropzone({
+  uploading = false,
+  error = null,
+  onUpload,
+  acceptedTypes = ACCEPTED_DOCUMENT_TYPES,
+  maxBytes = MAX_UPLOAD_BYTES,
+  pickLabel = "Choose a document to upload",
+  note = LEXICAL_NOTE,
+}: UploadDropzoneProps) {
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -82,7 +105,7 @@ export function UploadDropzone({ uploading = false, error = null, onUpload }: Up
             </p>
             {/* Requirement 4: stated up front, not learned from a rejection. */}
             <p className="text-xs text-ink-subtle">
-              Accepts {ACCEPTED_DOCUMENT_EXTENSIONS.join(", ")} — up to {formatByteLimit(MAX_UPLOAD_BYTES)}.
+              Accepts {Object.values(acceptedTypes).join(", ")} — up to {formatByteLimit(maxBytes)}.
             </p>
           </>
         )}
@@ -90,8 +113,11 @@ export function UploadDropzone({ uploading = false, error = null, onUpload }: Up
           ref={inputRef}
           type="file"
           className="sr-only"
-          aria-label="Choose a document to upload"
-          accept={Object.keys(ACCEPTED_DOCUMENT_TYPES).join(",")}
+          aria-label={pickLabel}
+          // Types and extensions both: a browser filters by whichever it
+          // recognises, and `.csv` on a machine with no mime association
+          // is only matched by its extension.
+          accept={[...Object.keys(acceptedTypes), ...Object.values(acceptedTypes)].join(",")}
           disabled={uploading}
           onChange={(event) => {
             pick(event.target.files?.[0]);
@@ -104,13 +130,7 @@ export function UploadDropzone({ uploading = false, error = null, onUpload }: Up
         />
       </div>
 
-      {/* Requirement 3: the default embedder's honesty belongs where the
-        * user uploads, not only in docs/PHASE-3.md §2.3. Framed as a fact
-        * about matching, not a warning -- nothing here is broken. */}
-      <p className="text-xs text-ink-subtle">
-        Matching today is by shared wording, not meaning — “car” and “automobile” will not match
-        each other yet.
-      </p>
+      <p className="text-xs text-ink-subtle">{note}</p>
     </div>
   );
 }

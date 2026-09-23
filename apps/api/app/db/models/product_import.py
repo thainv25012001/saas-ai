@@ -62,9 +62,12 @@ class ProductImport(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
     # is row 2 -- the number a human looking at their own spreadsheet would
     # point at) -- see app/products/importer.py::RowError.
     errors: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
-    # A whole-file failure -- bad top-level JSON, a CSV missing a required
-    # column, or an unhandled exception -- populated instead of `errors`
-    # when there was never a row to report on individually.
-    # `Document.error`'s counterpart.
+    # On a FAILED import: the whole-file failure -- bad top-level JSON, a
+    # CSV missing a required column, or an unhandled exception -- populated
+    # instead of `errors` when there was never a row to report on
+    # individually (`Document.error`'s counterpart). On a COMPLETED import:
+    # a non-fatal warning about the import as a whole -- today only that
+    # the rows landed but the embedding provider failed, so some are not
+    # yet searchable by meaning (app/products/importer.py's phase 2).
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

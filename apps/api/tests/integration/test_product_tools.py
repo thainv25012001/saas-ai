@@ -36,7 +36,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.service import AgentService
-from app.chat.service import ChatMessageStart, ChatService, ChatToolCallEnd
+from app.chat.service import ChatError, ChatMessageStart, ChatService, ChatToolCallEnd
 from app.core.tenancy import TenantContext, tenant_session
 from app.db.models import MessageCitation
 from app.embeddings.hashing import HashingEmbedder
@@ -49,7 +49,8 @@ from app.tools.base import ToolContext
 from app.tools.products import (
     _AMBIGUOUS_MATCH_QUALITY_NOTE,
     _FLAT_BAND_NOTE,
-    _NO_RESULTS_MESSAGE,
+    _NO_RESULTS_FILTERED_GUIDANCE,
+    _NO_RESULTS_HEADLINE,
     _NOT_FOUND_MESSAGE,
     _SHARP_LEADER_NOTE,
     GetProductArgs,
@@ -99,6 +100,7 @@ async def _seed_product(
     category: str | None = "sedan",
     attributes: dict[str, Any] | None = None,
     embed: bool = True,
+    is_active: bool = True,
 ) -> uuid.UUID:
     """A product with a real `HashingEmbedder` embedding of its own
     `embeddable_text` -- the exact text a real import would embed -- so a
@@ -116,6 +118,7 @@ async def _seed_product(
         attributes=attrs,
         embedding=embedding,
         embedding_model="hashing" if embed else None,
+        is_active=is_active,
     )
     product = await ProductService(session, tenant).create(data)
     return product.id
@@ -245,8 +248,8 @@ async def test_search_products_with_no_filter_matches_returns_an_explicit_messag
 
     tool_end = next(e for e in events if isinstance(e, ChatToolCallEnd))
     assert tool_end.results[0].is_error is False
-    assert tool_end.results[0].result == _NO_RESULTS_MESSAGE
-    assert tool_end.results[0].result != ""
+    assert tool_end.results[0].result.startswith(_NO_RESULTS_HEADLINE)
+    assert "min_price=1000000.00" in tool_end.results[0].result
 
 
 async def test_direct_call_no_matches_is_an_explicit_message_not_an_empty_list(tenant_a):
@@ -257,7 +260,8 @@ async def test_direct_call_no_matches_is_an_explicit_message_not_an_empty_list(t
             SearchProductsArgs(min_price=Decimal("1000000.00")), _ctx(tenant_a)
         )
     assert result.is_error is False
-    assert result.content == _NO_RESULTS_MESSAGE
+    assert result.content.startswith(_NO_RESULTS_HEADLINE)
+    assert _NO_RESULTS_FILTERED_GUIDANCE in result.content
     assert result.citations == []
     assert result.data is None
 
@@ -581,3 +585,183 @@ async def test_cross_tenant_search_never_returns_another_orgs_product(tenant_a, 
     ids = {row["product_id"] for row in result.data["products"]}
     assert str(own_id) in ids  # the query genuinely matched org A's own product
     assert str(foreign_id) not in ids
+
+
+# ---------------------------------------------------------------------------
+# Final review I6: a missed filter guess is not "nothing is sold". Category
+# matching is case-insensitive, and an empty result echoes the filters and
+# lists the organization's real categories so the model can retry.
+# ---------------------------------------------------------------------------
+
+
+async def test_category_filter_is_case_insensitive(tenant_a):
+    async with tenant_session(tenant_a) as session:
+        product_id = await _seed_product(session, tenant_a, category="SUV")
+        tool = SearchProductsTool(session, embedder=_embedder)
+        result = await tool.execute(SearchProductsArgs(category="suv"), _ctx(tenant_a))
+    assert result.is_error is False
+    assert result.data is not None
+    assert [row["product_id"] for row in result.data["products"]] == [str(product_id)]
+
+
+async def test_category_filter_is_still_an_exact_name_not_a_prefix(tenant_a):
+    """Case-insensitive, not fuzzy: "SUV" must not match "SUVs" -- the
+    filter stays an AND constraint (docs/PHASE-5.md §6), and the
+    no-results message is what tells the model the real name."""
+    async with tenant_session(tenant_a) as session:
+        await _seed_product(session, tenant_a, category="SUVs")
+        tool = SearchProductsTool(session, embedder=_embedder)
+        result = await tool.execute(SearchProductsArgs(category="SUV"), _ctx(tenant_a))
+    assert result.data is None
+    assert result.content.startswith(_NO_RESULTS_HEADLINE)
+
+
+async def test_empty_result_echoes_filters_and_lists_only_this_orgs_categories(tenant_a, tenant_b):
+    async with tenant_session(tenant_b) as session:
+        await _seed_product(
+            session, tenant_b, external_id="sku-b", category="Secret Yachts", slug="yacht"
+        )
+    async with tenant_session(tenant_a) as session:
+        await _seed_product(session, tenant_a, external_id="sku-1", category="SUVs")
+        await _seed_product(
+            session, tenant_a, external_id="sku-2", category="Sedans", slug="aurora-2"
+        )
+        # An inactive product's category can never match a search, so it
+        # is not offered as one to retry with.
+        await _seed_product(
+            session,
+            tenant_a,
+            external_id="sku-3",
+            category="Retired Line",
+            slug="aurora-3",
+            is_active=False,
+        )
+        tool = SearchProductsTool(session, embedder=_embedder)
+        result = await tool.execute(
+            SearchProductsArgs(category="SUV", max_price=Decimal("30000"), attributes={"seats": 7}),
+            _ctx(tenant_a),
+        )
+
+    assert result.is_error is False
+    assert result.data is None
+    assert result.citations == []
+    content = result.content
+    assert content.startswith(_NO_RESULTS_HEADLINE)
+    assert 'category="SUV"' in content
+    assert "max_price=30000" in content
+    assert 'attributes={"seats": 7}' in content
+    assert 'Categories in this catalogue: "Sedans", "SUVs".' in content
+    assert "Secret Yachts" not in content
+    assert "Retired Line" not in content
+    assert _NO_RESULTS_FILTERED_GUIDANCE in content
+
+
+async def test_empty_result_category_list_is_bounded(tenant_a):
+    async with tenant_session(tenant_a) as session:
+        for index in range(30):
+            await _seed_product(
+                session,
+                tenant_a,
+                external_id=f"sku-{index}",
+                slug=f"aurora-{index}",
+                category=f"Category {index:02d}",
+                embed=False,
+            )
+        tool = SearchProductsTool(session, embedder=_embedder)
+        result = await tool.execute(SearchProductsArgs(category="Missing"), _ctx(tenant_a))
+
+    assert '"Category 24"' in result.content
+    assert '"Category 25"' not in result.content
+    assert "(and more)" in result.content
+
+
+# ---------------------------------------------------------------------------
+# Final review M3: a blank query is no query.
+# ---------------------------------------------------------------------------
+
+
+class _RefusingEmbedder(HashingEmbedder):
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        raise AssertionError(f"a blank query must not be embedded: {texts!r}")
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\n\t"])
+async def test_blank_query_is_treated_as_a_filter_only_browse(tenant_a, blank):
+    async with tenant_session(tenant_a) as session:
+        await _seed_product(session, tenant_a)
+        tool = SearchProductsTool(session, embedder=_RefusingEmbedder())
+        result = await tool.execute(SearchProductsArgs(query=blank), _ctx(tenant_a))
+
+    assert result.is_error is False
+    assert result.data is not None
+    assert len(result.data["products"]) == 1
+    for note in (_AMBIGUOUS_MATCH_QUALITY_NOTE, _SHARP_LEADER_NOTE, _FLAT_BAND_NOTE):
+        assert note not in result.content
+    assert "Match signal" not in result.content
+
+
+# ---------------------------------------------------------------------------
+# Final review M5: get_product never presents an inactive product.
+# ---------------------------------------------------------------------------
+
+
+async def test_get_product_for_an_inactive_product_is_the_not_found_result(tenant_a):
+    async with tenant_session(tenant_a) as session:
+        inactive_id = await _seed_product(
+            session, tenant_a, name="Discontinued Coupe", is_active=False
+        )
+        tool = GetProductTool(session)
+        result = await tool.execute(GetProductArgs(product_id=inactive_id), _ctx(tenant_a))
+
+    assert result.is_error is True
+    assert result.content == _NOT_FOUND_MESSAGE
+    assert "Discontinued Coupe" not in result.content
+    assert result.citations == []
+    assert result.data is None
+
+
+# ---------------------------------------------------------------------------
+# Final review I2: a product name longer than message_citations'
+# String(255) document_title must not fail the chat turn.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tool_name", ["search_products", "get_product"])
+async def test_a_product_name_over_255_chars_does_not_fail_the_chat_turn(tenant_a, tool_name):
+    long_name = "Aurora Sedan " + "x" * 400
+    assert len(long_name) > 255
+    async with tenant_session(tenant_a) as session:
+        product_id = await _seed_product(session, tenant_a, name=long_name)
+        agent = await _agent(session, tenant_a)
+        agent_id = agent.id
+
+    tool_input: dict[str, Any] = (
+        {"query": "hybrid sedan"}
+        if tool_name == "search_products"
+        else {"product_id": str(product_id)}
+    )
+    provider = FakeProvider(
+        turns=[
+            [FakeToolCall(id="call_1", name=tool_name, input=tool_input)],
+            "Here it is.",
+        ]
+    )
+    async with tenant_session(tenant_a) as session:
+        service = ChatService(session, tenant_a, provider_override=provider)
+        events = [event async for event in service.send(agent_id, "tell me about the sedan")]
+
+    assert not [e for e in events if isinstance(e, ChatError)], events
+    message_id = next(e.message_id for e in events if isinstance(e, ChatMessageStart))
+    async with tenant_session(tenant_a) as session:
+        rows = (
+            (
+                await session.execute(
+                    select(MessageCitation).where(MessageCitation.message_id == message_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].product_id == product_id
+    assert rows[0].document_title == long_name[:255]

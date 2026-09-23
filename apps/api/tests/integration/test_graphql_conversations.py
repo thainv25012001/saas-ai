@@ -549,3 +549,63 @@ async def test_a_conversation_from_another_organization_has_no_messages(api_clie
     )
 
     assert response.json()["data"]["conversation"] is None
+
+
+async def test_a_product_citation_exposes_its_product_id(api_client):
+    """Final review I1: a product source must survive a reload. The live SSE
+    event carries `product_id`; the history read must too, or a returning
+    user cannot tell a past answer was grounded in a product row."""
+    from app.db.models import MessageCitation
+    from app.products.schemas import ProductInput
+    from app.products.service import ProductService
+
+    token = await _register(api_client, "citation-product@example.com")
+    org_id = await _organization_id(api_client, token)
+    agent_id = await _agent(org_id)
+    conversation_id = await _conversation(org_id, agent_id)
+
+    tenant = _tenant(org_id)
+    async with tenant_session(tenant) as session:
+        product = await ProductService(session, tenant).create(
+            ProductInput(external_id="sku-1", name="Aurora Sedan", slug="aurora-sedan")
+        )
+        product_id = product.id
+        message = await ConversationService(session, tenant).append_message(
+            conversation_id, AppendMessageInput(role=MessageRole.ASSISTANT, content="$28,499")
+        )
+        session.add(
+            MessageCitation(
+                organization_id=org_id,
+                message_id=message.id,
+                chunk_id=None,
+                document_id=None,
+                product_id=product_id,
+                document_title="Aurora Sedan",
+                excerpt="28499.00 USD · in_stock",
+                rank=1,
+                score=0.0,
+            )
+        )
+
+    response = await graphql(
+        api_client,
+        """
+        query C($id: UUID!) {
+          conversation(id: $id) {
+            messages { citations { chunkId documentId productId documentTitle } }
+          }
+        }
+        """,
+        {"id": str(conversation_id)},
+        _auth(token),
+    )
+
+    body = response.json()
+    assert "errors" not in body, body
+    [citation] = body["data"]["conversation"]["messages"][0]["citations"]
+    assert citation == {
+        "chunkId": None,
+        "documentId": None,
+        "productId": str(product_id),
+        "documentTitle": "Aurora Sedan",
+    }

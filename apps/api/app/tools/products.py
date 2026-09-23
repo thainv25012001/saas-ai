@@ -215,6 +215,38 @@ _NO_RESULTS_MESSAGE = (
     "availability; tell the user nothing in the catalogue matches."
 )
 
+# The no-results message once filters were applied (final review I6). A
+# filter is the model's GUESS at the catalogue's vocabulary -- it cannot see
+# the organization's category names before it searches -- so "nothing
+# matched" can mean "the guess was spelled differently", not "nothing is
+# sold". Telling the model to deny having products on a missed guess would
+# be a fabricated negative stated as fact. So the message echoes what was
+# applied and lists the categories that exist, and invites a retry; the
+# filters themselves stay AND constraints (docs/PHASE-5.md §6) -- this only
+# changes what the model is told, never what matches.
+_NO_RESULTS_HEADLINE = "No products matched this search."
+_NO_RESULTS_FILTERED_GUIDANCE = (
+    "Every filter must match at once. If a filter value may not match the "
+    "catalogue's own vocabulary -- a category named differently from the ones "
+    "listed, or an attribute value stored as text rather than a number -- "
+    "retry with a corrected value. If the filters are right, do not invent a "
+    "product, price, or availability; tell the user nothing in the catalogue "
+    "matches them."
+)
+
+# Bounds on the category list the no-results message quotes: it reaches the
+# prompt, and a catalogue can carry any number of categories of up to 255
+# characters each.
+_MAX_LISTED_CATEGORIES = 25
+_MAX_CATEGORY_CHARS = 80
+
+# `message_citations.document_title` is `String(255)` (0007), while a
+# product name may be up to 500 characters (`ProductInput.name`). Truncated
+# when the citation is built, the way `api/documents.py` truncates a
+# document title -- an untruncated long name fails the INSERT and with it
+# the whole chat turn (final review I2).
+_CITATION_TITLE_MAX_CHARS = 255
+
 _NOT_FOUND_MESSAGE = "No product found with that id."
 
 # Added to `content` only for a ranked (query-driven) search -- a
@@ -451,7 +483,11 @@ class SearchProductsArgs(BaseModel):
         "pronouns against the conversation. Omit to browse by filters alone (e.g. "
         "'everything under £30,000' has no similarity query, only a price filter).",
     )
-    category: str | None = Field(default=None, description="Exact category to filter to.")
+    category: str | None = Field(
+        default=None,
+        description="Category to filter to (exact name, case-insensitive). If a search "
+        "finds nothing, the reply lists the catalogue's real categories.",
+    )
     min_price: Decimal | None = Field(
         default=None, description="Minimum price (inclusive), in the catalogue's own currency."
     )
@@ -546,12 +582,57 @@ def _match_data(match: ProductMatch) -> dict[str, Any]:
     }
 
 
+def _quote(value: str, max_chars: int) -> str:
+    clipped = value if len(value) <= max_chars else f"{value[:max_chars]}..."
+    return json.dumps(clipped, ensure_ascii=False)
+
+
+def _applied_filters(args: "SearchProductsArgs") -> list[str]:
+    applied: list[str] = []
+    if args.category is not None:
+        applied.append(f"category={_quote(args.category, _MAX_CATEGORY_CHARS)}")
+    if args.min_price is not None:
+        applied.append(f"min_price={args.min_price}")
+    if args.max_price is not None:
+        applied.append(f"max_price={args.max_price}")
+    if args.attributes:
+        applied.append(f"attributes={json.dumps(args.attributes, sort_keys=True, default=str)}")
+    return applied
+
+
+def _no_results_message(applied: list[str], categories: list[str]) -> str:
+    """See `_NO_RESULTS_HEADLINE`'s comment. `categories` is at most
+    `_MAX_LISTED_CATEGORIES + 1` long -- one extra row fetched only to tell
+    whether the list was cut short."""
+    if not applied and not categories:
+        return _NO_RESULTS_MESSAGE
+    lines = [_NO_RESULTS_HEADLINE]
+    if applied:
+        lines.append(f"Filters applied (all must match): {', '.join(applied)}.")
+    if categories:
+        listed = ", ".join(
+            _quote(category, _MAX_CATEGORY_CHARS)
+            for category in categories[:_MAX_LISTED_CATEGORIES]
+        )
+        more = " (and more)" if len(categories) > _MAX_LISTED_CATEGORIES else ""
+        lines.append(f"Categories in this catalogue: {listed}{more}.")
+    else:
+        lines.append("No product in this catalogue has a category.")
+    lines.append(
+        _NO_RESULTS_FILTERED_GUIDANCE
+        if applied
+        else "Do not invent a product, price, or availability; tell the user nothing "
+        "in the catalogue matches."
+    )
+    return "\n".join(lines)
+
+
 def _match_citation(match: ProductMatch, rank: int) -> CitationPayload:
     return CitationPayload(
         chunk_id=None,
         document_id=None,
         product_id=match.product_id,
-        document_title=match.name,
+        document_title=match.name[:_CITATION_TITLE_MAX_CHARS],
         rank=rank,
         score=match.score,
         excerpt=f"{_format_price(match.price, match.currency)} · {match.availability.value}",
@@ -586,7 +667,7 @@ def _product_citation(product: Product) -> CitationPayload:
         chunk_id=None,
         document_id=None,
         product_id=product.id,
-        document_title=product.name,
+        document_title=product.name[:_CITATION_TITLE_MAX_CHARS],
         rank=1,
         score=0.0,
         excerpt=f"{_format_price(product.price, product.currency)} · {product.availability.value}",
@@ -645,20 +726,34 @@ class SearchProductsTool(AgentTool):
         # savepoint exists verbatim: `self.session` is shared across every
         # tool call this turn makes, and a DB-level failure here must not
         # poison the rest of the turn's transaction.
+        # A blank query is no query (final review M3): nothing to rank by,
+        # so no match-quality note either -- the filters-only path.
+        query = args.query.strip() if args.query is not None else None
+        query = query or None
         async with self.session.begin_nested():
             matches = await ProductSearchService(self.session, tenant, self.embedder).search(
-                args.query,
+                query,
                 category=args.category,
                 min_price=args.min_price,
                 max_price=args.max_price,
                 attributes=args.attributes,
                 limit=limit,
             )
+            categories = (
+                []
+                if matches
+                # Tenant-scoped twice, like every product query: an explicit
+                # `organization_id` predicate inside `list_categories`, and
+                # RLS on `self.session`.
+                else await ProductService(self.session, tenant).list_categories(
+                    active_only=True, limit=_MAX_LISTED_CATEGORIES + 1
+                )
+            )
 
         if not matches:
-            return ToolResult(content=_NO_RESULTS_MESSAGE)
+            return ToolResult(content=_no_results_message(_applied_filters(args), categories))
 
-        ranked = args.query is not None
+        ranked = query is not None
         blocks = [
             _render_match(rank, match, ranked=ranked) for rank, match in enumerate(matches, start=1)
         ]
@@ -709,6 +804,16 @@ class GetProductTool(AgentTool):
             # foreign row from the underlying SELECT even if this explicit
             # `organization_id` predicate were ever removed; this is Layer 1
             # on top of it, not instead of it.
+            return ToolResult(content=_NOT_FOUND_MESSAGE, is_error=True)
+
+        if not product.is_active:
+            # Final review M5: `search_products` never surfaces an inactive
+            # product (`_Filters` pins `is_active = true`), so neither does
+            # this -- a model reusing an id from earlier in the conversation
+            # must not quote a product the organization no longer offers as
+            # if it were for sale. The same not-found result as a missing
+            # id: from the model's side, an inactive product is simply not
+            # in the catalogue it may sell from.
             return ToolResult(content=_NOT_FOUND_MESSAGE, is_error=True)
 
         return ToolResult(

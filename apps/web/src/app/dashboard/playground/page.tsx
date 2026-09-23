@@ -296,6 +296,7 @@ function PlaygroundContent() {
                 citations: event.citations.map((citation) => ({
                   chunkId: citation.chunk_id,
                   documentId: citation.document_id,
+                  productId: citation.product_id,
                   documentTitle: citation.document_title,
                   rank: citation.rank,
                   score: citation.score,

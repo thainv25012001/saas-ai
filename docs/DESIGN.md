@@ -248,6 +248,17 @@ The predicate lives apart from the effect (`shouldPollDocuments`) so it can be
 tested as a pure function, and the effect's callback is memoised so a re-render
 does not tear down and re-arm the interval.
 
+The Products page (Phase 5 Task 6) is the second consumer, polling its import
+records while one is queued or running. It does not copy the effect: the
+interval lives in `usePollWhile(active, onPoll)` in the same file, which
+`useDocumentPolling` itself calls, so the fake-timer tests above cover both
+pages. Each list brings only its own predicate (`shouldPollImports` in
+[`lib/product-status.ts`](../apps/web/src/lib/product-status.ts)), and
+`useTabHidden` moved to `lib/use-tab-hidden.ts` so neither page wires the
+visibility listener itself. What a settled import *changes* — the catalogue --
+is re-read when the set of settled imports changes, not on every tick, which
+also catches an import that finished before the first poll saw it running.
+
 ## Status as a tone
 
 A lifecycle column (`pending` → `processing` → `ready` | `failed`) becomes a
@@ -271,7 +282,26 @@ tone's *meaning* is local to what it is describing; only the four tones
 themselves, and the rule that a status becomes exactly one of them, are
 shared.
 
+A third, for products (Phase 5 Task 6):
+[`lib/product-status.ts`](../apps/web/src/lib/product-status.ts) holds three
+lookups. An import that completed with failed rows is `warn` with the count
+in its label (`Completed — 2 rows failed`), the same "terminal is not
+automatically good" rule as a ready document with no chunks. Availability
+maps `IN_STOCK` to `success`, `PREORDER` to `info`, `OUT_OF_STOCK` to `warn`
+(sellable again later, not broken) and `DISCONTINUED` to `neutral` (settled,
+needs nothing). A product's search-index state gets a label only when it is
+*not* indexed: the normal state earns no badge, so the exceptions are what a
+scan of the table picks out — and the table explains them once, in a line
+under it, rather than in a tooltip nobody hovers.
+
 ## Untrusted text, beyond citations
+
+(A citation can name a product rather than a document chunk: `search_products`
+and `get_product` cite the product row, with `document_title` carrying the
+product's name. `ChatMessage`'s Sources list prefixes such an entry with a
+muted "Product:" and keys every entry without assuming a chunk id exists —
+a product citation has none, and a stored citation can lose its ids to a
+deletion. The name is customer-supplied text under the same rule below.)
 
 Phase 3 established the rule for citations: `document_title` and `excerpt`
 are copied from an uploaded file with no server-side escaping, so rendering
@@ -292,6 +322,20 @@ be quoting a document or a visitor's own typed text:
   Same data, one hop further downstream: what `create_lead` captured is what
   the Leads page later lists.
 
+- **A product's own fields**
+  ([`components/products/ProductsTable.tsx`](../apps/web/src/components/products/ProductsTable.tsx)),
+  added in Phase 5 (Task 6) — the fourth source, and the most direct: no
+  model sits in between. A customer uploads a CSV and its `name`,
+  `external_id`, `description`, `category` and `attributes` are rendered
+  straight onto the page, as are an import's file name and the per-row
+  error messages that can quote a row
+  ([`ProductImports.tsx`](../apps/web/src/components/products/ProductImports.tsx)).
+  `attributes` is heterogeneous `jsonb` with both keys and values
+  customer-supplied, so the API flattens it to a list of `{key, value}`
+  *string* pairs (a non-string value arrives as its JSON text) and the table
+  renders each half as a text child of a `<dt>`/`<dd>` — the component never
+  walks an arbitrary object, and a key is never used as anything but text.
+
 The test shape this earns is the same one `ChatMessage.test.tsx` already
 used for citations: render a `<script>` payload in the untrusted field and
 assert `container.querySelector("script")` is `null` while
@@ -299,6 +343,52 @@ assert `container.querySelector("script")` is `null` while
 asserts the text is present would pass even if the component were rewritten
 around `dangerouslySetInnerHTML` — the query selector is what actually pins
 "never becomes markup".
+
+## Uploads
+
+[`components/knowledge/UploadDropzone.tsx`](../apps/web/src/components/knowledge/UploadDropzone.tsx)
+is the one drag-and-drop-plus-picker in the app. The Products page reuses it
+for catalogue imports by passing `acceptedTypes`, `maxBytes`, `pickLabel` and
+its own `note`, rather than growing a second zone. The rules it holds for
+every caller:
+
+- **State the accepted types and the limit before a file is picked**, as help
+  text on first render — never learned from a rejection.
+- **The stated limit is floored** (`formatByteLimit`) so every file at or
+  under the stated number actually passes. Imports and documents share one
+  budget (`MAX_UPLOAD_BYTES`: the server's `max_request_bytes` less headroom
+  for the multipart envelope), so there is one constant, not two.
+- **`accept` lists extensions as well as mime types.** A `.csv` or `.md` on a
+  machine with no registered association reports an empty type, and a
+  mime-only filter can hide it from the picker.
+- **The same checks run client-side first** (`validateDocumentFile`,
+  `validateImportFile`) so the honest path never waits on a 422 or 413 — the
+  server's checks remain the ones that count.
+
+An upload whose outcome arrives later (a worker parses and embeds) shows that
+outcome where the upload happened: the Products page lists recent imports
+under the zone with their status, counts and — because "4 rows failed" is
+not actionable — the failed rows themselves, by row number, SKU and reason.
+The API returns the first 50 by row number (`errors(limit:)`, capped at 200),
+and the list says "first 50 of N" when there are more.
+
+An import can also complete with a warning about the whole batch — today only
+that the rows landed but the embedding provider failed, so some are not yet
+searchable by meaning. That is an `Alert tone="warn"` on the import, beside
+its counts: a real, named outcome with a next step (import again), not a
+failure — the `danger` alert stays for a whole-file failure.
+
+The product list shows each row's **Last updated** time (`formatTimestamp`),
+in its own column after Availability. A stale catalogue answers confidently
+(`docs/PHASE-5.md` §8), and the date is how an owner spots one.
+
+## Pagination
+
+The Products list is the first that can outgrow a screen: a catalogue runs to
+thousands of rows. It pages with Previous/Next over `limit`/`offset`, asking
+for one row more than a page so whether a next page exists is known without
+a count query. Any change to the search or filters returns to the first page.
+Search is debounced (300 ms), so typing is not a request per letter.
 
 ## Tool calls in the transcript
 

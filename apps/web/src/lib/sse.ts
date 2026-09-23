@@ -28,9 +28,16 @@ export type ChatUsage = {
 };
 
 export type Citation = {
-  chunk_id: string;
-  document_id: string;
-  /** Untrusted: this is the uploaded document's own title, never escaped by
+  /** `null` for a product citation (`search_products`/`get_product`), which
+   * names a product row instead of a chunk -- see `product_id`. */
+  chunk_id: string | null;
+  document_id: string | null;
+  /** Set for a product citation, `null` for a document one. Optional on the
+   * wire only for tolerance of an older server that never sent the key;
+   * normalised to `null` when absent. */
+  product_id: string | null;
+  /** Untrusted: this is the uploaded document's own title (or, for a product
+   * citation, the product's name), never escaped by
    * the server (see `_citation_payload` in `apps/api/app/chat/service.py`).
    * Rendering it must go through JSX text interpolation only -- never
    * `dangerouslySetInnerHTML` or a markdown pass -- so React's own escaping
@@ -101,12 +108,21 @@ function toChatUsage(value: unknown): ChatUsage | null {
   return { input_tokens, output_tokens };
 }
 
+function isStringOrNull(value: unknown): value is string | null {
+  return typeof value === "string" || value === null;
+}
+
 function toCitation(value: unknown): Citation | null {
   if (!isRecord(value)) return null;
   const { chunk_id, document_id, document_title, rank, score, excerpt, page } = value;
+  const product_id = value.product_id === undefined ? null : value.product_id;
   if (
-    typeof chunk_id !== "string" ||
-    typeof document_id !== "string" ||
+    // Each nullable, but a citation must still name *something* it came
+    // from: a chunk or a product. One with neither is malformed.
+    !isStringOrNull(chunk_id) ||
+    !isStringOrNull(document_id) ||
+    !isStringOrNull(product_id) ||
+    (chunk_id === null && product_id === null) ||
     typeof document_title !== "string" ||
     typeof rank !== "number" ||
     typeof score !== "number" ||
@@ -115,7 +131,7 @@ function toCitation(value: unknown): Citation | null {
   ) {
     return null;
   }
-  return { chunk_id, document_id, document_title, rank, score, excerpt, page };
+  return { chunk_id, document_id, product_id, document_title, rank, score, excerpt, page };
 }
 
 /** `null` if any single citation is malformed -- a partial citations list

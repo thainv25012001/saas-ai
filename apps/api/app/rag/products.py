@@ -30,14 +30,16 @@ test_price_filter_excludes_the_best_semantic_match` for the test built to
 fail if that stops being true.
 
 **`embedding IS NULL` is a normal transient state, not corruption**
-(Task 3 writes a row before an arq job embeds it -- `docs/PHASE-5.md` §5).
+(Task 3's import commits a row in its first phase and embeds it in a
+second, and leaves it unembedded if the embedding provider fails --
+`docs/PHASE-5.md` §5).
 Decision, made explicit here rather than left to fall out of the SQL: the
 vector arm excludes such a row (`p.embedding IS NOT NULL` -- it has nothing
 for `<=>` to compare against), the keyword arm does not care and still
 ranks it on `search_tsv` alone, and the query-less filter path does not
 care either. A freshly imported, not-yet-embedded product is therefore
 still answerable by exact filters and by full text immediately; only its
-semantic recall lags until the embed job runs. See
+semantic recall lags until it is embedded. See
 `tests/integration/test_product_search.py`'s three `test_unembedded_*`
 tests for what this means in each of the three paths.
 
@@ -206,7 +208,17 @@ class _Filters:
         clauses = ["p.organization_id = :organization_id", "p.is_active = true"]
         params: dict[str, Any] = {"organization_id": organization_id}
         if category is not None:
-            clauses.append("p.category = :category")
+            # Case-insensitive: the model cannot see the catalogue's own
+            # spelling of a category before it searches, and "suv" versus
+            # "SUV" is a guess about capitalisation, not a different
+            # category. Still an exact (equality) match otherwise -- "SUV"
+            # does not match "SUVs"; `search_products`' no-results message
+            # lists the real categories so the model can retry with one.
+            # `organization_id` stays the leading column of
+            # `ix_products_organization_id_category_price`, so the index
+            # still narrows to this tenant; only the category step becomes
+            # a filter within it.
+            clauses.append("lower(p.category) = lower(:category)")
             params["category"] = category
         if min_price is not None:
             clauses.append("p.price >= :min_price")
@@ -402,7 +414,7 @@ class ProductSearchService:
     ) -> list[ProductMatch]:
         """Filters always apply; ranking mode depends on `query`.
 
-        `query is None`: filters alone, in a deterministic order --
+        `query` absent or blank: filters alone, in a deterministic order --
         "everything under £30,000" is a legitimate request with nothing to
         rank by relevance. `query` present: filters narrow the candidate
         set exactly as in the query-less path, and what survives is ranked
@@ -411,6 +423,11 @@ class ProductSearchService:
         because summing rank-derived scores across independent candidate
         lists is the same problem in both places (Ruling 3).
         """
+        if query is not None and not query.strip():
+            # A blank query has nothing to rank by: embedding "" is an error
+            # for real providers (and a zero vector for others, whose cosine
+            # distance is NaN), so it takes the filters-only path instead.
+            query = None
         filters = _Filters(
             self.tenant.organization_id,
             category=category,
