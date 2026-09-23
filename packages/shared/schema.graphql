@@ -194,6 +194,67 @@ type Organization {
   createdAt: DateTime!
 }
 
+type Product {
+  id: UUID!
+  externalId: String!
+  name: String!
+  description: String
+  category: String
+  price: String
+  currency: String
+  attributes: [ProductAttribute!]!
+  availability: ProductAvailability!
+  stockQuantity: Int
+  isActive: Boolean!
+  searchIndex: ProductSearchIndex!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type ProductAttribute {
+  key: String!
+  value: String!
+}
+
+enum ProductAvailability {
+  IN_STOCK
+  OUT_OF_STOCK
+  PREORDER
+  DISCONTINUED
+}
+
+type ProductImport {
+  id: UUID!
+  filename: String
+  status: ProductImportStatus!
+  totalRows: Int
+  succeededCount: Int!
+  failedCount: Int!
+  error: String
+  createdAt: DateTime!
+  completedAt: DateTime
+  errors(limit: Int! = 50): [ProductImportRowError!]!
+}
+
+type ProductImportRowError {
+  row: Int!
+  externalId: String
+  message: String!
+}
+
+enum ProductImportStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum ProductSearchIndex {
+  INDEXED
+  NOT_INDEXED
+  STALE
+}
+
 type Prompt {
   id: UUID!
   name: String!
@@ -230,6 +291,9 @@ type Query {
   conversation(id: UUID!): Conversation
   document(id: UUID!): Document
   leads(agentId: UUID!, limit: Int! = 50, offset: Int! = 0): [Lead!]!
+  products(search: String = null, category: String = null, availability: ProductAvailability = null, limit: Int! = 50, offset: Int! = 0): [Product!]!
+  productCategories: [String!]!
+  productImports(limit: Int! = 20, offset: Int! = 0): [ProductImport!]!
   agentTools(agentId: UUID!): [AgentTool!]!
 }
 

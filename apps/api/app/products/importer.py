@@ -399,6 +399,12 @@ def _dedupe_by_external_id(rows: list[ParsedRow]) -> tuple[list[ParsedRow], list
 # the file rather than the whole thing.
 _IMPORT_CHUNK_SIZE = 500
 
+# Ceiling on `ProductImportService.list_imports`'s `limit` -- same
+# reasoning as `ProductService`'s own `_MAX_LIST_LIMIT`. Each record can
+# carry a per-row error list thousands long, so an unbounded page is a
+# large serialize, not just a large scan.
+_MAX_LIST_LIMIT = 100
+
 
 def _chunks(rows: list[ParsedRow], size: int) -> list[list[ParsedRow]]:
     return [rows[index : index + size] for index in range(0, len(rows), size)]
@@ -497,6 +503,21 @@ class ProductImportService:
             # -- see the identical note on DocumentService.get.
             raise NotFoundError("product import not found")
         return record
+
+    async def list_imports(self, *, limit: int = 20, offset: int = 0) -> list[ProductImport]:
+        """This organization's imports, newest first -- the dashboard's
+        import history. Clamped like `ProductService.list_products`; `id`
+        breaks `created_at` ties for a stable page order."""
+        limit = max(1, min(limit, _MAX_LIST_LIMIT))
+        offset = max(0, offset)
+        result = await self.session.execute(
+            select(ProductImport)
+            .where(ProductImport.organization_id == self.tenant.organization_id)
+            .order_by(ProductImport.created_at.desc(), ProductImport.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars().all())
 
     async def mark_processing(self, product_import_id: uuid.UUID) -> ProductImport:
         record = await self.get(product_import_id)
