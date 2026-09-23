@@ -66,6 +66,10 @@ async def test_identity_tables_do_not_have_rls(owner_connection, table):
         "message_tool_calls",
         "leads",
         "products",
+        "eval_datasets",
+        "eval_cases",
+        "eval_runs",
+        "eval_results",
     ],
 )
 async def test_tenant_tables_have_rls_enabled_with_a_tenant_isolation_policy(
@@ -204,3 +208,47 @@ async def test_products_has_embedding_staleness_columns(owner_connection):
     assert columns["embedding_stale"].is_nullable == "NO"
     assert columns["embedding_stale"].data_type == "boolean"
     assert columns["embedding_stale"].column_default == "false"
+
+
+@pytest.mark.parametrize(
+    ("table", "index_name", "indexdef_fragment"),
+    [
+        # `EvaluationService.list_cases`/`count_cases`'s own access pattern.
+        (
+            "eval_cases",
+            "ix_eval_cases_organization_id_dataset_id",
+            "(organization_id, dataset_id)",
+        ),
+        # `list_runs`'s "newest first" ordering, per dataset.
+        (
+            "eval_runs",
+            "ix_eval_runs_organization_id_dataset_id_created_at",
+            "(organization_id, dataset_id, created_at DESC)",
+        ),
+        # Partial: only a pending/running row can block a new run of the same
+        # dataset (docs/PHASE-6.md §5) -- Task 4's one-active-run check.
+        ("eval_runs", "ix_eval_runs_active_by_dataset", "WHERE (status = ANY"),
+    ],
+)
+async def test_evaluations_has_the_indexes_task_4_depends_on(
+    owner_connection, table, index_name, indexdef_fragment
+):
+    result = await owner_connection.execute(
+        text("SELECT indexdef FROM pg_indexes WHERE tablename = :table AND indexname = :name"),
+        {"table": table, "name": index_name},
+    )
+    indexdef = result.scalar_one_or_none()
+    assert indexdef is not None, f"missing index {index_name}"
+    assert indexdef_fragment in indexdef
+
+
+async def test_eval_results_unique_constraint_covers_run_and_case(owner_connection):
+    """What makes Task 4's `ON CONFLICT (run_id, case_id) DO NOTHING` a real
+    upsert target instead of an error -- see docs/PHASE-6.md §3."""
+    result = await owner_connection.execute(
+        text(
+            "SELECT COUNT(*) FROM pg_indexes "
+            "WHERE tablename = 'eval_results' AND indexdef LIKE '%UNIQUE%run_id, case_id%'"
+        )
+    )
+    assert result.scalar_one() == 1

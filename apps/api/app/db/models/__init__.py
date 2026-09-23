@@ -15,6 +15,13 @@ from app.db.models.document import (
     DocumentSourceType,
     DocumentStatus,
 )
+from app.db.models.evaluation import (
+    EvalCase,
+    EvalDataset,
+    EvalResult,
+    EvalRun,
+    EvalRunStatus,
+)
 from app.db.models.lead import Lead, LeadStatus
 from app.db.models.membership import Membership, MembershipRole
 from app.db.models.organization import Organization
@@ -43,6 +50,11 @@ __all__ = [
     "DocumentChunk",
     "DocumentSourceType",
     "DocumentStatus",
+    "EvalCase",
+    "EvalDataset",
+    "EvalResult",
+    "EvalRun",
+    "EvalRunStatus",
     "Lead",
     "LeadStatus",
     "Membership",
