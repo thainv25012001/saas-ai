@@ -1,6 +1,7 @@
-"""Pydantic write shapes for `EvaluationService` -- datasets and cases only
-(Task 1). Run creation (Task 4) is a REST endpoint, not a schema here --
-see docs/PHASE-6.md §7 for why.
+"""Pydantic write shapes for `EvaluationService`: datasets and cases (Task
+1) and starting a run (Task 4). `StartRunInput` is the body of the REST
+`POST /api/v1/evaluations/runs`, not a GraphQL input -- see docs/PHASE-6.md
+§7 for why starting a run is REST.
 """
 
 import uuid
@@ -163,4 +164,33 @@ class CaseInput(BaseModel):
                 "required_phrases, expected_tool_names, expected_document_ids "
                 "or expected_product_ids"
             )
+        return self
+
+
+class StartRunInput(BaseModel):
+    """What `POST /api/v1/evaluations/runs` accepts (docs/PHASE-6.md §5).
+
+    `provider`/`model` and `judge_provider`/`judge_model` are each "both or
+    neither": a provider with no model has no sensible default to fall back
+    to (the agent's own model belongs to the agent's own provider), and a
+    model with no provider is ambiguous. Whether a named provider is known
+    and has a key configured is checked by `EvaluationService.create_run`,
+    not here, so the resolved pair (the agent's own, when neither is named)
+    goes through exactly the same check.
+    """
+
+    dataset_id: uuid.UUID
+    agent_id: uuid.UUID
+    prompt_version_id: uuid.UUID | None = None
+    provider: str | None = Field(default=None, min_length=1, max_length=50)
+    model: str | None = Field(default=None, min_length=1, max_length=100)
+    judge_provider: str | None = Field(default=None, min_length=1, max_length=50)
+    judge_model: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def _pairs_are_both_or_neither(self) -> Self:
+        if (self.provider is None) != (self.model is None):
+            raise ValueError("provider and model must be given together, or neither")
+        if (self.judge_provider is None) != (self.judge_model is None):
+            raise ValueError("judge_provider and judge_model must be given together, or neither")
         return self
