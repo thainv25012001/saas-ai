@@ -109,7 +109,7 @@ async def test_an_agent_created_normally_resolves_the_default_builtin_tool(tenan
     async with tenant_session(tenant_a) as session:
         agent = await _agent(session, tenant_a)
         names = await ChatService(session, tenant_a)._resolve_enabled_tool_names(agent.id)
-    assert names == ["retrieve_knowledge"]
+    assert names == ["get_product", "retrieve_knowledge", "search_products"]
 
 
 async def test_an_agent_with_its_tool_links_explicitly_removed_is_offered_no_tools(tenant_a):
@@ -137,10 +137,15 @@ async def test_global_builtin_tool_is_resolved_when_no_org_override_exists(tenan
     async with tenant_session(tenant_a) as session:
         agent = await _agent(session, tenant_a)
         names = await ChatService(session, tenant_a)._resolve_enabled_tool_names(agent.id)
-    assert names == ["retrieve_knowledge"]
+    assert names == ["get_product", "retrieve_knowledge", "search_products"]
 
 
 async def test_disabled_agent_tools_link_excludes_the_tool(tenant_a, owner_connection):
+    """Org-scoped, disabled `retrieve_knowledge` shadows and suppresses the
+    global builtin of the same name (see `_resolve_enabled_tool_names`'s own
+    shadowing docstring) -- but `get_product`/`search_products` are
+    untouched by it and must still resolve, since Task 5 they are no
+    longer the only other name in `DEFAULT_ENABLED_TOOL_NAMES`."""
     async with tenant_session(tenant_a) as session:
         agent = await _agent(session, tenant_a)
         agent_id = agent.id
@@ -148,7 +153,7 @@ async def test_disabled_agent_tools_link_excludes_the_tool(tenant_a, owner_conne
 
     async with tenant_session(tenant_a) as session:
         names = await ChatService(session, tenant_a)._resolve_enabled_tool_names(agent_id)
-    assert names == []
+    assert names == ["get_product", "search_products"]
 
 
 async def test_non_builtin_tool_type_is_never_offered_to_the_model(tenant_a):
@@ -156,8 +161,9 @@ async def test_non_builtin_tool_type_is_never_offered_to_the_model(tenant_a):
     MCP is explicitly Phase 6), so a `type='http'` row -- legal per Task 3's
     schema, and exactly what `test_tool_schema.py`'s own fixtures create --
     must never reach the model as an offered tool: nothing could ever answer
-    the call. `["retrieve_knowledge"]`, not `[]`: since Task 7b, `_agent()`
-    already links the default builtin -- this proves the http-type row is
+    the call. The three default builtins, not `[]`: since Task 7b (and,
+    since Task 5, joined by `search_products`/`get_product`), `_agent()`
+    already links every default builtin -- this proves the http-type row is
     excluded ON TOP of that, not that nothing at all is offered."""
     async with tenant_session(tenant_a) as session:
         agent = await _agent(session, tenant_a)
@@ -179,7 +185,7 @@ async def test_non_builtin_tool_type_is_never_offered_to_the_model(tenant_a):
         )
         await session.flush()
         names = await ChatService(session, tenant_a)._resolve_enabled_tool_names(agent.id)
-    assert names == ["retrieve_knowledge"]
+    assert names == ["get_product", "retrieve_knowledge", "search_products"]
 
 
 async def test_org_scoped_tool_link_shadows_a_global_builtin_of_the_same_name(tenant_a):
@@ -203,8 +209,12 @@ async def test_org_scoped_tool_link_shadows_a_global_builtin_of_the_same_name(te
     *last* row processed wins regardless of scope -- since `ORDER BY ...
     organization_id IS NULL` still places the org-scoped row first, the
     global (enabled) row would be processed second and overwrite it,
-    resolving to `["retrieve_knowledge"]` instead of `[]`. Restored
-    afterwards.
+    resolving to `["get_product", "retrieve_knowledge", "search_products"]`
+    instead of `["get_product", "search_products"]`. Restored afterwards.
+
+    Since Task 5, `retrieve_knowledge` is not the only default builtin any
+    more -- `get_product`/`search_products` are granted alongside it and
+    are untouched by this test's shadowing, so they must still resolve.
     """
     async with tenant_session(tenant_a) as session:
         agent = await _agent(session, tenant_a)
@@ -226,7 +236,7 @@ async def test_org_scoped_tool_link_shadows_a_global_builtin_of_the_same_name(te
         )
         await session.flush()
         names = await ChatService(session, tenant_a)._resolve_enabled_tool_names(agent.id)
-    assert names == []
+    assert names == ["get_product", "search_products"]
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +338,11 @@ async def test_a_greeting_triggers_no_tool_call_even_with_the_tool_available(
 
     assert provider.last_request is not None
     assert provider.last_request.tools is not None
-    assert [t.name for t in provider.last_request.tools] == ["retrieve_knowledge"]
+    assert [t.name for t in provider.last_request.tools] == [
+        "get_product",
+        "retrieve_knowledge",
+        "search_products",
+    ]
 
 
 async def test_a_failing_tool_surfaces_is_error_and_the_turn_still_completes(
@@ -891,7 +905,9 @@ async def test_an_ungranted_builtin_named_by_the_model_never_runs_and_writes_not
         agent = await _agent(session, tenant_a)
         agent_id = agent.id
         names = await ChatService(session, tenant_a)._resolve_enabled_tool_names(agent_id)
-    assert names == ["retrieve_knowledge"], "precondition: create_lead is NOT granted"
+    assert names == ["get_product", "retrieve_knowledge", "search_products"], (
+        "precondition: create_lead is NOT granted"
+    )
 
     provider = FakeProvider(
         turns=[
@@ -917,7 +933,11 @@ async def test_an_ungranted_builtin_named_by_the_model_never_runs_and_writes_not
     # guarantee, asserted here so a regression in EITHER half fails.
     assert provider.last_request is not None
     assert provider.last_request.tools is not None
-    assert [t.name for t in provider.last_request.tools] == ["retrieve_knowledge"]
+    assert [t.name for t in provider.last_request.tools] == [
+        "get_product",
+        "retrieve_knowledge",
+        "search_products",
+    ]
 
     tool_end = next(e for e in events if isinstance(e, ChatToolCallEnd))
     assert [r.tool_call_id for r in tool_end.results] == ["smuggled"]

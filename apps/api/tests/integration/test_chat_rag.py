@@ -433,7 +433,12 @@ async def test_a_greeting_never_calls_retrieval_even_when_the_tool_is_available(
     # cannot be explained by the tool simply being unavailable to ask for.
     assert provider.last_request is not None
     assert provider.last_request.tools is not None
-    assert [t.name for t in provider.last_request.tools] == ["retrieve_knowledge"]
+    # Alphabetical -- `_resolve_enabled_tool_names` orders by `Tool.name`.
+    assert [t.name for t in provider.last_request.tools] == [
+        "get_product",
+        "retrieve_knowledge",
+        "search_products",
+    ]
 
 
 async def test_a_failing_retrieval_tool_call_degrades_to_an_ungrounded_answer(
@@ -766,6 +771,7 @@ async def test_sse_stream_emits_citations_before_message_end_even_after_text_alr
     assert set(citation.keys()) == {
         "chunk_id",
         "document_id",
+        "product_id",
         "document_title",
         "rank",
         "score",
@@ -774,6 +780,10 @@ async def test_sse_stream_emits_citations_before_message_end_even_after_text_alr
     }
     assert "warranty" in citation["excerpt"].lower()
     assert citation["page"] is None
+    # A chunk citation, not a product one -- Task 5 widens this payload to
+    # carry both kinds (`app/rag/retrieve.py::CitationPayload`), but this
+    # turn never called a product tool.
+    assert citation["product_id"] is None
 
 
 async def test_sse_stream_with_no_tool_call_has_no_citations_or_tool_call_events(
@@ -815,4 +825,9 @@ async def test_sse_stream_with_no_tool_call_has_no_citations_or_tool_call_events
     assert [e["type"] for e in events] == ["message_start", "text_delta", "message_end"]
     assert provider.last_request is not None
     assert provider.last_request.tools is not None
-    assert [t.name for t in provider.last_request.tools] == ["retrieve_knowledge"]
+    # Alphabetical -- `_resolve_enabled_tool_names` orders by `Tool.name`.
+    assert [t.name for t in provider.last_request.tools] == [
+        "get_product",
+        "retrieve_knowledge",
+        "search_products",
+    ]

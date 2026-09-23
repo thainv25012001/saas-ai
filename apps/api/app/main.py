@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api import auth, chat, documents, health
+from app.api import auth, chat, documents, health, products
 from app.core.config import get_settings
 from app.core.errors import AppError, format_validation_errors
 from app.core.logging import configure_logging, get_logger, request_id_var
@@ -161,6 +161,7 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(chat.router)
     app.include_router(documents.router)
+    app.include_router(products.router)
 
     from strawberry.fastapi import GraphQLRouter
 

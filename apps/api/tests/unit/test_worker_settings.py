@@ -93,3 +93,14 @@ def test_title_conversation_task_is_registered() -> None:
     from app.workers.tasks import title_conversation_task
 
     assert title_conversation_task in WorkerSettings.functions
+
+
+def test_import_products_task_is_registered() -> None:
+    """Task 3's own version of the same risk this whole file exists to
+    catch: Phase 4 shipped an entire reviewed feature inert because its job
+    was never added to `functions`. An import that uploads cleanly and
+    queues a job that nothing ever drains would look identical to success
+    from the client's side, forever."""
+    from app.workers.tasks import import_products_task
+
+    assert import_products_task in WorkerSettings.functions

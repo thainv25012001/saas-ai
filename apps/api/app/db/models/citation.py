@@ -49,6 +49,17 @@ class MessageCitation(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
         ForeignKey("documents.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Phase 5 Task 5 (`alembic/versions/0013_seed_product_tools.py`):
+    # `docs/ARCHITECTURE.md` §3.5 declares this column and §5.4 rule 3 is
+    # why -- a product citation survives the product it names being deleted
+    # later, the identical `SET NULL` reasoning as `chunk_id`/`document_id`
+    # above. `search_products`/`get_product` (`app/tools/products.py`) are
+    # the only writers; a chunk-grounded citation always leaves this `NULL`.
+    product_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("products.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     document_title: Mapped[str] = mapped_column(String(255), nullable=False)
     excerpt: Mapped[str] = mapped_column(Text, nullable=False)
     rank: Mapped[int] = mapped_column(Integer, nullable=False)

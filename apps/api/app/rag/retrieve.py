@@ -77,16 +77,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.rrf import fuse_rrf, top_fused
 from app.core.tenancy import TenantContext
 from app.embeddings.base import EmbeddingProvider
 from app.embeddings.registry import get_embedding_provider
-
-# Reciprocal Rank Fusion's published constant (Cormack, Clarke & Buettcher,
-# 2009, the paper that introduced RRF): score = sum(1 / (k + rank)) over the
-# lists a document appears in. k=60 is the value that paper found robust
-# across corpora and is the de facto default everywhere RRF is used --
-# treated here as a fixed convention, not something to tune per query.
-_RRF_K = 60
+from app.rag.vector_sql import vector_literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,10 +111,28 @@ class CitationPayload:
     rather than through two shapes that drift, and `app/chat/service.py`
     imports `app/tools` (Phase 4's tool layer), so the reverse import would
     cycle.
+
+    Widened in Phase 5 (Task 5) to also carry a **product** grounding
+    source, rather than inventing a second, parallel payload type:
+    `docs/ARCHITECTURE.md` §5.4 rule 3 asks for "message_citations records
+    what was actually retrieved" for a product exactly as it already does
+    for a chunk, and `ChatService._record_citations` is the one place that
+    fact is persisted -- a second citation shape would mean that method (and
+    the SSE/`message_tool_calls` serializers downstream of it) branching on
+    which kind of citation it has, for no benefit a `product_id | None`
+    field does not already give more simply. `chunk_id`/`document_id` widen
+    to `| None` for the same reason: a product citation has neither, and a
+    citation naming a product must not fabricate one. Exactly one of
+    `(chunk_id, product_id)` is ever set in practice -- `app/tools/retrieve.
+    py::build_citation` always supplies the former, `app/tools/products.py`
+    always supplies the latter -- but nothing here enforces that as a type
+    -- level invariant; both are `| None` because both true absences (a
+    deleted chunk/document, a citation that was never about one) are
+    already meaningful and must stay representable independently.
     """
 
-    chunk_id: uuid.UUID
-    document_id: uuid.UUID
+    chunk_id: uuid.UUID | None
+    document_id: uuid.UUID | None
     document_title: str
     rank: int
     score: float
@@ -129,6 +142,10 @@ class CitationPayload:
     # `app/rag/chunk.py` only ever gets a page list from `extract()` for a
     # PDF. Absent is the honest state, not a value to fake as `1`.
     page: int | None
+    # Defaulted, so `build_citation` below (every existing caller) needs no
+    # change: a chunk citation simply never sets it. `app/tools/products.py`
+    # is the only place that ever passes a real value.
+    product_id: uuid.UUID | None = None
 
 
 # Public (no leading underscore): `app/chat/service.py` imports this pair
@@ -295,25 +312,31 @@ _KEYWORD_ALL_TERMS_SQL = text(
     )
 )
 # The OR form keeps `settings.retrieval_min_keyword_rank` -- this is the
-# floor that setting was actually calibrated against (see its docstring).
+# floor that setting was actually calibrated against (see its docstring) --
+# but, per a later review round (Phase 5 Task 4's fix round 2, ported back
+# here in the same commit), *additively* to an unconditional `> 0`, never
+# in its place. A prior version used `>= :min_rank` alone: since
+# `ts_rank_cd` is never negative, `retrieval_min_keyword_rank = 0.0` (or a
+# negative value -- either reachable by setting the environment variable,
+# not merely a value this code could assume nobody would choose) made
+# `>= :min_rank` true for every row `@@` already matched, including a bare
+# negation's exact-0.0 score -- silently reopening the exact hole `> 0`
+# exists to close on the strict arm, on this arm instead. Writing `> 0`
+# into the SQL unconditionally, with `>= :min_rank` only ever able to add
+# a second, stricter clause on top of it, makes that structurally
+# unreachable rather than merely undocumented (the settings comment used
+# to carry a "do not set this to 0" warning instead -- a real but weaker
+# guarantee, since it defends against one bad value by asking nicely
+# rather than making the whole class of bad values inert).
 _KEYWORD_ANY_TERM_SQL = text(
     _KEYWORD_SQL_TEMPLATE.format(
         tsquery=_OR_TSQUERY,
-        rank_floor=f"AND ts_rank_cd(dc.content_tsv, {_OR_TSQUERY}) >= :min_rank ",
+        rank_floor=(
+            f"AND ts_rank_cd(dc.content_tsv, {_OR_TSQUERY}) > 0 "
+            f"AND ts_rank_cd(dc.content_tsv, {_OR_TSQUERY}) >= :min_rank "
+        ),
     )
 )
-
-
-def _vector_literal(values: list[float]) -> str:
-    """Render an embedding as a pgvector text-input literal, e.g. "[0.1,-0.2]".
-
-    Passed through `CAST(:param AS vector)` rather than a driver-level
-    pgvector codec (none is registered on this session's asyncpg
-    connections) or `::vector` cast syntax (which does not parse through
-    SQLAlchemy's `:param` binding at all) -- the same pattern the ingestion
-    tests already use for seeding vector columns via raw SQL.
-    """
-    return "[" + ",".join(repr(value) for value in values) + "]"
 
 
 class RetrievalService:
@@ -367,7 +390,7 @@ class RetrievalService:
             await self.session.execute(
                 _VECTOR_SQL,
                 {
-                    "query_vector": _vector_literal(query_vector),
+                    "query_vector": vector_literal(query_vector),
                     "candidates": candidates,
                     "organization_id": organization_id,
                     "max_distance": max_distance,
@@ -390,37 +413,29 @@ class RetrievalService:
             # fusion with the vector arm settles the rest.
             keyword_rows = (await self.session.execute(_KEYWORD_ANY_TERM_SQL, keyword_params)).all()
 
-        scores: dict[uuid.UUID, float] = {}
+        # `info` is captured from whichever list first produced a chunk --
+        # separate from fusion itself (`fuse_rrf` below), which only ever
+        # sees ids and rank positions. An empty list here (no lexical match
+        # at all, or a corpus with no embeddings) simply contributes
+        # nothing to the fused scores -- it can never zero out whatever the
+        # other retriever already found.
         info: dict[uuid.UUID, _CandidateInfo] = {}
-        # An empty list here (no lexical match at all, or a corpus with no
-        # embeddings) simply contributes nothing to `scores` -- it can never
-        # zero out whatever the other retriever already found, because
-        # fusion only ever adds to a chunk's score, never resets it.
         for rows in (vector_rows, keyword_rows):
-            for rank, row in enumerate(rows, start=1):
-                chunk_id = row.id
-                scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (_RRF_K + rank)
-                if chunk_id not in info:
+            for row in rows:
+                if row.id not in info:
                     metadata = row.metadata or {}
-                    info[chunk_id] = _CandidateInfo(
+                    info[row.id] = _CandidateInfo(
                         document_id=row.document_id,
                         document_title=row.title,
                         content=row.content,
                         page=metadata.get("page"),
                     )
 
-        # Ties (identical fused score) break on chunk_id purely for a
-        # deterministic order across runs -- no ranking significance.
-        ordered = sorted(scores.items(), key=lambda item: (-item[1], str(item[0])))
+        scores = fuse_rrf([[row.id for row in vector_rows], [row.id for row in keyword_rows]])
+        ordered = top_fused(scores, top_k=top_k, min_score=min_score)
 
         results: list[RetrievedChunk] = []
         for chunk_id, score in ordered:
-            if score < min_score:
-                # `ordered` is sorted descending by score, so nothing after
-                # this point can clear the threshold either.
-                break
-            if len(results) >= top_k:
-                break
             candidate = info[chunk_id]
             results.append(
                 RetrievedChunk(
