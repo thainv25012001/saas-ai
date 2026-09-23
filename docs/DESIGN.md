@@ -296,6 +296,13 @@ under it, rather than in a tooltip nobody hovers.
 
 ## Untrusted text, beyond citations
 
+(A citation can name a product rather than a document chunk: `search_products`
+and `get_product` cite the product row, with `document_title` carrying the
+product's name. `ChatMessage`'s Sources list prefixes such an entry with a
+muted "Product:" and keys every entry without assuming a chunk id exists —
+a product citation has none, and a stored citation can lose its ids to a
+deletion. The name is customer-supplied text under the same rule below.)
+
 Phase 3 established the rule for citations: `document_title` and `excerpt`
 are copied from an uploaded file with no server-side escaping, so rendering
 is what has to hold the line — plain JSX text children only, never
@@ -364,6 +371,16 @@ under the zone with their status, counts and — because "4 rows failed" is
 not actionable — the failed rows themselves, by row number, SKU and reason.
 The API returns the first 50 by row number (`errors(limit:)`, capped at 200),
 and the list says "first 50 of N" when there are more.
+
+An import can also complete with a warning about the whole batch — today only
+that the rows landed but the embedding provider failed, so some are not yet
+searchable by meaning. That is an `Alert tone="warn"` on the import, beside
+its counts: a real, named outcome with a next step (import again), not a
+failure — the `danger` alert stays for a whole-file failure.
+
+The product list shows each row's **Last updated** time (`formatTimestamp`),
+in its own column after Availability. A stale catalogue answers confidently
+(`docs/PHASE-5.md` §8), and the date is how an owner spots one.
 
 ## Pagination
 

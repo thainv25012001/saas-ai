@@ -87,6 +87,7 @@ apps/web/src/app/dashboard/products/page.tsx   # Task 6
 
 **Requirements:**
 - `embeddable_text(product) -> str` composes name, description, category and **stable** attributes — never price, stock or availability.
+  *As built (final review M2):* name, description and the whole `attributes` object — no category (it is in `search_tsv`), and no filtering of attributes to a stable subset. See `docs/PHASE-5.md` §4.
 - Batched embedding (default 64) with per-batch retry, mirroring `app/rag/ingest.py`'s `_embed_all`.
 - Records `embedding_model` per product the way chunks do, so a mixed-provider catalogue is detectable.
 - Re-embedding is idempotent: embedding a product whose stable fields are unchanged produces the same vector, and a caller can tell whether a re-embed is needed.
