@@ -389,6 +389,7 @@ type Prompt {
   key: String!
   description: String
   createdAt: DateTime!
+  versions: [PromptVersion!]!
 }
 
 type PromptVersion {

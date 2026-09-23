@@ -149,3 +149,35 @@ async def test_default_prompt_contains_the_grounding_rules():
 
     assert "{{company_name}}" in DEFAULT_SALES_SYSTEM_PROMPT
     assert "Never invent" in DEFAULT_SALES_SYSTEM_PROMPT
+
+
+async def test_list_versions_is_newest_first(tenant_a):
+    async with tenant_session(tenant_a) as session:
+        service = PromptService(session, tenant_a)
+        prompt = await _prompt(session, tenant_a)
+        await service.create_version(prompt.id, CreateVersionInput(system_prompt="v2"))
+        await service.create_version(prompt.id, CreateVersionInput(system_prompt="v3"))
+        versions = await service.list_versions(prompt.id)
+    assert [v.version for v in versions] == [3, 2, 1]
+    assert [v.is_active for v in versions] == [False, False, True]
+
+
+async def test_list_versions_of_another_orgs_prompt_raises_not_found(tenant_a, tenant_b):
+    async with tenant_session(tenant_a) as session:
+        prompt = await _prompt(session, tenant_a)
+    async with tenant_session(tenant_b) as session:
+        with pytest.raises(NotFoundError):
+            await PromptService(session, tenant_b).list_versions(prompt.id)
+
+
+async def test_versions_by_prompt_never_returns_another_orgs_rows(tenant_a, tenant_b):
+    """The batched form does not raise for a foreign id -- it must return
+    nothing for it, while still answering for the caller's own prompts."""
+    async with tenant_session(tenant_a) as session:
+        theirs = await _prompt(session, tenant_a)
+    async with tenant_session(tenant_b) as session:
+        mine = await _prompt(session, tenant_b)
+        by_prompt = await PromptService(session, tenant_b).versions_by_prompt([theirs.id, mine.id])
+    assert by_prompt[theirs.id] == []
+    assert [v.version for v in by_prompt[mine.id]] == [1]
+    assert all(v.organization_id == tenant_b.organization_id for v in by_prompt[mine.id])

@@ -23,6 +23,7 @@ from app.db.models import (
     MessageRole,
     PromptVersion,
 )
+from app.prompts.service import PromptService
 
 #: How much of a first question the list needs. The panel truncates to one
 #: line; this is the bound on what crosses the wire to get there.
@@ -84,6 +85,21 @@ class Context(BaseContext):
         self.eval_results_loader: DataLoader[uuid.UUID, list[EvalResult]] | None = (
             DataLoader(load_fn=self._load_eval_results) if session is not None else None
         )
+        # `prompts { versions }` would otherwise be one query per prompt.
+        self.prompt_versions_loader: DataLoader[uuid.UUID, list[PromptVersion]] | None = (
+            DataLoader(load_fn=self._load_prompt_versions) if session is not None else None
+        )
+
+    async def _load_prompt_versions(
+        self, prompt_ids: Sequence[uuid.UUID]
+    ) -> list[list[PromptVersion]]:
+        """Every requested prompt's versions, newest first, in one query --
+        delegated to `PromptService.versions_by_prompt`, which carries the
+        explicit `organization_id` predicate."""
+        assert self.session is not None
+        assert self.tenant is not None
+        by_prompt = await PromptService(self.session, self.tenant).versions_by_prompt(prompt_ids)
+        return [by_prompt[prompt_id] for prompt_id in prompt_ids]
 
     async def _load_messages(
         self, conversation_ids: Sequence[uuid.UUID]

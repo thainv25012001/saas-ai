@@ -579,3 +579,96 @@ async def test_create_agent_rejects_an_empty_model(client, auth_headers):
     response = await create_agent(client, auth_headers, "Modelless Bot", model="")
     body = response.json()
     assert body["errors"][0]["extensions"]["code"] == "invalid_input"
+
+
+async def _create_prompt(client, headers, key, *extra_versions):
+    created = await graphql(
+        client,
+        "mutation C($key: String!) {"
+        ' createPrompt(input: {name: "Sales", key: $key, systemPrompt: "v1"}) { id } }',
+        {"key": key},
+        headers,
+    )
+    prompt_id = created.json()["data"]["createPrompt"]["id"]
+    for text in extra_versions:
+        await graphql(
+            client,
+            "mutation V($id: UUID!, $t: String!) {"
+            " createPromptVersion(promptId: $id, input: {systemPrompt: $t}) { id } }",
+            {"id": prompt_id, "t": text},
+            headers,
+        )
+    return prompt_id
+
+
+async def test_prompt_versions_are_listed_newest_first(client, auth_headers):
+    prompt_id = await _create_prompt(client, auth_headers, "versions_listed", "v2", "v3")
+
+    response = await graphql(
+        client,
+        "query P($id: UUID!) { prompt(id: $id) { versions { id version isActive createdAt } } }",
+        {"id": prompt_id},
+        auth_headers,
+    )
+
+    body = response.json()
+    assert "errors" not in body, body
+    versions = body["data"]["prompt"]["versions"]
+    assert [(v["version"], v["isActive"]) for v in versions] == [
+        (3, False),
+        (2, False),
+        (1, True),
+    ]
+
+
+async def test_prompts_versions_batch_into_a_single_query(client, auth_headers):
+    await _create_prompt(client, auth_headers, "batch_one", "v2")
+    await _create_prompt(client, auth_headers, "batch_two")
+
+    statements: list[str] = []
+
+    def _capture(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        if "FROM prompt_versions" in statement:
+            statements.append(statement)
+
+    event.listen(db_engine.sync_engine, "before_cursor_execute", _capture)
+    try:
+        response = await graphql(
+            client, "{ prompts { key versions { version } } }", headers=auth_headers
+        )
+    finally:
+        event.remove(db_engine.sync_engine, "before_cursor_execute", _capture)
+
+    body = response.json()
+    assert "errors" not in body, body
+    by_key = {p["key"]: [v["version"] for v in p["versions"]] for p in body["data"]["prompts"]}
+    assert by_key["batch_one"] == [2, 1]
+    assert by_key["batch_two"] == [1]
+    assert len(statements) == 1
+
+
+async def test_another_orgs_prompt_versions_are_not_reachable(client, auth_headers):
+    theirs = await _create_prompt(client, auth_headers, "their_prompt", "v2")
+    other = await client.post(
+        "/api/v1/auth/register",
+        json={**REGISTRATION, "email": "gql-other@example.com", "organization_name": "Other Co"},
+    )
+    other_headers = {"Authorization": f"Bearer {other.json()['access_token']}"}
+
+    single = await graphql(
+        client,
+        "query P($id: UUID!) { prompt(id: $id) { versions { id } } }",
+        {"id": theirs},
+        other_headers,
+    )
+    listed = await graphql(client, "{ prompts { id versions { id } } }", headers=other_headers)
+
+    assert single.json()["errors"][0]["extensions"]["code"] == "not_found"
+    assert all(p["id"] != theirs for p in listed.json()["data"]["prompts"])

@@ -200,6 +200,15 @@ class Prompt:
             created_at=model.created_at,
         )
 
+    @strawberry.field
+    async def versions(self, info: strawberry.Info[Context, None]) -> list[PromptVersion]:
+        """Newest first. Batched so `prompts { versions }` is one query, not
+        one per prompt. Same unauthenticated guard as `Agent.config`."""
+        if info.context.prompt_versions_loader is None:
+            raise AuthenticationError("authentication required")
+        models = await info.context.prompt_versions_loader.load(self.id)
+        return [PromptVersion.from_model(m) for m in models]
+
 
 @strawberry.enum
 class DocumentStatus(enum.Enum):
