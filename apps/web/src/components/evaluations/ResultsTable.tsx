@@ -38,7 +38,10 @@ export type ResultRow = {
   toolCalls: readonly ResultToolCall[];
 };
 
-const COMPARISON_ORDER: ComparisonState[] = ["regressed", "improved", "unchanged", "new"];
+const COMPARISON_ORDER: ComparisonState[] = ["regressed", "improved", "errored", "unchanged", "new"];
+
+/** What "Show only regressions and errors" keeps: the rows that need a look. */
+const NEEDS_A_LOOK: ReadonlySet<ComparisonState> = new Set(["regressed", "errored"]);
 
 const checkboxClasses = cn("size-4 rounded-control accent-primary", focusRing, "focus-visible:ring-offset-1");
 
@@ -54,8 +57,8 @@ const checkboxClasses = cn("size-4 rounded-control accent-primary", focusRing, "
  * `**bold**` stays two asterisks and `<script>` stays characters.
  *
  * With `comparison` (result id -> state, from `compareRuns`) each row gets a
- * regressed/improved/unchanged/new badge, the counts sit above the table,
- * and a filter narrows it to the regressions.
+ * regressed/improved/errored/unchanged/new badge, the counts sit above the
+ * table, and a filter narrows it to the regressions and the errored turns.
  */
 export function ResultsTable({
   results,
@@ -83,7 +86,9 @@ export function ResultsTable({
     ? comparisonCounts(results.map((result) => ({ state: comparison[result.id] ?? "new" })))
     : null;
   const shown =
-    comparison && onlyRegressions ? results.filter((result) => comparison[result.id] === "regressed") : results;
+    comparison && onlyRegressions
+      ? results.filter((result) => NEEDS_A_LOOK.has(comparison[result.id] ?? "new"))
+      : results;
 
   function toggle(id: string) {
     const next = new Set(expanded);
@@ -112,13 +117,13 @@ export function ResultsTable({
               checked={onlyRegressions}
               onChange={(event) => setOnlyRegressions(event.target.checked)}
             />
-            Show only regressions
+            Show only regressions and errors
           </label>
         </div>
       ) : null}
 
       {shown.length === 0 ? (
-        <p className="px-5 py-6 text-sm text-ink-muted">No case regressed.</p>
+        <p className="px-5 py-6 text-sm text-ink-muted">No case regressed or errored.</p>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm">

@@ -11,6 +11,8 @@ import {
   isRunActive,
   parseScoreDetail,
   parseToolArguments,
+  referenceOnlyCount,
+  referenceOnlyMessage,
   runCallEstimate,
   scoreBadgeLabel,
   scoreTone,
@@ -60,7 +62,22 @@ describe("compareRuns", () => {
 
   it("counts each state", () => {
     const comparisons = compareRuns([r("a", "A?", true)], [r("a", "A?", false), r("b", "B?", true)]);
-    expect(comparisonCounts(comparisons)).toEqual({ regressed: 1, improved: 0, unchanged: 0, new: 1 });
+    expect(comparisonCounts(comparisons)).toEqual({ regressed: 1, improved: 0, errored: 0, unchanged: 0, new: 1 });
+  });
+
+  it("marks a candidate whose turn errored as errored, never regressed or improved", () => {
+    const errored = (caseId: string, question: string) => ({ caseId, question, passed: false, error: "boom" });
+    const comparisons = compareRuns(
+      [r("a", "A?", true), r("b", "B?", false)],
+      [errored("a", "A?"), errored("b", "B?"), errored("c", "C?")],
+    );
+    expect(comparisons.map((c) => c.state)).toEqual(["errored", "errored", "errored"]);
+    expect(comparisonCounts(comparisons)).toEqual({ regressed: 0, improved: 0, errored: 3, unchanged: 0, new: 0 });
+  });
+
+  it("still compares a candidate whose error is null", () => {
+    const [comparison] = compareRuns([r("a", "A?", true)], [{ ...r("a", "A?", false), error: null }]);
+    expect(comparison.state).toBe("regressed");
   });
 });
 
@@ -112,10 +129,53 @@ describe("run polling", () => {
   });
 });
 
+const expectations = (overrides: Partial<Parameters<typeof referenceOnlyCount>[0][number]> = {}) => ({
+  referenceAnswer: null,
+  requiredPhrases: [],
+  expectedToolNames: [],
+  expectedDocumentIds: [],
+  expectedProductIds: [],
+  ...overrides,
+});
+
 describe("runCallEstimate", () => {
-  it("is one call per case, two with a judge", () => {
-    expect(runCallEstimate(12, false)).toBe(12);
-    expect(runCallEstimate(12, true)).toBe(24);
+  it("counts one agent turn per case and a judge call only per case with a reference answer", () => {
+    const cases = [
+      expectations({ referenceAnswer: "30 days" }),
+      expectations({ requiredPhrases: ["free"] }),
+      expectations({ referenceAnswer: "Blue", requiredPhrases: ["blue"] }),
+    ];
+    expect(runCallEstimate(cases, false)).toEqual({ turns: 3, judgeCalls: 0 });
+    expect(runCallEstimate(cases, true)).toEqual({ turns: 3, judgeCalls: 2 });
+  });
+
+  it("does not count a blank reference answer as one the judge grades", () => {
+    expect(runCallEstimate([expectations({ referenceAnswer: "  ", requiredPhrases: ["x"] })], true)).toEqual({
+      turns: 1,
+      judgeCalls: 0,
+    });
+  });
+});
+
+describe("reference-only cases", () => {
+  it("counts cases with no deterministic expectation", () => {
+    const cases = [
+      expectations({ referenceAnswer: "30 days" }),
+      expectations({ referenceAnswer: "Two years" }),
+      expectations({ referenceAnswer: "Blue", expectedToolNames: ["retrieve_knowledge"] }),
+      expectations({ expectedDocumentIds: ["d1"] }),
+      expectations({ expectedProductIds: ["p1"] }),
+    ];
+    expect(referenceOnlyCount(cases)).toBe(2);
+  });
+
+  it("says what the server says", () => {
+    expect(referenceOnlyMessage(2)).toBe(
+      "2 cases have only a reference answer; add a judge or a deterministic expectation",
+    );
+    expect(referenceOnlyMessage(1)).toBe(
+      "1 case has only a reference answer; add a judge or a deterministic expectation",
+    );
   });
 });
 

@@ -120,25 +120,35 @@ describe("ResultsTable", () => {
           result({ id: "b", question: "Improved one" }),
           result({ id: "c", question: "Same one" }),
           result({ id: "d", question: "Brand new one" }),
+          result({ id: "e", question: "Errored one", passed: false, error: "provider unavailable" }),
         ]}
-        comparison={{ a: "regressed", b: "improved", c: "unchanged", d: "new" }}
+        comparison={{ a: "regressed", b: "improved", c: "unchanged", d: "new", e: "errored" }}
       />,
     );
     const counts = screen.getByRole("list", { name: "Compared with the other run" });
     expect(within(counts).getByText("Regressed: 1")).toBeInTheDocument();
     expect(within(counts).getByText("Improved: 1")).toBeInTheDocument();
+    expect(within(counts).getByText("Errored: 1")).toBeInTheDocument();
     expect(within(counts).getByText("Unchanged: 1")).toBeInTheDocument();
     expect(within(counts).getByText("New: 1")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByLabelText("Show only regressions"));
+    // The errored row is labelled as such, not as a regression.
+    const erroredRow = screen.getByText("Errored one").closest("tr");
+    expect(erroredRow).not.toBeNull();
+    // Twice: the comparison badge beside Fail, and the scores column's own.
+    expect(within(erroredRow as HTMLElement).getAllByText("Errored")).toHaveLength(2);
+    expect(within(erroredRow as HTMLElement).queryByText("Regressed")).toBeNull();
+
+    fireEvent.click(screen.getByLabelText("Show only regressions and errors"));
     expect(screen.getByText("Regressed one")).toBeInTheDocument();
+    expect(screen.getByText("Errored one")).toBeInTheDocument();
     expect(screen.queryByText("Improved one")).toBeNull();
     expect(screen.queryByText("Brand new one")).toBeNull();
   });
 
-  it("says when nothing regressed under the filter", () => {
+  it("says when nothing regressed or errored under the filter", () => {
     render(<ResultsTable results={[result({ id: "a" })]} comparison={{ a: "unchanged" }} />);
-    fireEvent.click(screen.getByLabelText("Show only regressions"));
-    expect(screen.getByText("No case regressed.")).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Show only regressions and errors"));
+    expect(screen.getByText("No case regressed or errored.")).toBeInTheDocument();
   });
 });

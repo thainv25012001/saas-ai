@@ -66,14 +66,20 @@ export function RunsTable({ runs }: { runs: readonly RunRow[] }) {
                   <Badge tone={runStatusTone(run.status)}>{runStatusLabel(run.status)}</Badge>
                   <span className="sr-only">, open run</span>
                 </Link>
-                {isRunActive(run.status) ? (
+                {run.status !== "COMPLETED" ? (
                   <p className="mt-1 text-xs text-ink-subtle">
                     {run.completedCount} of {run.caseCount}
                   </p>
                 ) : null}
               </td>
               <td className="px-5 py-3 text-ink">
-                {run.status === "COMPLETED" ? formatPassRate(run.passRate) : <span className="text-ink-subtle">—</span>}
+                {/* A cancelled or failed run has a summary of the cases that ran; the
+                    "n of m" under its status says how many that was. */}
+                {!isRunActive(run.status) && run.passRate !== null ? (
+                  formatPassRate(run.passRate)
+                ) : (
+                  <span className="text-ink-subtle">—</span>
+                )}
               </td>
               <td className="px-5 py-3 text-ink">
                 {run.promptVersion !== null ? `v${run.promptVersion}` : <span className="text-ink-subtle">Default</span>}

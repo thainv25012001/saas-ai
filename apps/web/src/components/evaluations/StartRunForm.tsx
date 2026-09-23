@@ -7,7 +7,14 @@ import { Button } from "@/components/ui/Button";
 import { cn, focusRing } from "@/components/ui/cn";
 import { Field } from "@/components/ui/Field";
 import { Select } from "@/components/ui/Input";
-import { buildStartRunPayload, runCallEstimate, type StartRunPayload } from "@/lib/evaluations";
+import {
+  buildStartRunPayload,
+  type CaseExpectations,
+  referenceOnlyCount,
+  referenceOnlyMessage,
+  runCallEstimate,
+  type StartRunPayload,
+} from "@/lib/evaluations";
 import { type ProviderInfo, providerLabel } from "@/lib/providers";
 
 export type RunAgent = { id: string; name: string; provider: string; model: string };
@@ -22,6 +29,10 @@ export type VersionsState = {
   noPrompt: boolean;
 };
 
+function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
 const checkboxClasses = cn("size-4 rounded-control accent-primary", focusRing, "focus-visible:ring-offset-1");
 
 /**
@@ -34,10 +45,16 @@ const checkboxClasses = cn("size-4 rounded-control accent-primary", focusRing, "
  * the server would pin the active version anyway, but naming it means the
  * version shown here is the one that runs, even if another is activated
  * between opening the form and pressing Start.
+ *
+ * It takes the dataset's cases, not just their count, for two numbers the
+ * server also cares about: how many cases the judge would grade (the ones
+ * with a reference answer), and how many *only* a judge could grade -- a
+ * run with no judge is refused while there are any, so Start is disabled
+ * with the server's own sentence instead of waiting on its 422.
  */
 export function StartRunForm({
   datasetId,
-  caseCount,
+  cases,
   agents,
   providers,
   useModels,
@@ -48,7 +65,7 @@ export function StartRunForm({
   blockedReason = null,
 }: {
   datasetId: string;
-  caseCount: number;
+  cases: readonly CaseExpectations[];
   agents: readonly RunAgent[];
   providers: readonly ProviderInfo[];
   useModels: (provider: string) => ModelsState;
@@ -81,13 +98,16 @@ export function StartRunForm({
       ? versionChoice
       : (active?.id ?? versions.versions[0]?.id ?? "");
 
-  const calls = runCallEstimate(caseCount, judgeOn);
+  const caseCount = cases.length;
+  const calls = runCallEstimate(cases, judgeOn);
+  const referenceOnly = judgeOn ? 0 : referenceOnlyCount(cases);
   const overrideIncomplete = overrideOn && (!overrideProvider || !overrideModel);
   const judgeIncomplete = judgeOn && (!judgeProvider || !judgeModel);
   const versionPending = !versions.noPrompt && !versions.failed && versionId === "";
   const canStart =
     agent !== null &&
     caseCount > 0 &&
+    referenceOnly === 0 &&
     !blockedReason &&
     !overrideIncomplete &&
     !judgeIncomplete &&
@@ -281,18 +301,23 @@ export function StartRunForm({
               )}
             </Field>
           </div>
+        ) : referenceOnly > 0 ? (
+          <Alert tone="warn">{referenceOnlyMessage(referenceOnly)}</Alert>
         ) : (
           <p className="text-xs text-ink-subtle">
-            Without a judge, reference answers are not graded; the other expectations still are.
+            Without a judge, a run scores phrases, tools, documents and products. Grading a reference answer needs
+            one.
           </p>
         )}
       </div>
 
       <p className="text-sm text-ink" aria-live="polite">
-        {`${caseCount} ${caseCount === 1 ? "case" : "cases"} × ${judgeOn ? 2 : 1} LLM ${judgeOn ? "calls" : "call"} = ${calls} ${calls === 1 ? "call" : "calls"}`}
+        {`${plural(caseCount, "case", "cases")}: at least ${plural(calls.turns, "agent call", "agent calls")}${
+          judgeOn ? `, plus up to ${plural(calls.judgeCalls, "judge call", "judge calls")}` : ""
+        }.`}
         <span className="block text-xs text-ink-subtle">
-          {judgeOn ? "The judge grades only cases with a reference answer. " : ""}A turn that uses tools makes
-          more than one call, so this is a floor. Calls are billed at the provider’s normal rate.
+          {judgeOn ? "The judge grades only cases with a reference answer, and skips a turn that errored. " : ""}A
+          turn that uses tools makes more than one agent call. Calls are billed at the provider’s normal rate.
         </span>
       </p>
 

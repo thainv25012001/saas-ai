@@ -44,4 +44,19 @@ describe("RunsTable", () => {
     expect(screen.getByText("1 of 4")).toBeInTheDocument();
     expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
   });
+
+  it("shows the pass rate of the cases a cancelled or failed run did run, and how many that was", () => {
+    render(
+      <RunsTable
+        runs={[
+          run({ id: "r1", status: "CANCELLED", completedCount: 2, passRate: 0.5 }),
+          run({ id: "r2", status: "FAILED", completedCount: 1, passRate: 1 }),
+        ]}
+      />,
+    );
+    expect(screen.getByText("50%")).toBeInTheDocument();
+    expect(screen.getByText("2 of 4")).toBeInTheDocument();
+    expect(screen.getByText("100%")).toBeInTheDocument();
+    expect(screen.getByText("1 of 4")).toBeInTheDocument();
+  });
 });

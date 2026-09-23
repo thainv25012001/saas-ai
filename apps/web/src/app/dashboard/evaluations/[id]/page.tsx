@@ -353,7 +353,7 @@ export default function EvaluationDatasetPage({ params }: { params: Promise<{ id
           ) : (
             <StartRunForm
               datasetId={id}
-              caseCount={cases.length}
+              cases={cases}
               agents={agents}
               providers={providersResult.data?.configuredProviders ?? []}
               useModels={useProviderModels}

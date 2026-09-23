@@ -20,6 +20,22 @@ const VERSIONS: VersionsState = {
   noPrompt: false,
 };
 
+type Expectations = React.ComponentProps<typeof StartRunForm>["cases"][number];
+
+function kase(overrides: Partial<Expectations> = {}): Expectations {
+  return {
+    referenceAnswer: null,
+    requiredPhrases: ["yes"],
+    expectedToolNames: [],
+    expectedDocumentIds: [],
+    expectedProductIds: [],
+    ...overrides,
+  };
+}
+
+// Three cases, one of them with a reference answer the judge would grade.
+const CASES = [kase(), kase({ referenceAnswer: "Thirty days" }), kase()];
+
 const useModels = (provider: string): ModelsState => ({
   options: provider ? [{ id: `${provider}-model`, label: `${provider} model`, contextLength: null }] : [],
   fetching: false,
@@ -31,7 +47,7 @@ function renderForm(overrides: Partial<React.ComponentProps<typeof StartRunForm>
   render(
     <StartRunForm
       datasetId="ds-1"
-      caseCount={3}
+      cases={CASES}
       agents={AGENTS}
       providers={PROVIDERS}
       useModels={useModels}
@@ -44,11 +60,31 @@ function renderForm(overrides: Partial<React.ComponentProps<typeof StartRunForm>
 }
 
 describe("StartRunForm", () => {
-  it("shows the call estimate, doubling it with a judge", () => {
+  it("shows the call estimate, adding judge calls only for cases with a reference answer", () => {
     renderForm();
-    expect(screen.getByText(/3 cases × 1 LLM call = 3 calls/)).toBeInTheDocument();
+    expect(screen.getByText("3 cases: at least 3 agent calls.")).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Grade answers with an LLM judge"));
-    expect(screen.getByText(/3 cases × 2 LLM calls = 6 calls/)).toBeInTheDocument();
+    expect(screen.getByText("3 cases: at least 3 agent calls, plus up to 1 judge call.")).toBeInTheDocument();
+  });
+
+  it("refuses to start without a judge while cases have only a reference answer", () => {
+    const { onStart } = renderForm({
+      cases: [kase({ requiredPhrases: [], referenceAnswer: "A" }), kase({ requiredPhrases: [], referenceAnswer: "B" }), kase()],
+    });
+    expect(
+      screen.getByText("2 cases have only a reference answer; add a judge or a deterministic expectation"),
+    ).toBeInTheDocument();
+    const start = screen.getByRole("button", { name: "Start run" });
+    expect(start).toBeDisabled();
+    fireEvent.click(start);
+    expect(onStart).not.toHaveBeenCalled();
+
+    // Choosing a judge clears it.
+    fireEvent.click(screen.getByLabelText("Grade answers with an LLM judge"));
+    fireEvent.change(screen.getByLabelText("Judge provider"), { target: { value: "openai" } });
+    fireEvent.change(screen.getByLabelText("Judge model"), { target: { value: "openai-model" } });
+    expect(screen.queryByText(/only a reference answer/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Start run" })).toBeEnabled();
   });
 
   it("defaults to the active version, marks it, and sends it pinned", () => {
@@ -107,7 +143,7 @@ describe("StartRunForm", () => {
   });
 
   it("cannot start with no cases", () => {
-    renderForm({ caseCount: 0 });
+    renderForm({ cases: [] });
     expect(screen.getByRole("button", { name: "Start run" })).toBeDisabled();
   });
 

@@ -461,12 +461,16 @@ fails, and its own Pass/Fail badge says so. Scorer keys go through
 still renders.
 
 **Comparison states.** Comparing two runs gives each result
-`regressed` (danger), `improved` (success), `unchanged` (neutral) or `new`
-(info; the case was added since). `unchanged` earns no colour, so a scan
-picks out the rows that moved. The counts sit above the table as badges, and
-a zero count is neutral whatever its state, so "Regressed: 0" does not read as
-an alarm. A "Show only regressions" filter narrows the table. The
-comparison is computed in the browser (`compareRuns`, docs/PHASE-6.md §6).
+`regressed` (danger), `improved` (success), `errored` (warn), `unchanged`
+(neutral) or `new` (info; the case was added since). `errored` means the
+candidate's turn errored, so it measured nothing: it is never counted as a
+regression or an improvement, and it takes the same `warn` as a scorer that
+could not score. `unchanged` earns no colour, so a scan picks out the rows
+that moved. The counts sit above the table as badges, and a zero count is
+neutral whatever its state, so "Regressed: 0" does not read as an alarm. A
+"Show only regressions and errors" filter narrows the table to the rows
+that need a look. The comparison is computed in the browser (`compareRuns`,
+docs/PHASE-6.md §6).
 
 **Progress.** A run in flight shows a bar: `role="progressbar"` with
 `aria-valuenow`/`aria-valuemax` as case *counts*, not a percentage. The
@@ -476,6 +480,13 @@ polls under the same rules as Polling above: the run page and the
 dataset's runs list both go through `usePollWhile`, gated by
 `shouldPollRun` (active status, visible tab). Its fake-timer test asserts
 that the call count stops rising once the status turns terminal.
+
+**Cancelled and failed runs show their figures.** The API writes a summary
+for them too, of the cases that ran, so the run page's tiles show real
+numbers and the runs table shows the pass rate with `n of m` under the
+status badge for any run that did not complete. The dataset list's
+"latest run" line still shows a pass rate only for a completed run: a
+partial rate is not a headline.
 
 **Summary tiles show `—` for what they do not know.** A `null` cost means
 a model in the run is unpriced, not that it was free. The tile shows `—`
@@ -495,6 +506,13 @@ Three smaller rules came with these pages:
   are used for expected tools, expected documents, the run form's two
   opt-ins and the regressions filter. There is no checkbox primitive yet.
   With a fourth consumer, it belongs in `ui/`.
+- **A form mirrors a server rule it can see, with the server's words.**
+  `StartRunForm` takes the dataset's cases (not just a count), so with no
+  judge chosen it counts the reference-answer-only cases, shows the API's
+  exact 422 sentence (`referenceOnlyMessage`) as a `warn` alert, and
+  disables Start. Its call estimate is worded to be true on both sides:
+  "at least" N agent calls (a tool-using turn makes more), "up to" M judge
+  calls (only cases with a reference answer, and none for an errored turn).
 - **A presentational form that needs queries takes them as hooks.**
   `StartRunForm` receives `useModels(provider)` and `useVersions(agentId)`
   as props, which the page defines at module level so their identity is

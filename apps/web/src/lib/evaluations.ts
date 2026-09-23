@@ -66,11 +66,19 @@ export function formatPassRate(rate: number | null | undefined): string {
   return `${Math.round(rate * 1000) / 10}%`;
 }
 
-/** How many LLM calls a run makes, at least: one agent turn per case, plus
- * one judge call per case when a judge is set. A turn that calls tools makes
- * more than one model call, so this is a floor, and the form says so. */
-export function runCallEstimate(caseCount: number, withJudge: boolean): number {
-  return caseCount * (withJudge ? 2 : 1);
+/** The LLM calls a run makes. `turns` is a floor: one agent turn per case,
+ * and a turn that calls tools makes more than one model call. `judgeCalls`
+ * is a ceiling: with a judge, one call per case that has a reference answer
+ * -- the only cases it grades -- and none for a turn that errored. The form
+ * words each side accordingly. */
+export function runCallEstimate(
+  cases: readonly CaseExpectations[],
+  withJudge: boolean,
+): { turns: number; judgeCalls: number } {
+  return {
+    turns: cases.length,
+    judgeCalls: withJudge ? cases.filter((c) => Boolean(c.referenceAnswer?.trim())).length : 0,
+  };
 }
 
 // --- Scores ------------------------------------------------------------
@@ -137,9 +145,13 @@ export function parseToolArguments(text: string): Record<string, unknown> {
 
 // --- Comparing runs (docs/PHASE-6.md §6) --------------------------------
 
-export type ResultLike = { caseId: string | null; question: string; passed: boolean };
+/** `error` is optional so a caller comparing only pass/fail can omit it;
+ * the run page passes it. */
+export type ResultLike = { caseId: string | null; question: string; passed: boolean; error?: string | null };
 
-export type ComparisonState = "regressed" | "improved" | "unchanged" | "new";
+/** `errored`: the candidate's turn errored, so it measured nothing -- neither
+ * a regression nor an improvement, whatever the base did. */
+export type ComparisonState = "regressed" | "improved" | "errored" | "unchanged" | "new";
 
 export type Comparison<C extends ResultLike = ResultLike, B extends ResultLike = C> = {
   candidate: C;
@@ -157,6 +169,8 @@ export type Comparison<C extends ResultLike = ResultLike, B extends ResultLike =
  * thing the result keeps of the case. A candidate whose case still exists
  * also falls back to the question if the base has no result for that id but
  * holds an orphaned (null-id) result asking the same thing.
+ *
+ * A candidate whose turn errored is `errored`, matched or not.
  *
  * A case in the base but not the candidate (removed since) has no row to
  * annotate and is not reported.
@@ -186,6 +200,7 @@ export function compareRuns<B extends ResultLike, C extends ResultLike>(
 }
 
 function comparisonState(base: ResultLike | null, candidate: ResultLike): ComparisonState {
+  if (candidate.error !== null && candidate.error !== undefined) return "errored";
   if (base === null) return "new";
   if (base.passed && !candidate.passed) return "regressed";
   if (!base.passed && candidate.passed) return "improved";
@@ -193,7 +208,7 @@ function comparisonState(base: ResultLike | null, candidate: ResultLike): Compar
 }
 
 export function comparisonCounts(comparisons: readonly { state: ComparisonState }[]): Record<ComparisonState, number> {
-  const counts: Record<ComparisonState, number> = { regressed: 0, improved: 0, unchanged: 0, new: 0 };
+  const counts: Record<ComparisonState, number> = { regressed: 0, improved: 0, errored: 0, unchanged: 0, new: 0 };
   for (const { state } of comparisons) counts[state] += 1;
   return counts;
 }
@@ -204,6 +219,8 @@ export function comparisonLabel(state: ComparisonState): string {
       return "Regressed";
     case "improved":
       return "Improved";
+    case "errored":
+      return "Errored";
     case "unchanged":
       return "Unchanged";
     case "new":
@@ -211,13 +228,17 @@ export function comparisonLabel(state: ComparisonState): string {
   }
 }
 
-/** `unchanged` earns no colour, so a scan picks out the rows that moved. */
+/** `unchanged` earns no colour, so a scan picks out the rows that moved.
+ * `errored` is `warn`, like a scorer that could not score: nothing measured
+ * the answer as worse, the measurement did not happen. */
 export function comparisonTone(state: ComparisonState): BadgeTone {
   switch (state) {
     case "regressed":
       return "danger";
     case "improved":
       return "success";
+    case "errored":
+      return "warn";
     case "unchanged":
       return "neutral";
     case "new":
@@ -255,6 +276,30 @@ export function hasExpectation(expectations: CaseExpectations): boolean {
     expectations.expectedDocumentIds.length > 0 ||
     expectations.expectedProductIds.length > 0
   );
+}
+
+/** A case only a judge can grade: none of the deterministic expectations
+ * (phrases, tools, documents, products). `CaseInput` guarantees every case
+ * has at least one expectation, so this is a reference-answer-only case. */
+function isReferenceOnly(expectations: CaseExpectations): boolean {
+  return (
+    !expectations.requiredPhrases.some((phrase) => phrase.trim() !== "") &&
+    expectations.expectedToolNames.length === 0 &&
+    expectations.expectedDocumentIds.length === 0 &&
+    expectations.expectedProductIds.length === 0
+  );
+}
+
+export function referenceOnlyCount(cases: readonly CaseExpectations[]): number {
+  return cases.filter(isReferenceOnly).length;
+}
+
+/** The server's 422 for a judge-less start (`reference_only_message` in
+ * `apps/api/app/evaluations/service.py`), word for word, so the form says
+ * exactly what the API would. */
+export function referenceOnlyMessage(count: number): string {
+  const cases = count === 1 ? "1 case has" : `${count} cases have`;
+  return `${cases} only a reference answer; add a judge or a deterministic expectation`;
 }
 
 /** One phrase (or tag) per line; blank lines dropped, each trimmed, repeats
