@@ -10,12 +10,15 @@ from collections.abc import Callable
 from typing import Any
 
 from arq.connections import RedisSettings
+from arq.worker import Function, func
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.workers.tasks import (
+    EVALUATION_MAX_TRIES,
     import_products_task,
     ingest_document_task,
+    run_evaluation_task,
     title_conversation_task,
 )
 
@@ -37,10 +40,20 @@ class WorkerSettings:
     # Annotated, not inferred: mypy infers a list's type from its first
     # element, so a second job with a different signature is a `list-item`
     # error rather than the heterogeneous registry arq actually wants.
-    functions: list[Callable[..., Any]] = [
+    functions: list[Function | Callable[..., Any]] = [
         ingest_document_task,
         title_conversation_task,
         import_products_task,
+        # Wrapped, for its own timeout: an evaluation runs its cases one
+        # after another (docs/PHASE-6.md §5), so up to 200 real provider
+        # turns plus judge calls cannot fit `job_timeout` below. `func`
+        # registers it under `run_evaluation_task.__qualname__` -- the same
+        # string `app.workers.enqueue.enqueue` sends (`__name__`), pinned in
+        # tests/unit/test_worker_settings.py. `max_tries` is named here,
+        # not inherited from the class attribute below, because the runner
+        # is told the same number: on the last try its time budget fails
+        # the run rather than raising a `Retry` arq would never act on.
+        func(run_evaluation_task, timeout=3600, max_tries=EVALUATION_MAX_TRIES),
     ]
     on_startup = _on_startup
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)

@@ -24,7 +24,7 @@ from app.agents.runner import (
 from app.agents.service import AgentService
 from app.conversations.schemas import AppendMessageInput, CreateConversationInput, RecordUsageInput
 from app.conversations.service import ConversationService
-from app.core.errors import AppError, NotFoundError
+from app.core.errors import AppError, NotFoundError, ValidationError
 from app.core.ids import uuid7
 from app.core.logging import get_logger
 from app.core.tenancy import TenantContext
@@ -717,6 +717,7 @@ class ChatService:
         channel: ConversationChannel = ConversationChannel.API,
         override_provider: str | None = None,
         override_model: str | None = None,
+        prompt_version_id: uuid.UUID | None = None,
     ) -> AsyncIterator[ChatEvent]:
         """`override_provider`/`override_model` answer this one turn with
         something other than the agent's configured pair, without writing
@@ -725,6 +726,22 @@ class ChatService:
         `provider_override` on `__init__`, which injects a whole `LLMProvider`
         object (tests, and nothing else); these are the *names* a caller may
         pass per request.
+
+        `prompt_version_id`, left `None`, changes nothing: the agent's active
+        version answers, or `DEFAULT_SALES_SYSTEM_PROMPT` when the agent has
+        no prompt at all -- exactly as before this parameter existed. Given a
+        value, PHASE-6.md §5's evaluation run pins a turn to that exact
+        version instead: its text and declared variables are what render, and
+        the id (not the active version's) is what `ChatMessageEnd` and the
+        persisted assistant message record -- so a version activated while a
+        run is in progress cannot change what an already-pinned turn used.
+        The version must satisfy `version.prompt_id == agent.prompt_id`,
+        checked in `_resolve_system_prompt`; an agent with no prompt at all
+        given a version is the same mismatch. Both raise `ValidationError`,
+        resolved in the same pre-write span the provider is (below): a bad
+        pin is a caller mistake, not a reason to leave a conversation behind.
+        `app/api/chat.py` never passes this -- the playground always runs the
+        agent's own active version.
         """
         # Step 1: load the agent and its config. Both raise NotFoundError
         # (cross-tenant, or a config row that does not exist) before any
@@ -751,7 +768,14 @@ class ChatService:
         # a JSON error envelope and not an in-band event.
         provider = self._provider_override or get_provider(provider_name)
 
-        system_prompt, prompt_version_id = await self._resolve_system_prompt(agent)
+        # A bad pin (wrong prompt, or an agent with none) is validated in the
+        # same pre-write span as the provider above, for the same reason: the
+        # caller's own resolved id is consumed here and replaced by what
+        # actually answered the turn -- `None` for the fallback default,
+        # otherwise whichever version's text was rendered.
+        system_prompt, prompt_version_id = await self._resolve_system_prompt(
+            agent, prompt_version_id
+        )
 
         # Step 4: create or load the conversation (404s cross-tenant for an
         # existing id, via ConversationService.get).
@@ -1373,19 +1397,40 @@ class ChatService:
         )
         await self.session.flush()
 
-    async def _resolve_system_prompt(self, agent: Agent) -> tuple[str, uuid.UUID | None]:
-        """Step 2+3: resolve the active prompt version (or the default) and
-        render it. `prompt_version_id` is `None` exactly when the fallback
-        default was used -- that is what lets every assistant message be
-        traced back to the exact prompt text that produced it, per
-        PHASE-2.md §6, without inventing a version id for text that has none.
+    async def _resolve_system_prompt(
+        self, agent: Agent, pinned_version_id: uuid.UUID | None = None
+    ) -> tuple[str, uuid.UUID | None]:
+        """Step 2+3: resolve the prompt version that answers this turn (a
+        pinned one, else the active one, else the default) and render it.
+        `prompt_version_id` is `None` exactly when the fallback default was
+        used -- that is what lets every assistant message be traced back to
+        the exact prompt text that produced it, per PHASE-2.md §6, without
+        inventing a version id for text that has none.
+
+        `pinned_version_id` (Phase 6, PHASE-6.md §5) is validated here,
+        before any conversation row exists (`send` calls this in the same
+        pre-write span it resolves the provider in): `get_version` itself
+        raises `NotFoundError` for a cross-tenant id, and the ownership check
+        below raises `ValidationError` for a version that belongs to some
+        OTHER prompt of this same organization, or to an agent with no
+        prompt at all (`agent.prompt_id is None` can equal no real
+        `version.prompt_id`). A pin that passes both checks skips the active-
+        version lookup entirely -- it answers with that exact version's text
+        regardless of which version is active right now.
         """
         declared_variables: dict[str, str]
-        if agent.prompt_id is not None:
-            version = await self._prompts.active_version(agent.prompt_id)
+        if pinned_version_id is not None:
+            version = await self._prompts.get_version(pinned_version_id)
+            if version.prompt_id != agent.prompt_id:
+                raise ValidationError("prompt version does not belong to this agent's prompt")
             template = version.system_prompt
             declared_variables = {k: str(v) for k, v in version.variables.items()}
             prompt_version_id: uuid.UUID | None = version.id
+        elif agent.prompt_id is not None:
+            version = await self._prompts.active_version(agent.prompt_id)
+            template = version.system_prompt
+            declared_variables = {k: str(v) for k, v in version.variables.items()}
+            prompt_version_id = version.id
         else:
             template = DEFAULT_SALES_SYSTEM_PROMPT
             declared_variables = {}

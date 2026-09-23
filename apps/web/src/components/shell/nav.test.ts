@@ -27,6 +27,10 @@ describe("currentSectionLabel", () => {
     expect(currentSectionLabel("/dashboard/agents/abc")).toBe("Agents");
   });
 
+  it("keeps Evaluations highlighted on a run page nested two levels down", () => {
+    expect(currentSectionLabel("/dashboard/evaluations/runs/abc")).toBe("Evaluations");
+  });
+
   it("names Overview for the dashboard root", () => {
     expect(currentSectionLabel("/dashboard")).toBe("Overview");
   });
@@ -41,6 +45,16 @@ describe("NAV_GROUPS", () => {
     const soon = NAV_GROUPS.flatMap((group) => group.items).filter((item) => item.state === "soon");
     expect(soon.length).toBeGreaterThan(0);
     expect(soon.every((item) => Boolean(item.phase))).toBe(true);
+  });
+
+  it("lists Evaluations as a live section of the Run group", () => {
+    const run = NAV_GROUPS.find((group) => group.label === "Run");
+    expect(run?.items).toContainEqual({
+      href: "/dashboard/evaluations",
+      label: "Evaluations",
+      icon: "evaluation",
+      state: "live",
+    });
   });
 
   it("has no duplicate hrefs", () => {

@@ -11,7 +11,7 @@ from app.chat.service import (
 )
 from app.conversations.service import ConversationService
 from app.core.config import get_settings
-from app.core.errors import NotFoundError
+from app.core.errors import NotFoundError, ValidationError
 from app.core.tenancy import tenant_session
 from app.db.models import MessageRole, UsageEvent, UsageKind
 from app.llm.errors import LLMConfigurationError, LLMUnavailableError
@@ -391,6 +391,139 @@ async def test_a_successful_turn_writes_exactly_one_usage_event(tenant_a):
     # would be worse than none at all.
     assert row.cost_usd == estimate_cost("claude-sonnet-5", usage)
     assert row.cost_usd is not None and row.cost_usd > 0
+
+
+async def test_pinned_prompt_version_is_used_even_when_a_newer_version_is_active(tenant_a):
+    """PHASE-6.md §5: an evaluation run pins a prompt version at start, so a
+    version activated mid-run must not change what an already-pinned turn
+    sees. Creates v1 (active), then v2 (activated, so v1 is no longer the
+    prompt's active version), and asserts a turn pinned to v1 still gets v1's
+    text -- and that the persisted message and ChatMessageEnd both record
+    v1's id, not v2's."""
+    provider = FakeProvider(script=["ok"])
+    async with tenant_session(tenant_a) as session:
+        prompts = PromptService(session, tenant_a)
+        prompt = await prompts.create_prompt(
+            CreatePromptInput(
+                name="Sales prompt",
+                key="sales",
+                system_prompt="v1 PINNED MARKER for {{company_name}}",
+            )
+        )
+        v1 = await prompts.active_version(prompt.id)
+        v2 = await prompts.create_version(
+            prompt.id, CreateVersionInput(system_prompt="v2 UNIQUE MARKER for {{company_name}}")
+        )
+        await prompts.activate_version(v2.id)
+
+        agent = await _agent(session, tenant_a)
+        agent.prompt_id = prompt.id
+        await session.flush()
+
+        service = ChatService(session, tenant_a, provider_override=provider)
+        events = [event async for event in service.send(agent.id, "Hello", prompt_version_id=v1.id)]
+
+    assert provider.last_request is not None
+    assert "v1 PINNED MARKER" in provider.last_request.system
+    assert "v2 UNIQUE MARKER" not in provider.last_request.system
+
+    ends = [e for e in events if isinstance(e, ChatMessageEnd)]
+    assert len(ends) == 1
+    assert ends[0].prompt_version_id == v1.id
+
+    conversation_id = next(e.conversation_id for e in events if isinstance(e, ChatMessageStart))
+    async with tenant_session(tenant_a) as session:
+        history = await ConversationService(session, tenant_a).history(conversation_id)
+    assert history[1].prompt_version_id == v1.id
+
+
+async def test_pinning_a_version_from_a_different_prompt_raises_validation_error(tenant_a):
+    """`version.prompt_id == agent.prompt_id` is required -- a version from
+    some other prompt of the same organization is still not a version of
+    THIS agent's prompt, and must be rejected before any conversation row is
+    created, exactly like a bad provider or a missing agent."""
+    async with tenant_session(tenant_a) as session:
+        prompts = PromptService(session, tenant_a)
+        agents_prompt = await prompts.create_prompt(
+            CreatePromptInput(name="Agent's prompt", key="agents_own", system_prompt="own text")
+        )
+        other_prompt = await prompts.create_prompt(
+            CreatePromptInput(name="Some other prompt", key="other", system_prompt="other text")
+        )
+        other_version = await prompts.active_version(other_prompt.id)
+
+        agent = await _agent(session, tenant_a)
+        agent.prompt_id = agents_prompt.id
+        await session.flush()
+
+        service = ChatService(session, tenant_a, provider_override=FakeProvider(script=["x"]))
+        with pytest.raises(ValidationError):
+            _ = [
+                event
+                async for event in service.send(
+                    agent.id, "Hello", prompt_version_id=other_version.id
+                )
+            ]
+
+        conversations = await ConversationService(session, tenant_a).list_for_agent(agent.id)
+    assert conversations == []
+
+
+async def test_pinning_a_version_on_an_agent_with_no_prompt_raises_validation_error(tenant_a):
+    """An agent with `prompt_id is None` uses the fallback default prompt --
+    it has no prompt for any version to belong to, so pinning one is always
+    a mismatch, not a special case of the active-version lookup."""
+    async with tenant_session(tenant_a) as session:
+        prompts = PromptService(session, tenant_a)
+        prompt = await prompts.create_prompt(
+            CreatePromptInput(name="Unrelated prompt", key="unrelated", system_prompt="text")
+        )
+        version = await prompts.active_version(prompt.id)
+
+        agent = await _agent(session, tenant_a)  # agent.prompt_id is None
+
+        service = ChatService(session, tenant_a, provider_override=FakeProvider(script=["x"]))
+        with pytest.raises(ValidationError):
+            _ = [
+                event
+                async for event in service.send(agent.id, "Hello", prompt_version_id=version.id)
+            ]
+
+        conversations = await ConversationService(session, tenant_a).list_for_agent(agent.id)
+    assert conversations == []
+
+
+async def test_pinning_another_orgs_prompt_version_raises_not_found(tenant_a, tenant_b):
+    """A version id from a different organization must 404, not leak whether
+    it exists -- the same cross-tenant rule `PromptService.get_version` and
+    every other scoped lookup in this codebase already follows."""
+    async with tenant_session(tenant_b) as session:
+        other_prompts = PromptService(session, tenant_b)
+        other_prompt = await other_prompts.create_prompt(
+            CreatePromptInput(name="Other org's prompt", key="other_org", system_prompt="text")
+        )
+        other_version = await other_prompts.active_version(other_prompt.id)
+
+    async with tenant_session(tenant_a) as session:
+        prompts = PromptService(session, tenant_a)
+        prompt = await prompts.create_prompt(
+            CreatePromptInput(name="Tenant A's prompt", key="tenant_a", system_prompt="text")
+        )
+        agent = await _agent(session, tenant_a)
+        agent.prompt_id = prompt.id
+        await session.flush()
+
+        service = ChatService(session, tenant_a, provider_override=FakeProvider(script=["x"]))
+        with pytest.raises(NotFoundError):
+            _ = [
+                event
+                async for event in service.send(
+                    agent.id, "Hello", prompt_version_id=other_version.id
+                )
+            ]
+
+        conversations = await ConversationService(session, tenant_a).list_for_agent(agent.id)
+    assert conversations == []
 
 
 async def test_a_midstream_failure_writes_no_usage_event(tenant_a):

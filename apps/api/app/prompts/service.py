@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Sequence
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -115,6 +116,61 @@ class PromptService:
         version.is_active = True
         await self.session.flush()
         return version
+
+    async def get_version(self, version_id: uuid.UUID) -> PromptVersion:
+        """Load one version by id, two-layer scoped like every other lookup
+        here: the explicit `organization_id` predicate plus this session's
+        own RLS. A version id from another organization is indistinguishable
+        from one that does not exist -- `NotFoundError`, not a more specific
+        error, for the same reason `get_prompt`/`activate_version` never
+        confirm whether a foreign id belongs to someone else.
+
+        Used by `ChatService._resolve_system_prompt` (Phase 6) to resolve a
+        pinned version *before* checking it belongs to the calling agent's
+        prompt -- that check needs the row's own `prompt_id`, which only
+        this lookup can supply.
+        """
+        result = await self.session.execute(
+            select(PromptVersion).where(
+                PromptVersion.id == version_id,
+                PromptVersion.organization_id == self.tenant.organization_id,
+            )
+        )
+        version = result.scalar_one_or_none()
+        if version is None:
+            raise NotFoundError("prompt version not found")
+        return version
+
+    async def list_versions(self, prompt_id: uuid.UUID) -> list[PromptVersion]:
+        """Every version of one prompt, newest first. A prompt id from another
+        organization is `NotFoundError` via `get_prompt`, as everywhere else
+        here. Used by the Evaluations dashboard to pick the version a run pins
+        (docs/PHASE-6.md §5)."""
+        await self.get_prompt(prompt_id)
+        return (await self.versions_by_prompt([prompt_id]))[prompt_id]
+
+    async def versions_by_prompt(
+        self, prompt_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, list[PromptVersion]]:
+        """Versions for several prompts in one query, newest first per prompt,
+        keyed by prompt id (every requested id present, possibly empty). The
+        batched form behind `Prompt.versions`' dataloader. It does not raise
+        for an unknown or foreign id -- the explicit `organization_id`
+        predicate (plus RLS) simply returns no rows for it."""
+        by_prompt: dict[uuid.UUID, list[PromptVersion]] = {pid: [] for pid in prompt_ids}
+        if not prompt_ids:
+            return by_prompt
+        result = await self.session.execute(
+            select(PromptVersion)
+            .where(
+                PromptVersion.prompt_id.in_(list(prompt_ids)),
+                PromptVersion.organization_id == self.tenant.organization_id,
+            )
+            .order_by(PromptVersion.prompt_id, PromptVersion.version.desc())
+        )
+        for version in result.scalars().all():
+            by_prompt[version.prompt_id].append(version)
+        return by_prompt
 
     async def active_version(self, prompt_id: uuid.UUID) -> PromptVersion:
         result = await self.session.execute(

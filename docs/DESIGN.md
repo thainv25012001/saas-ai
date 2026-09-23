@@ -437,6 +437,99 @@ until the whole-branch review's Critical 1 fix a disabled tool ran anyway.
 Copy that describes a guarantee ages better than copy that describes a
 default, and this one is now true.
 
+## Evaluations (Phase 6 Task 6)
+
+The Evaluations pages (`app/dashboard/evaluations/`, `components/evaluations/`)
+add five patterns. The lookups behind them all live in
+[`lib/evaluations.ts`](../apps/web/src/lib/evaluations.ts), in the
+one-lookup shape of "Status as a tone".
+
+**Run status as a tone.** `PENDING` neutral (`Queued`), `RUNNING` info,
+`COMPLETED` success, `FAILED` danger, `CANCELLED` neutral (someone chose
+it; nothing broke). `COMPLETED` is green because the run *finished*, not
+because its cases passed. The pass rate always sits beside it, and nothing
+reads the badge as a verdict on the agent.
+
+**Score badges.** Every scorer on a result gets one `Badge`, labelled with
+its name and score (`Tool selection 50%`). Passed is `success`, failed is
+`danger`, and a scorer that *could not score* (`status: "error"`, meaning a
+judge that raised or returned garbage) is `warn` with the label
+`Judge: error`. Nothing measured that answer as wrong. The measurement
+itself did not happen, and those are different things to fix. The case still
+fails, and its own Pass/Fail badge says so. Scorer keys go through
+`scorerLabel`, which falls back to the raw key, so a scorer the API adds later
+still renders.
+
+**Comparison states.** Comparing two runs gives each result
+`regressed` (danger), `improved` (success), `errored` (warn), `unchanged`
+(neutral) or `new` (info; the case was added since). `errored` means the
+candidate's turn errored, so it measured nothing: it is never counted as a
+regression or an improvement, and it takes the same `warn` as a scorer that
+could not score. `unchanged` earns no colour, so a scan picks out the rows
+that moved. The counts sit above the table as badges, and a zero count is
+neutral whatever its state, so "Regressed: 0" does not read as an alarm. A
+"Show only regressions and errors" filter narrows the table to the rows
+that need a look. The comparison is computed in the browser (`compareRuns`,
+docs/PHASE-6.md §6).
+
+**Progress.** A run in flight shows a bar: `role="progressbar"` with
+`aria-valuenow`/`aria-valuemax` as case *counts*, not a percentage. The
+track is `bg-surface-muted` and the fill `bg-info`, with the count
+(`5 of 20 cases`) written beside it rather than implied by the bar. It
+polls under the same rules as Polling above: the run page and the
+dataset's runs list both go through `usePollWhile`, gated by
+`shouldPollRun` (active status, visible tab). Its fake-timer test asserts
+that the call count stops rising once the status turns terminal.
+
+**Cancelled and failed runs show their figures.** The API writes a summary
+for them too, of the cases that ran, so the run page's tiles show real
+numbers and the runs table shows the pass rate with `n of m` under the
+status badge for any run that did not complete. The dataset list's
+"latest run" line still shows a pass rate only for a completed run: a
+partial rate is not a headline.
+
+**Summary tiles show `—` for what they do not know.** A `null` cost means
+a model in the run is unpriced, not that it was free. The tile shows `—`
+and says why underneath. `formatUsd` (in `lib/format.ts`) keeps up to four
+decimals because one eval turn often costs a fraction of a cent, and
+`$0.00` would claim it was free. `formatLatency` switches from `ms` to `s`
+at one second.
+
+Three smaller rules came with these pages:
+
+- **An expandable table row** is a `<button>` in the first cell with
+  `aria-expanded` and `aria-controls`, pointing at a following detail `<tr>`
+  with a single `colSpan` cell. The button's accessible name is the row's
+  own label (the question), so no extra "Details" button is needed.
+- **Checkboxes** are native `<input type="checkbox">` with
+  `accent-primary` and `focusRing` (offset 1), inside a `<label>`. They
+  are used for expected tools, expected documents, the run form's two
+  opt-ins and the regressions filter. There is no checkbox primitive yet.
+  With a fourth consumer, it belongs in `ui/`.
+- **A form mirrors a server rule it can see, with the server's words.**
+  `StartRunForm` takes the dataset's cases (not just a count), so with no
+  judge chosen it counts the reference-answer-only cases, shows the API's
+  exact 422 sentence (`referenceOnlyMessage`) as a `warn` alert, and
+  disables Start. Its call estimate is worded to be true on both sides:
+  "at least" N agent calls (a tool-using turn makes more), "up to" M judge
+  calls (only cases with a reference answer, and none for an errored turn).
+- **A presentational form that needs queries takes them as hooks.**
+  `StartRunForm` receives `useModels(provider)` and `useVersions(agentId)`
+  as props, which the page defines at module level so their identity is
+  stable. The form keeps its own field state, the page keeps the network,
+  and the test passes plain stub functions instead of a urql client.
+
+Untrusted text gets a fifth source here, and the widest: an evaluation
+result. The question and reference answer are the customer's, and the
+answer, the judge's rationale, each tool call's arguments and excerpt, and a
+turn's error are model output that can quote a document or a visitor. Two of
+these (`EvaluationScore.detail`, `EvaluationToolCall.arguments`) cross the
+wire as JSON *text*. The page parses them (`parseScoreDetail`,
+`parseToolArguments`) and renders every value as a text child. Tool calls
+reuse `chat/ToolCall` rather than a second renderer. `ResultsTable.test.tsx`
+pins it with a `<script>` payload *and* a `**bold**` payload in every one of
+those fields, asserting no `script` and no `strong` element exists.
+
 ## Adding a component
 
 1. Does a primitive already do it? Extend that one instead — a second thing

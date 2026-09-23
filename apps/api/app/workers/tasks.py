@@ -1,6 +1,7 @@
 """arq job functions. This module's function names are arq's job names --
-`WorkerSettings.functions` registers them by identity, and `enqueue_ingest`
-enqueues them by the matching string, so renaming a function here is a
+`WorkerSettings.functions` registers them by identity (or, for a job that
+needs its own timeout, through `arq.worker.func`, which keeps the same
+name), and `enqueue_ingest` enqueues them by the matching string, so renaming a function here is a
 breaking change to anything already queued under the old name.
 """
 
@@ -22,6 +23,7 @@ from app.core.logging import get_logger
 from app.core.tenancy import TenantContext, tenant_session
 from app.db.models import MessageRole
 from app.documents.service import DocumentService
+from app.evaluations.runner import run_evaluation
 from app.llm.errors import LLMError
 from app.llm.registry import get_provider
 from app.llm.types import CompletionRequest
@@ -30,6 +32,11 @@ from app.rag.ingest import bounded_error_message, ingest_document
 from app.rag.storage import load_document_bytes
 
 logger = get_logger(__name__)
+
+#: arq's `max_tries` for `run_evaluation_task`, registered with it in
+#: `WorkerSettings.functions` and passed to `run_evaluation` -- which must
+#: know when a try is the last one (see its time budget).
+EVALUATION_MAX_TRIES = 3
 
 
 async def ingest_document_task(
@@ -249,4 +256,42 @@ async def import_products_task(
         succeeded_count=outcome.succeeded_count,
         failed_count=outcome.failed_count,
         duration_ms=int((time.monotonic() - started_at) * 1000),
+    )
+
+
+async def run_evaluation_task(
+    ctx: dict[str, Any], *, organization_id: str, evaluation_run_id: str
+) -> None:
+    """The arq entry point for Phase 6's evaluation runs (docs/PHASE-6.md
+    §5) -- a thin wrapper, like `import_products_task` around `run_import`:
+    `run_evaluation` (`app/evaluations/runner.py`) owns every session and
+    status transition, because it alone knows which of its steps may have
+    lost the session a failure happened on.
+
+    The run row is looked up under `organization_id`'s RLS before anything
+    else, so a job enqueued against the wrong organization finds nothing
+    (`claim_run` raises `NotFoundError`, which `run_evaluation` logs and
+    returns from; its `mark_failed` matches no row) instead of running
+    another tenant's dataset.
+
+    Registered with its own 1-hour timeout (`WorkerSettings.functions`),
+    not the worker-wide 10 minutes: cases run one after another, and 200 of
+    them through a real provider can legitimately take that long -- and
+    `run_evaluation` hands off to the next try (`arq.worker.Retry`) well
+    before that timeout, so it needs arq's `job_try` from `ctx` and the
+    `max_tries` it is registered with. The `evaluation_run_*` log lines come
+    from `run_evaluation` itself and carry ids, counts and durations only --
+    never a question or an answer.
+    """
+    tenant = TenantContext(
+        organization_id=uuid.UUID(organization_id),
+        user_id=None,
+        role=None,
+        request_id=f"evaluation_run:{evaluation_run_id}",
+    )
+    await run_evaluation(
+        tenant,
+        uuid.UUID(evaluation_run_id),
+        job_try=int(ctx.get("job_try", 1)),
+        max_tries=EVALUATION_MAX_TRIES,
     )

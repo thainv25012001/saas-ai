@@ -104,3 +104,48 @@ def test_import_products_task_is_registered() -> None:
     from app.workers.tasks import import_products_task
 
     assert import_products_task in WorkerSettings.functions
+
+
+def test_run_evaluation_task_is_registered_under_its_own_name_with_a_one_hour_timeout() -> None:
+    """Registered through `arq.worker.func`, not bare, because an evaluation
+    run needs its own 1-hour timeout (docs/PHASE-6.md §5) rather than the
+    worker-wide `job_timeout` -- so `run_evaluation_task in functions` (the
+    identity check the jobs above use) would be False here by construction.
+    What actually has to hold is what arq dispatches on: a `Function` whose
+    name is exactly the string `enqueue` sends (`task.__name__`), wrapping
+    this very coroutine."""
+    from arq.worker import Function
+
+    from app.workers.tasks import run_evaluation_task
+
+    registered = [
+        entry
+        for entry in WorkerSettings.functions
+        if isinstance(entry, Function) and entry.name == run_evaluation_task.__name__
+    ]
+    assert len(registered) == 1
+    [function] = registered
+    assert function.name == "run_evaluation_task"
+    assert function.coroutine is run_evaluation_task
+    assert function.timeout_s == 3600
+
+
+def test_run_evaluation_task_pins_the_max_tries_the_runner_is_told() -> None:
+    """`run_evaluation` must know which try is the last one (a time-budget
+    hand-off there fails the run instead of raising `Retry`, which arq would
+    never act on) -- so the `max_tries` arq enforces and the one the task
+    passes down must be the same number."""
+    from arq.worker import Function
+
+    from app.workers.tasks import EVALUATION_MAX_TRIES, run_evaluation_task
+
+    [function] = [
+        entry
+        for entry in WorkerSettings.functions
+        if isinstance(entry, Function) and entry.coroutine is run_evaluation_task
+    ]
+    assert function.max_tries == EVALUATION_MAX_TRIES
+    assert function.timeout_s is not None
+    from app.evaluations.runner import EVALUATION_TIME_BUDGET_S
+
+    assert EVALUATION_TIME_BUDGET_S < function.timeout_s

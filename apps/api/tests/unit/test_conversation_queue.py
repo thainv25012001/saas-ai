@@ -7,6 +7,7 @@ why. Redis is never touched here (`create_pool` is monkeypatched).
 import uuid
 
 import pytest
+from arq.worker import Function
 
 from app.conversations.queue import enqueue_title, should_title
 from app.db.models import ConversationChannel
@@ -44,7 +45,13 @@ async def test_enqueue_title_uses_the_registered_task_name(pool):
 async def test_the_enqueued_name_is_one_the_worker_actually_handles(pool):
     await enqueue_title(uuid.uuid4(), uuid.uuid4())
 
-    assert pool.enqueued["name"] in {fn.__name__ for fn in WorkerSettings.functions}
+    # A `Function` (a job registered through `arq.worker.func` for its own
+    # timeout) carries its registered name as `.name`; a bare coroutine is
+    # registered under its own `__name__`.
+    registered = {
+        fn.name if isinstance(fn, Function) else fn.__name__ for fn in WorkerSettings.functions
+    }
+    assert pool.enqueued["name"] in registered
 
 
 async def test_the_pool_is_closed(pool):

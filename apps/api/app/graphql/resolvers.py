@@ -17,6 +17,8 @@ from app.db.models import Membership, Organization
 from app.db.models import ProductAvailability as ProductAvailabilityModel
 from app.db.models import User as UserModel
 from app.documents.service import DocumentService
+from app.evaluations import schemas as eval_schemas
+from app.evaluations.service import EvaluationService
 from app.graphql import types as gql
 from app.graphql.context import Context
 from app.leads.service import LeadService
@@ -112,6 +114,13 @@ def _product_imports(info: Info) -> ProductImportService:
     assert info.context.tenant is not None
     assert info.context.session is not None
     return ProductImportService(info.context.session, info.context.tenant)
+
+
+def _evaluations(info: Info) -> EvaluationService:
+    _require_tenant(info)
+    assert info.context.tenant is not None
+    assert info.context.session is not None
+    return EvaluationService(info.context.session, info.context.tenant)
 
 
 @strawberry.type
@@ -358,6 +367,54 @@ class Query:
             return []
         return [gql.AgentTool.from_pair(tool, is_enabled) for tool, is_enabled in pairs]
 
+    # -----------------------------------------------------------------
+    # Phase 6 -- evaluations (docs/PHASE-6.md). Starting a run is REST, not
+    # a query/mutation -- see the comment above `Mutation` below.
+    # -----------------------------------------------------------------
+
+    @strawberry.field
+    async def evaluation_datasets(self, info: Info) -> list[gql.EvaluationDataset]:
+        return [
+            gql.EvaluationDataset.from_model(d) for d in await _evaluations(info).list_datasets()
+        ]
+
+    @strawberry.field
+    async def evaluation_dataset(self, info: Info, id: uuid.UUID) -> gql.EvaluationDataset:
+        """Non-nullable, raising `not_found` for a missing or cross-tenant
+        id -- follows `agent(id)`'s convention, not `document(id)`'s."""
+        return gql.EvaluationDataset.from_model(await _evaluations(info).get_dataset(id))
+
+    @strawberry.field
+    async def evaluation_cases(self, info: Info, dataset_id: uuid.UUID) -> list[gql.EvaluationCase]:
+        """A `dataset_id` belonging to another organization raises
+        `not_found` -- `EvaluationService.list_cases` checks ownership of
+        the dataset itself before listing, unlike `evaluationRuns` below."""
+        rows = await _evaluations(info).list_cases(dataset_id)
+        return [gql.EvaluationCase.from_model(c) for c in rows]
+
+    @strawberry.field
+    async def evaluation_runs(
+        self, info: Info, dataset_id: uuid.UUID | None = None, limit: int = 20
+    ) -> list[gql.EvaluationRun]:
+        """A `dataset_id` belonging to another organization returns an empty
+        list rather than an error -- `EvaluationService.list_runs` performs
+        no ownership pre-check on it, only the `organization_id` filter
+        every run already carries, so a foreign id simply matches nothing.
+        Same convention as `conversations`/`leads` above."""
+        rows = await _evaluations(info).list_runs(dataset_id=dataset_id, limit=limit)
+        return [gql.EvaluationRun.from_model(r) for r in rows]
+
+    @strawberry.field
+    async def evaluation_run(self, info: Info, id: uuid.UUID) -> gql.EvaluationRun | None:
+        """Nullable, unlike `evaluationDataset(id)` above -- matches
+        `document(id)`/`conversation(id)`'s "not found is null" convention:
+        the run detail page has nothing to show for either a missing id or
+        another organization's, and no reason to tell them apart."""
+        try:
+            return gql.EvaluationRun.from_model(await _evaluations(info).get_run(id))
+        except NotFoundError:
+            return None
+
 
 @strawberry.type
 class Mutation:
@@ -478,3 +535,103 @@ class Mutation:
         none exists yet -- see `AgentService.set_tool_enabled`."""
         tool, enabled = await _agents(info).set_tool_enabled(agent_id, tool_id, is_enabled)
         return gql.AgentTool.from_pair(tool, enabled)
+
+    # -----------------------------------------------------------------
+    # Phase 6 -- evaluations (docs/PHASE-6.md §7). Starting a run is
+    # deliberately NOT a mutation here: a GraphQL operation's transaction
+    # commits only after the resolver returns
+    # (`app/graphql/context.py::build_context`), so a resolver that enqueued
+    # the worker job would race its own commit -- the worker opens an
+    # independent connection and could look for the run row before it
+    # exists. `POST /api/v1/evaluations/runs` (`app/api/evaluations.py`)
+    # commits first and enqueues after, the same ordering
+    # `app/api/products.py` uses for an import. Dataset/case CRUD, and
+    # cancelling a run, have no such race and are ordinary mutations below.
+    # -----------------------------------------------------------------
+
+    @strawberry.mutation
+    async def create_evaluation_dataset(
+        self, info: Info, input: gql.CreateEvaluationDatasetInput
+    ) -> gql.EvaluationDataset:
+        dataset = await _evaluations(info).create_dataset(
+            _build(
+                eval_schemas.CreateDatasetInput,
+                name=input.name,
+                description=input.description,
+            )
+        )
+        return gql.EvaluationDataset.from_model(dataset)
+
+    @strawberry.mutation
+    async def update_evaluation_dataset(
+        self, info: Info, id: uuid.UUID, input: gql.UpdateEvaluationDatasetInput
+    ) -> gql.EvaluationDataset:
+        dataset = await _evaluations(info).update_dataset(
+            id,
+            _build(
+                eval_schemas.UpdateDatasetInput,
+                name=input.name,
+                description=input.description,
+            ),
+        )
+        return gql.EvaluationDataset.from_model(dataset)
+
+    @strawberry.mutation
+    async def delete_evaluation_dataset(self, info: Info, id: uuid.UUID) -> bool:
+        # Not caught, matching `delete_agent`'s convention: a delete that
+        # silently reported success for another organization's dataset would
+        # be a false positive a client could mistake for "it's gone now".
+        await _evaluations(info).delete_dataset(id)
+        return True
+
+    @strawberry.mutation
+    async def create_evaluation_case(
+        self, info: Info, dataset_id: uuid.UUID, input: gql.EvaluationCaseInput
+    ) -> gql.EvaluationCase:
+        case = await _evaluations(info).create_case(
+            dataset_id,
+            _build(
+                eval_schemas.CaseInput,
+                question=input.question,
+                reference_answer=input.reference_answer,
+                required_phrases=input.required_phrases,
+                expected_tool_names=input.expected_tool_names,
+                expected_document_ids=input.expected_document_ids,
+                expected_product_ids=input.expected_product_ids,
+                tags=input.tags,
+            ),
+        )
+        return gql.EvaluationCase.from_model(case)
+
+    @strawberry.mutation
+    async def update_evaluation_case(
+        self, info: Info, id: uuid.UUID, input: gql.EvaluationCaseInput
+    ) -> gql.EvaluationCase:
+        case = await _evaluations(info).update_case(
+            id,
+            _build(
+                eval_schemas.CaseInput,
+                question=input.question,
+                reference_answer=input.reference_answer,
+                required_phrases=input.required_phrases,
+                expected_tool_names=input.expected_tool_names,
+                expected_document_ids=input.expected_document_ids,
+                expected_product_ids=input.expected_product_ids,
+                tags=input.tags,
+            ),
+        )
+        return gql.EvaluationCase.from_model(case)
+
+    @strawberry.mutation
+    async def delete_evaluation_case(self, info: Info, id: uuid.UUID) -> bool:
+        await _evaluations(info).delete_case(id)
+        return True
+
+    @strawberry.mutation
+    async def cancel_evaluation_run(self, info: Info, id: uuid.UUID) -> gql.EvaluationRun:
+        """`pending`/`running` -> `cancelled`; idempotent on a terminal run
+        (`EvaluationService.cancel_run` returns it unchanged). Raises
+        `not_found` for another organization's run id, matching
+        `delete_agent`'s convention rather than returning it as-is."""
+        run = await _evaluations(info).cancel_run(id)
+        return gql.EvaluationRun.from_model(run)

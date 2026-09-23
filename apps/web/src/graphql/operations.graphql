@@ -113,3 +113,93 @@ query ProductImports($limit: Int) {
     errors { row externalId message }
   }
 }
+
+# --- Evaluations (Phase 6) -------------------------------------------------
+
+query AgentPrompt($id: UUID!) {
+  agent(id: $id) { id provider model promptId }
+}
+
+query PromptVersions($id: UUID!) {
+  prompt(id: $id) { id versions { id version isActive createdAt } }
+}
+
+query EvaluationDatasets {
+  evaluationDatasets {
+    id name description caseCount createdAt
+    latestRun { id status createdAt summary { passRate } }
+  }
+}
+
+query EvaluationDataset($id: UUID!) {
+  evaluationDataset(id: $id) { id name description caseCount }
+}
+
+mutation CreateEvaluationDataset($input: CreateEvaluationDatasetInput!) {
+  createEvaluationDataset(input: $input) { id }
+}
+
+mutation UpdateEvaluationDataset($id: UUID!, $input: UpdateEvaluationDatasetInput!) {
+  updateEvaluationDataset(id: $id, input: $input) { id name description }
+}
+
+mutation DeleteEvaluationDataset($id: UUID!) {
+  deleteEvaluationDataset(id: $id)
+}
+
+query EvaluationCases($datasetId: UUID!) {
+  evaluationCases(datasetId: $datasetId) {
+    id question referenceAnswer requiredPhrases expectedToolNames
+    expectedDocumentIds expectedProductIds tags
+  }
+}
+
+mutation CreateEvaluationCase($datasetId: UUID!, $input: EvaluationCaseInput!) {
+  createEvaluationCase(datasetId: $datasetId, input: $input) { id }
+}
+
+mutation UpdateEvaluationCase($id: UUID!, $input: EvaluationCaseInput!) {
+  updateEvaluationCase(id: $id, input: $input) { id }
+}
+
+mutation DeleteEvaluationCase($id: UUID!) {
+  deleteEvaluationCase(id: $id)
+}
+
+query EvaluationRuns($datasetId: UUID, $limit: Int) {
+  evaluationRuns(datasetId: $datasetId, limit: $limit) {
+    id status caseCount completedCount provider model judgeProvider judgeModel
+    agentName promptVersion createdAt startedAt finishedAt
+    summary { passRate costUsd }
+  }
+}
+
+query EvaluationRun($id: UUID!) {
+  evaluationRun(id: $id) {
+    id datasetId agentId agentName promptVersionId promptVersion
+    provider model judgeProvider judgeModel status caseCount completedCount error
+    createdAt startedAt finishedAt
+    summary {
+      passed failed errored passRate costUsd meanLatencyMs
+      scorers { name mean passed applicable }
+    }
+    results {
+      id caseId question answer error passed citedDocumentIds citedProductIds
+      latencyMs costUsd
+      scores { name score passed status detail }
+      toolCalls { name arguments isError excerpt }
+    }
+  }
+}
+
+query EvaluationRunOutcomes($id: UUID!) {
+  evaluationRun(id: $id) { id results { id caseId question passed } }
+}
+
+mutation CancelEvaluationRun($id: UUID!) {
+  cancelEvaluationRun(id: $id) { id status }
+}
+
+query ProductPicker($search: String, $limit: Int) {
+  products(search: $search, limit: $limit) { id name externalId }
+}
