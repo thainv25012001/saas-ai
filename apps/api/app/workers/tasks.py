@@ -270,7 +270,9 @@ async def run_evaluation_task(
 
     The run row is looked up under `organization_id`'s RLS before anything
     else, so a job enqueued against the wrong organization finds nothing
-    (`NotFoundError`) instead of running another tenant's dataset.
+    (`claim_run` raises `NotFoundError`, which `run_evaluation` logs and
+    returns from; its `mark_failed` matches no row) instead of running
+    another tenant's dataset.
 
     Registered with its own 1-hour timeout (`WorkerSettings.functions`),
     not the worker-wide 10 minutes: cases run one after another, and 200 of

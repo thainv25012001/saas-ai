@@ -1,10 +1,11 @@
 # AI Sales Agent — Architecture Proposal
 
-> Status: **approved, and partly built.** Phases 1, 2 and 3 are implemented in this
-> repository — see §9 for Phase 1 as delivered, §9.6 for Phase 3, and
-> [`docs/PHASE-2.md`](PHASE-2.md) / [`docs/PHASE-3.md`](PHASE-3.md) for the design notes
-> of each. Everything from §4 (tools), §5 (evaluation) and §8 (MCP) onward remains a
-> proposal.
+> Status: **approved, and partly built.** Phases 1 to 6 are implemented in this
+> repository — see §9 for Phase 1 as delivered, §9.6 for Phase 3, §9.7 for Phase 5 and
+> §9.8 for Phase 6, and [`docs/PHASE-2.md`](PHASE-2.md) to
+> [`docs/PHASE-6.md`](PHASE-6.md) for the design notes of each. Where a phase document
+> departs from this one (marked ★ there), the phase document describes what was built.
+> §8 (MCP) and the SaaS features (billing, widget) remain a proposal.
 > Scope: items 1–10 of the "First Task" in `init.md`.
 
 ---
@@ -375,6 +376,11 @@ the agent was created.
 
 ### 3.7 Evaluation
 
+> Superseded by [`docs/PHASE-6.md`](PHASE-6.md) §3, which records the schema as built;
+> its departures from the sketch below are marked ★ there (`reference_answer`,
+> `required_phrases`, `expected_product_ids`, the per-run judge, `cancelled`, progress
+> counts, a denormalised `question`, and cited ids split by kind).
+
 ```text
 eval_datasets
   id, organization_id, name, description, created_at
@@ -405,6 +411,10 @@ usage_events
   kind enum(llm, embedding), provider, model,
   input_tokens, output_tokens, cost_usd, created_at
 ```
+
+Since Phase 6, `usage_events` also holds rows with a NULL `conversation_id`: an
+evaluation turn's conversation is rolled back (PHASE-6.md §2), so its usage — and the
+judge's — is recorded against the run's agent with no conversation.
 
 Not billing — just the substrate billing would later read. Writing it now costs one table.
 Retrofitting cost attribution across an existing message history costs a migration and a
@@ -915,6 +925,24 @@ is what exists in the repository.
 | Citations | `message_citations.product_id` (added in `0013`) is populated for every product a tool call surfaces — one citation per `search_products` result and one for `get_product` — the same mechanism Phase 3 built for document chunks. |
 | GraphQL | `Query.products(search, category, availability, limit, offset)`, `Query.productCategories`, `Query.productImports(limit, offset)` with `ProductImport.errors(limit)` sorted and capped. Dashboard search is a plain ILIKE on `name`/`external_id`, not the agent's vector search — a keystroke-driven filter has no reason to call an embedding provider, and there is no trigram index behind it yet. |
 | Frontend | `/dashboard/products` — an import dropzone (`.csv`/`.json`) with recent imports underneath, a catalogue table (search, category and availability filters, paging) with search-index and availability badges, and a per-import row-error table. Polls running imports and stops when the tab is hidden, the same pattern as `/dashboard/knowledge`. |
+
+---
+
+### 9.8 Phase 6 in detail, as delivered
+
+The design argument is in [`docs/PHASE-6.md`](PHASE-6.md), including §9's list of what is not
+delivered — first among it, that no API or UI links an agent to a prompt yet, so prompt-version
+pinning is reachable only for seeded agents. This is what exists in the repository.
+
+| Area | Deliverable |
+|---|---|
+| Schema | `eval_datasets`, `eval_cases`, `eval_runs`, `eval_results` (`0014`), all RLS-enabled with the explicit `organization_id` predicate on every query. A case needs at least one expectation; `expected_document_ids`/`expected_product_ids` are arrays with no FK, so the service checks each id's ownership on every write and names only the count of unknown ones. `UNIQUE (run_id, case_id)` is what makes a resumed run skip, not re-bill, a case. At most 200 cases per dataset; tags and phrases are stripped and deduped. |
+| Execution / isolation | `run_evaluation_task` (arq, its own 1-hour timeout and `max_tries` 3) drives `app/evaluations/runner.py`. Each case runs the **unmodified** `ChatService.send` inside `rolled_back_tenant_session`, so the agent sees exactly what production shows it (`create_lead` succeeding included) and nothing it writes survives — no lead, conversation, message, tool call, citation. The full tool-call rows are read before the rollback; the result and its usage are committed in an independent transaction. Cases run one at a time; cancel is honoured between cases. A 55-minute per-attempt budget hands off with `arq.worker.Retry` and resumes on the next try; on the last try the run fails with "time budget exhausted". Any other run-level failure is marked `failed` and returned, never re-raised (arq would not retry it, and its traceback would log bound parameters). |
+| Scoring | `app/evaluations/scorers.py` — pure functions: `required_phrases` (NFKC, casefold, thousands separators removed, whole-token match), `tool_selection` (successful calls only), `document_recall`, `product_recall`; a not-applicable scorer is left out rather than passed. An errored turn is not scored at all (`scores = {}`), so scorer means exclude it. |
+| Judge | `app/evaluations/judge.py` — one `provider.generate()` call per case with a reference answer (★ not `generate_structured`, which no provider implements), a JSON-only instruction, a stripped ```` ```json ```` fence and `JudgeVerdict.model_validate_json`. The answer and the evidence (full tool results, 12,000 characters) sit inside a per-call `secrets.token_hex(8)` fence. `passed` needs `correct` *and* `grounded`. Any failure is `status: "error"` and fails the case; a garbage verdict keeps the call's real usage, a call that raised writes no zero-token `usage_events` row. A judge-less run is refused (422) while any case has only a reference answer. |
+| Runs / pinning | `create_run` locks the dataset, allows one `pending`/`running` run per dataset, and pins `prompt_version_id` (the one named, else the agent's active one at start), `provider`/`model` and the optional judge. `ChatService.send` gained `prompt_version_id`, validated against the agent's prompt, so a *draft* version can be evaluated before it is activated. The summary (pass rate, per-scorer mean/passed/applicable, `cost_usd` as an exact decimal string or `null`, mean latency) is written on completion and also on cancel and failure. |
+| API | REST `POST /api/v1/evaluations/runs` — commit, then enqueue (the `products/import` ordering); a failed enqueue fails the run instead of leaving it `pending`; 20 starts per user per hour, spent only by a start that passed validation. GraphQL: `evaluationDatasets`, `evaluationDataset`, `evaluationCases`, `evaluationRuns`, `evaluationRun` (with `results` and `summary`), dataset/case create/update/delete and `cancelEvaluationRun`, plus a prompt's versions for the run form. |
+| Frontend | `/dashboard/evaluations` (datasets with their latest run), `/dashboard/evaluations/[id]` (dataset editing, cases with document/product pickers, the start-run form with a call estimate and the reference-only guard, recent runs) and `/dashboard/evaluations/runs/[runId]` (progress with polling, summary tiles, expandable per-case results, and a browser-side comparison against another completed run: regressed / improved / errored / unchanged / new). Every model- or customer-written field renders as text. |
 
 ---
 

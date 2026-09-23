@@ -143,6 +143,20 @@ Each scorer returns `{score: 0..1, passed: bool, detail}` or is **not applicable
 expectation is empty. A case passes when **every applicable scorer passes and the turn did
 not error.** Not-applicable scorers are left out of the case, and out of the run's means.
 
+**An errored turn is not scored at all.** Its result stores `scores = {}`: no
+deterministic scorer and no judge. The case is `passed = false` and counted in the
+summary's `errored` (and `failed`), but in no scorer's `applicable` or `mean`, so a
+provider outage does not drag every scorer's average down with zeros it never measured.
+The comparison view shows such a case as **errored**, never as regressed or improved (§6).
+
+**A case with only a reference answer needs a judge.** Without one, nothing can grade it,
+so it could only ever fail. Starting a run with no judge while any case has no
+deterministic expectation (`required_phrases`, `expected_tool_names`,
+`expected_document_ids` and `expected_product_ids` all empty) is a 422 naming the count
+(*"2 cases have only a reference answer; add a judge or a deterministic expectation"*).
+The start form counts the same cases, shows the same sentence and disables Start until a
+judge is chosen.
+
 | Scorer | Applies when | Score | Passes when |
 |---|---|---|---|
 | `required_phrases` | phrases given | fraction found in the answer | all found |
@@ -162,10 +176,14 @@ and the judge is how they avoid having to.
 not answer anything. Calls to tools that were not expected are reported in `detail` and
 do not fail the case: the model looking something up an extra time is not wrong.
 
-**The judge** (`app/evaluations/judge.py`) makes one `generate_structured` call per case
+**The judge** (`app/evaluations/judge.py`) makes one `provider.generate()` call per case
 with the question, the reference answer, the agent's answer and the evidence the agent
-actually saw — the full content of its tool results, bounded to 12,000 characters. It
-returns:
+actually saw — the full content of its tool results, bounded to 12,000 characters.
+★ Not `generate_structured`, as first planned: neither real provider implements it (both
+raise `NotImplementedError`), and it returns no usage, while the judge's call must be billed.
+So the system prompt asks for a single JSON object and nothing else, a ```` ```json ````
+fence is stripped if the model adds one anyway, and the text is validated with
+`JudgeVerdict.model_validate_json`:
 
 ```python
 class JudgeVerdict(BaseModel):
@@ -184,10 +202,13 @@ Everything the judge reads (the answer and the evidence) is written by the model
 the customer, so it goes inside a per-call `secrets.token_hex(8)` fence, and the judge's
 system prompt says fenced text is material to grade, not instructions — the same defence
 Phase 3 uses for retrieved passages, with the same honest limit: it is a mitigation, not
-a guarantee. A judge failure (provider error, invalid structure) marks that scorer
-`error` and fails the case; it never turns into a pass.
+a guarantee. A judge failure (provider error, invalid JSON or structure, or any other
+exception) marks that scorer `error` and fails the case; it never turns into a pass. Only
+the exception's class name is stored and logged, never its message.
 
-The judge's own usage is priced and recorded as a separate `usage_events` row.
+The judge's own usage is priced and recorded as a separate `usage_events` row. A call that
+returned but whose verdict failed to parse was still billed, so its real usage is kept; a
+call that raised reports zero tokens, and no zero-token row is written.
 
 ---
 
@@ -196,7 +217,8 @@ The judge's own usage is priced and recorded as a separate `usage_events` row.
 **Starting** is `POST /api/v1/evaluations/runs` (REST, not a GraphQL mutation — see §7).
 It validates that the dataset has between 1 and 200 cases, that the agent belongs to the
 organization, that the prompt version (if named) belongs to that agent's prompt, and that
-no other run of the same dataset is `pending` or `running`. It then **pins**:
+no other run of the same dataset is `pending` or `running`, and that a run without a judge
+has no reference-answer-only case (§4). It then **pins**:
 
 - `prompt_version_id` — the version named, else the agent's active version *at start*.
   A version activated halfway through a run cannot split it in two.
@@ -206,20 +228,44 @@ Pinning the prompt version requires one change to production code: `ChatService.
 gains an optional `prompt_version_id`, validated to belong to the agent's prompt, used in
 place of the active version. That also makes the flow this phase exists for possible:
 **draft a version, evaluate it, and activate it only if it scores better** — without
-activating it first.
+activating it first. (Today that flow is reachable only for an agent that already has a
+prompt — see §9.)
+
+Starts are rate-limited to **20 per user per hour** (`START_RUN_RATE_LIMIT` in
+`app/api/evaluations.py`). The limit is spent only by a start that passed validation:
+it is checked after `create_run` inside the same transaction, so a 404, 409 or 422 costs
+nothing, and a 429 rolls the new run back.
 
 **Execution** (`run_evaluation_task`, arq): cases run one after another, not in parallel —
 a provider's rate limit is shared with the organization's live traffic, and a run is not
 latency-sensitive. Before each case the runner re-reads the run's status, so cancelling is
 checked between cases rather than mid-turn. A case already holding a result for this run is
-skipped, so an arq retry after a crash resumes rather than re-billing. The job gets its
-own timeout (1 hour) rather than the worker's 10-minute default.
+skipped, so a later attempt of the same job resumes rather than re-billing. The job gets its
+own timeout (1 hour) and its own `max_tries` (3, `EVALUATION_MAX_TRIES`) rather than the
+worker's defaults.
 
-A case whose turn errors (provider timeout, rate limit, step limit) records the error and
-fails; the run continues. Only a failure outside any one case (the run row vanished, the
-database is unreachable) fails the run.
+**The time budget.** arq cancels a job that outlives its timeout and does not retry it,
+which would strand the run `running`. So before each case the runner checks how long this
+attempt has run; past **55 minutes** (`EVALUATION_TIME_BUDGET_S`) it raises
+`arq.worker.Retry(defer=0)`, the results so far stay, the run stays `running`, and the next
+attempt resumes from the first case without a result. arq never runs a job past its
+`max_tries`, so on the **last** try (arq's `job_try` equals `max_tries`) the runner instead
+fails the run with *"stopped after N of M cases: time budget exhausted"*.
 
-**Summary**, written when the run completes:
+**What resumes and what does not.** Resuming covers two things: a worker that was killed or
+shut down mid-run (arq re-queues a cancelled job), and the time-budget hand-off above. It
+does not cover exceptions. A case whose turn errors (provider timeout, rate limit, step
+limit) records the error and fails; the run continues. A failure outside any one case (the
+run row vanished, the database is unreachable) marks the run `failed` through an
+independent session, logs a bounded message, and **returns** — it is not re-raised,
+because arq would not retry it anyway (and `claim_run` refuses a failed run), and arq's own
+traceback log would print the exception, which for a `DBAPIError` includes its bound
+parameters: a case's question, answer, or a `create_lead` email.
+
+**Summary**, written when the run completes — and also when it is cancelled or fails, from
+the results it has so far, so a cancelled or failed run shows real figures rather than
+`—`. A cancel lands between cases; the case in flight is recorded after it, so the runner
+refreshes a cancelled run's summary (never its status) when it stops:
 
 ```jsonc
 {
@@ -230,13 +276,18 @@ database is unreachable) fails the run.
 }
 ```
 
+`cost_usd` leaves out a case whose turn errored before reporting any usage: nothing was
+billed for it, so it is not an unknown price that would null the total. Every other case
+without a cost (an unpriced agent or judge model) makes the total `null`.
+
 ---
 
 ## 6. Comparing runs
 
 The run page compares against any other completed run of the same dataset, case by case:
-**regressed** (passed → failed), **improved**, **unchanged**, or **new** (a case added
-since). This is computed in the browser from two runs' results; neither side is large enough
+**regressed** (passed → failed), **improved**, **errored** (the candidate's turn errored, so
+it measured nothing — never counted as a regression or an improvement), **unchanged**, or
+**new** (a case added since). This is computed in the browser from two runs' results; neither side is large enough
 to justify a server endpoint for it.
 
 ---
@@ -266,11 +317,24 @@ Everything else — dataset and case CRUD, listing runs and results, cancelling 
 
 ## 9. Not delivered
 
+**First follow-up: no API or UI links an agent to a prompt.** `CreateAgentInput` and
+`UpdateAgentInput` have no `promptId`, and the dashboard's Prompts page is a placeholder. So
+prompt-version pinning — and the "draft a version, evaluate it, activate it if it scores
+better" flow of §5 — is reachable only for agents whose `prompt_id` was set by a seed or
+directly in the database. Every other agent runs on the default system prompt and a run of
+it records no version. Wiring `promptId` through the agent inputs and building the Prompts
+page is the first thing to do next.
+
 | Not delivered | Why, and where it goes |
 |---|---|
+| Linking an agent to a prompt | See the paragraph above — the first follow-up. |
 | Multi-turn cases | Every case is one message in a fresh conversation. Follow-up behaviour ("and in red?") is not measured. Needs a case to be a script of turns. |
 | Repeated runs, variance, significance | One run is one sample. A 3-point difference between two runs may be noise. |
 | Scoring real production conversations | Only authored cases are scored. Scoring live traffic needs sampling and privacy decisions that come with the widget (Phase 8). |
 | Dataset import/export | Cases are authored one at a time in the dashboard. |
 | Stored transcripts for eval turns | §2 — the result row holds what a transcript is read for. |
-| Stuck-run recovery | A run whose worker is killed stays `running` until the arq retry resumes it. If every retry is exhausted, it stays `running` and blocks new runs of its dataset; cancelling it is the way out. |
+| Stuck-run recovery | A run whose worker is killed or shut down stays `running` until arq re-queues the job and the next try resumes it. The time budget (§5) keeps a slow run from reaching the 1-hour timeout, and fails it on the last try. What is not covered: a single case running past the job timeout on its own, or a killed worker using up the last try — either leaves the run `running`, blocking new runs of its dataset, and cancelling it is the way out. There is no sweeper for stale `running` rows. |
+| Pickers past the first 100 | The case form's document picker lists only the first 100 ready documents, so a later one cannot be expected from the dashboard. Products are picked by search (10 matches), but their names come from the first 100 products: an expected product beyond them shows as a short id. |
+| A circuit breaker on provider outages | A provider that is down or rate-limiting errors each case quickly, one after another, and the run completes with every case `errored`. Nothing stops the run early. |
+| Separating eval spend in `usage_events` | Eval turns and judge calls are marked only by `conversation_id IS NULL`; there is no `source` column. Judge spend is charged to the run's agent (`agent_id`), not to a judge of its own. |
+| Keeping run history past a delete | Deleting an agent or a dataset cascades to its runs and their results. |

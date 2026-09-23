@@ -2,7 +2,7 @@
 
 A multi-tenant SaaS where a business configures an AI sales assistant over its own
 knowledge — products, documents, prompts — and that assistant talks to the business's
-customers. This repository is **Phases 1 to 5**: authentication, organizations, agents
+customers. This repository is **Phases 1 to 6**: authentication, organizations, agents
 and prompts; a real LLM call — a provider abstraction (OpenAI, Anthropic, and a
 network-free `fake`), conversations and messages, a streaming `POST /api/v1/chat/stream`
 endpoint with per-message token and cost accounting, and a working playground; a
@@ -16,8 +16,12 @@ revokes each tool, and a Leads page for what `create_lead` captured; and product
 structured knowledge — a `products` table, CSV/JSON catalogue import through a
 background arq worker with per-row errors, embedding, three-way search (exact filters,
 full-text, semantic), the `search_products`/`get_product` tools (on by default), product
-citations, and a Products dashboard page. Later phases (evaluation, MCP, billing) build
-on this foundation; see [Phase roadmap](#phase-roadmap) below.
+citations, and a Products dashboard page; and evaluation — datasets of test questions,
+runs started over `POST /api/v1/evaluations/runs` that drive each case through the real
+chat path in a rolled-back transaction on the arq worker, deterministic scorers plus an
+optional LLM judge, and an Evaluations dashboard that compares two runs case by case.
+Later phases (MCP, billing) build on this foundation; see [Phase roadmap](#phase-roadmap)
+below.
 
 ## Architecture, in one picture
 
@@ -194,11 +198,13 @@ apps/
       embeddings/ embedding provider abstraction: openai, hashing (offline, network-free); registry
       chat/       the chat service: prompt resolution, history window, streaming, persistence
       conversations/  conversation + message + usage-event service
+      evaluations/  datasets, cases and runs: scorers, the LLM judge, the run orchestrator
       documents/  document + document_chunk service (pgvector-backed, RLS-scoped)
       rag/        extraction, chunking, and the ingest pipeline that ties them to embeddings
-      workers/    arq worker: settings (job registration, retries) and the ingest job itself
+      workers/    arq worker: settings (job registration, retries) and its jobs (ingest, titles, product import, evaluation runs)
       graphql/    Strawberry schema, context, resolvers
-      api/        REST routers: auth, health, chat (SSE)
+      api/        REST routers: auth, health, chat (SSE), documents (upload/retry),
+                  products (import), evaluations (POST /api/v1/evaluations/runs)
     alembic/      migrations (RLS policies land here, not in application code)
     tests/        unit + integration (incl. the cross-tenant isolation and RLS suites)
   web/            Next.js 15 dashboard (App Router, TypeScript strict, Tailwind v4, urql)
@@ -279,7 +285,7 @@ outage or a slow database never blocks a frontend-only PR.
 | **3 — RAG** | Document upload → extraction → chunking → embedding → pgvector → retrieval → LLM. | **Complete** (this repository) — see [`docs/PHASE-3.md`](docs/PHASE-3.md). Upload and retry endpoints, the arq ingest worker, hybrid retrieval (pgvector + full-text, fused with RRF), grounded chat with citations, and the Knowledge dashboard page. Query rewriting and embedding cost accounting are explicitly deferred; PHASE-3.md §7 says why. |
 | **4 — Agent + tools** | The agent decides when to call its tools, instead of retrieval running unconditionally before every turn. | **Complete** (this repository) — see [`docs/PHASE-4.md`](docs/PHASE-4.md). A multi-step `AgentRunner` loop, a tool registry built per turn from the agent's own `agent_tools` grants, `retrieve_knowledge` and `create_lead`, `tool_call_start`/`tool_call_end` SSE events, a per-agent Tools card and a Leads page. `search_products`/`get_product` moved to Phase 5 with products themselves, now complete; PHASE-4.md §8 lists everything else not delivered. |
 | **5 — Products** | Products as structured knowledge: a `products` table, catalogue import, embedding, and the tools that let the agent answer what the organization sells and what it costs from data instead of prose. | **Complete** (this repository) — see [`docs/PHASE-5.md`](docs/PHASE-5.md). The `products` table (RLS-scoped, `attributes jsonb`) and `ProductService`; CSV/JSON import over `POST /api/v1/products/import` on the same arq worker as document ingestion, upserting on `(organization_id, external_id)` with per-row errors that don't abort the batch; embedding of name/description/attributes (deliberately excluding price/stock, so a price change never needs a re-embed) with `embedding_stale` detection; three-way search (exact filters AND full-text OR semantic, RRF-fused) in `app/rag/products.py`; `search_products`/`get_product` tools, on by default, each result naming its source row; `message_citations.product_id` populated; a GraphQL `products`/`productCategories`/`productImports` surface; and a `/dashboard/products` page. PHASE-5.md §2 argues, and §9 restates, that the model can still quote a price from a retrieved document chunk instead of a tool — the tools make that the cheaper path, they do not make it the only one; §9 lists everything else not delivered. |
-| 6 — Evaluation | Test datasets, evaluation runs, retrieval and answer scoring. | Not started |
+| **6 — Evaluation** | Test datasets, evaluation runs, retrieval and answer scoring. | **Complete** (this repository) — see [`docs/PHASE-6.md`](docs/PHASE-6.md). `eval_datasets`/`eval_cases`/`eval_runs`/`eval_results` (RLS-scoped, at most 200 cases per dataset, each with at least one expectation); runs started over `POST /api/v1/evaluations/runs` (commit, then enqueue; one active run per dataset; rate-limited) that pin the prompt version, model and optional judge at start — so a draft prompt version can be evaluated before it is activated; `run_evaluation_task` on the arq worker driving each case through the unmodified `ChatService.send` inside an always-rolled-back transaction, so a `create_lead` or a conversation never survives it, resuming after a killed worker or its own 55-minute hand-off; deterministic scorers (required phrases, tool selection, document and product recall) and an LLM judge for correctness and groundedness behind a per-call fence; summaries with pass rate, per-scorer means and exact cost; a GraphQL surface for datasets, cases, runs and results; and a `/dashboard/evaluations` section with a run comparison (regressed / improved / errored / unchanged / new). PHASE-6.md §9 lists what is not delivered — first, that no API or UI links an agent to a prompt yet, so prompt-version pinning is reachable only for seeded agents. |
 | 7 — MCP | Expose selected business capabilities through MCP, once the built-in tool system is stable. | Not started |
 | 8 — SaaS features | Billing/Stripe, usage limits, subscription plans, embeddable widget, analytics, lead dashboard. | Not started |
 
