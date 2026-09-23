@@ -250,7 +250,7 @@ explicitly **not** instructions — the partial mitigation for prompt injection 
 the architecture doc already flags as unsolved.
 
 Every chunk that reached the prompt is recorded in `message_citations` with its rank and
-score. That is what makes Phase 5's faithfulness scoring possible: without a record of what
+score. That is what makes Phase 6's faithfulness scoring possible: without a record of what
 the model was shown, "did it answer from the sources?" is unanswerable after the fact.
 
 The SSE stream gains a `citations` event, and the playground renders sources under the
@@ -294,6 +294,6 @@ production calls either: `IngestResult`'s `token_count` and `embedding_model` ar
 (see `ingest_completed` in `app/workers/tasks.py`) and no `usage_events` row is ever
 written for an ingest. So chat spend is metered and embedding spend is not. The code is
 kept rather than deleted because the numbers are correct and tested, and because metering
-belongs with the thing that will consume it -- Phase 7's billing, which is what decides
+belongs with the thing that will consume it -- Phase 8's billing, which is what decides
 whether an ingest is charged per token, per document, or not at all. Until then, the
 honest statement is that embedding cost is invisible.
