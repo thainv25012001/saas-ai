@@ -599,8 +599,10 @@ class ProductImport:
     total_rows: int | None
     succeeded_count: int
     failed_count: int
-    #: A whole-file failure (bad JSON, a missing required column), set
-    #: instead of any per-row error.
+    #: On a FAILED import, the whole-file failure (bad JSON, a missing
+    #: required column), set instead of any per-row error. On a COMPLETED
+    #: import, a non-fatal warning about the import as a whole -- today only
+    #: that the rows landed but could not all be embedded.
     error: str | None
     created_at: datetime
     completed_at: datetime | None

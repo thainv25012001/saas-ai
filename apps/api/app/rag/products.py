@@ -30,14 +30,16 @@ test_price_filter_excludes_the_best_semantic_match` for the test built to
 fail if that stops being true.
 
 **`embedding IS NULL` is a normal transient state, not corruption**
-(Task 3 writes a row before an arq job embeds it -- `docs/PHASE-5.md` §5).
+(Task 3's import commits a row in its first phase and embeds it in a
+second, and leaves it unembedded if the embedding provider fails --
+`docs/PHASE-5.md` §5).
 Decision, made explicit here rather than left to fall out of the SQL: the
 vector arm excludes such a row (`p.embedding IS NOT NULL` -- it has nothing
 for `<=>` to compare against), the keyword arm does not care and still
 ranks it on `search_tsv` alone, and the query-less filter path does not
 care either. A freshly imported, not-yet-embedded product is therefore
 still answerable by exact filters and by full text immediately; only its
-semantic recall lags until the embed job runs. See
+semantic recall lags until it is embedded. See
 `tests/integration/test_product_search.py`'s three `test_unembedded_*`
 tests for what this means in each of the three paths.
 
