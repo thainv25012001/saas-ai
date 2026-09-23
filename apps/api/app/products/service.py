@@ -162,19 +162,29 @@ class ProductService:
         result = await self.session.execute(query)
         return list(result.scalars().all())
 
-    async def list_categories(self) -> list[str]:
+    async def list_categories(
+        self, *, active_only: bool = False, limit: int | None = None
+    ) -> list[str]:
         """Every distinct, non-null category this organization's catalogue
         uses, alphabetically -- the options for the dashboard's category
-        filter, so it offers only values that can match something."""
-        result = await self.session.execute(
-            select(Product.category)
-            .where(
-                Product.organization_id == self.tenant.organization_id,
-                Product.category.is_not(None),
-            )
-            .distinct()
-            .order_by(Product.category)
+        filter, so it offers only values that can match something.
+
+        `active_only`/`limit` exist for `search_products`' no-results
+        message (`app/tools/products.py`), which lists the categories a
+        model can retry with: only categories an active product carries can
+        ever match a search (`_Filters` pins `is_active = true`), and the
+        list reaches a prompt, so it is bounded there rather than growing
+        with the catalogue."""
+        statement = select(Product.category).where(
+            Product.organization_id == self.tenant.organization_id,
+            Product.category.is_not(None),
         )
+        if active_only:
+            statement = statement.where(Product.is_active.is_(True))
+        statement = statement.distinct().order_by(Product.category)
+        if limit is not None:
+            statement = statement.limit(max(1, limit))
+        result = await self.session.execute(statement)
         return [category for category in result.scalars().all() if category is not None]
 
     async def upsert_many(self, rows: list[ProductInput]) -> list[Product]:

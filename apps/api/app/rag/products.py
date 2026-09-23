@@ -206,7 +206,17 @@ class _Filters:
         clauses = ["p.organization_id = :organization_id", "p.is_active = true"]
         params: dict[str, Any] = {"organization_id": organization_id}
         if category is not None:
-            clauses.append("p.category = :category")
+            # Case-insensitive: the model cannot see the catalogue's own
+            # spelling of a category before it searches, and "suv" versus
+            # "SUV" is a guess about capitalisation, not a different
+            # category. Still an exact (equality) match otherwise -- "SUV"
+            # does not match "SUVs"; `search_products`' no-results message
+            # lists the real categories so the model can retry with one.
+            # `organization_id` stays the leading column of
+            # `ix_products_organization_id_category_price`, so the index
+            # still narrows to this tenant; only the category step becomes
+            # a filter within it.
+            clauses.append("lower(p.category) = lower(:category)")
             params["category"] = category
         if min_price is not None:
             clauses.append("p.price >= :min_price")
@@ -402,7 +412,7 @@ class ProductSearchService:
     ) -> list[ProductMatch]:
         """Filters always apply; ranking mode depends on `query`.
 
-        `query is None`: filters alone, in a deterministic order --
+        `query` absent or blank: filters alone, in a deterministic order --
         "everything under £30,000" is a legitimate request with nothing to
         rank by relevance. `query` present: filters narrow the candidate
         set exactly as in the query-less path, and what survives is ranked
@@ -411,6 +421,11 @@ class ProductSearchService:
         because summing rank-derived scores across independent candidate
         lists is the same problem in both places (Ruling 3).
         """
+        if query is not None and not query.strip():
+            # A blank query has nothing to rank by: embedding "" is an error
+            # for real providers (and a zero vector for others, whose cosine
+            # distance is NaN), so it takes the filters-only path instead.
+            query = None
         filters = _Filters(
             self.tenant.organization_id,
             category=category,
