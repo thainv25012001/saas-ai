@@ -99,12 +99,14 @@ async def _org(api_client: AsyncClient, email: str, name: str) -> tuple[str, uui
     return token, await _organization_id(api_client, token)
 
 
-async def _agent_and_dataset(org_id: uuid.UUID, *, cases: int = 1) -> tuple[uuid.UUID, uuid.UUID]:
+async def _agent_and_dataset(
+    org_id: uuid.UUID, *, cases: int = 1, name: str = "Pricing FAQ"
+) -> tuple[uuid.UUID, uuid.UUID]:
     tenant = _tenant(org_id)
     async with tenant_session(tenant) as session:
-        agent = await AgentService(session, tenant).create_agent(agent_input())
+        agent = await AgentService(session, tenant).create_agent(agent_input(name=f"Bot {name}"))
         service = EvaluationService(session, tenant)
-        dataset = await service.create_dataset(CreateDatasetInput(name="Pricing FAQ"))
+        dataset = await service.create_dataset(CreateDatasetInput(name=name))
         for index in range(cases):
             await service.create_case(
                 dataset.id,
@@ -339,3 +341,86 @@ async def test_a_failed_enqueue_fails_the_run_instead_of_leaving_it_pending(
         [run] = await EvaluationService(session, _tenant(org_id)).list_runs(dataset_id)
     assert run.status is EvalRunStatus.FAILED
     assert run.error is not None
+
+
+async def test_reference_only_cases_without_a_judge_are_422_naming_the_count(
+    api_client, clean_users, queue
+):
+    """Without a judge nothing would grade a case whose only expectation is
+    a reference answer, so it could only ever fail -- refused up front (R5)."""
+    token, org_id = await _org(api_client, "refonly@example.com", "Ada Motors Evals RefOnly")
+    agent_id, dataset_id = await _agent_and_dataset(org_id)
+    tenant = _tenant(org_id)
+    async with tenant_session(tenant) as session:
+        service = EvaluationService(session, tenant)
+        for index in range(2):
+            await service.create_case(
+                dataset_id, CaseInput(question=f"Ref {index}?", reference_answer="Thirty days")
+            )
+
+    response = await api_client.post(
+        RUNS_URL, headers=_auth(token), json=_body(dataset_id, agent_id)
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["message"] == (
+        "2 cases have only a reference answer; add a judge or a deterministic expectation"
+    )
+    assert queue.calls == []
+
+    judged = await api_client.post(
+        RUNS_URL,
+        headers=_auth(token),
+        json=_body(dataset_id, agent_id, judge_provider="fake", judge_model="fake-1"),
+    )
+    assert judged.status_code == 202, judged.text
+
+
+async def test_a_rejected_start_does_not_spend_the_rate_limit(
+    api_client, clean_users, queue, monkeypatch
+):
+    """Only a start that actually creates a run counts against the limit: a
+    422 or 409 costs no provider call, so it must not lock the caller out of
+    the real start that follows it."""
+    monkeypatch.setattr(evaluations_api, "START_RUN_RATE_LIMIT", 1)
+    token, org_id = await _org(api_client, "limit@example.com", "Ada Motors Evals Limit")
+    agent_id, dataset_id = await _agent_and_dataset(org_id)
+    _, empty_dataset_id = await _agent_and_dataset(org_id, cases=0, name="Empty")
+
+    rejected = await api_client.post(
+        RUNS_URL, headers=_auth(token), json=_body(empty_dataset_id, agent_id)
+    )
+    accepted = await api_client.post(
+        RUNS_URL, headers=_auth(token), json=_body(dataset_id, agent_id)
+    )
+    conflict = await api_client.post(
+        RUNS_URL, headers=_auth(token), json=_body(dataset_id, agent_id)
+    )
+
+    assert rejected.status_code == 422, rejected.text
+    assert accepted.status_code == 202, accepted.text
+    # A 409, not a 429: the conflict is checked before the limit.
+    assert conflict.status_code == 409, conflict.text
+    assert len(queue.calls) == 1
+
+
+async def test_the_start_after_the_limit_is_429_and_creates_no_run(
+    api_client, clean_users, queue, monkeypatch
+):
+    monkeypatch.setattr(evaluations_api, "START_RUN_RATE_LIMIT", 1)
+    token, org_id = await _org(api_client, "limit2@example.com", "Ada Motors Evals Limit2")
+    agent_id, first_dataset = await _agent_and_dataset(org_id)
+    _, second_dataset = await _agent_and_dataset(org_id, name="Second")
+
+    first = await api_client.post(
+        RUNS_URL, headers=_auth(token), json=_body(first_dataset, agent_id)
+    )
+    second = await api_client.post(
+        RUNS_URL, headers=_auth(token), json=_body(second_dataset, agent_id)
+    )
+
+    assert first.status_code == 202, first.text
+    assert second.status_code == 429, second.text
+    async with tenant_session(_tenant(org_id)) as session:
+        assert await EvaluationService(session, _tenant(org_id)).list_runs(second_dataset) == []
+    assert len(queue.calls) == 1

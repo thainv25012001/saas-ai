@@ -33,6 +33,11 @@ from app.rag.storage import load_document_bytes
 
 logger = get_logger(__name__)
 
+#: arq's `max_tries` for `run_evaluation_task`, registered with it in
+#: `WorkerSettings.functions` and passed to `run_evaluation` -- which must
+#: know when a try is the last one (see its time budget).
+EVALUATION_MAX_TRIES = 3
+
 
 async def ingest_document_task(
     ctx: dict[str, Any], *, organization_id: str, document_id: str
@@ -269,9 +274,12 @@ async def run_evaluation_task(
 
     Registered with its own 1-hour timeout (`WorkerSettings.functions`),
     not the worker-wide 10 minutes: cases run one after another, and 200 of
-    them through a real provider can legitimately take that long. The
-    `evaluation_run_*` log lines come from `run_evaluation` itself and
-    carry ids, counts and durations only -- never a question or an answer.
+    them through a real provider can legitimately take that long -- and
+    `run_evaluation` hands off to the next try (`arq.worker.Retry`) well
+    before that timeout, so it needs arq's `job_try` from `ctx` and the
+    `max_tries` it is registered with. The `evaluation_run_*` log lines come
+    from `run_evaluation` itself and carry ids, counts and durations only --
+    never a question or an answer.
     """
     tenant = TenantContext(
         organization_id=uuid.UUID(organization_id),
@@ -279,4 +287,9 @@ async def run_evaluation_task(
         role=None,
         request_id=f"evaluation_run:{evaluation_run_id}",
     )
-    await run_evaluation(tenant, uuid.UUID(evaluation_run_id))
+    await run_evaluation(
+        tenant,
+        uuid.UUID(evaluation_run_id),
+        job_try=int(ctx.get("job_try", 1)),
+        max_tries=EVALUATION_MAX_TRIES,
+    )

@@ -15,6 +15,7 @@ from arq.worker import Function, func
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.workers.tasks import (
+    EVALUATION_MAX_TRIES,
     import_products_task,
     ingest_document_task,
     run_evaluation_task,
@@ -48,8 +49,11 @@ class WorkerSettings:
         # turns plus judge calls cannot fit `job_timeout` below. `func`
         # registers it under `run_evaluation_task.__qualname__` -- the same
         # string `app.workers.enqueue.enqueue` sends (`__name__`), pinned in
-        # tests/unit/test_worker_settings.py.
-        func(run_evaluation_task, timeout=3600),
+        # tests/unit/test_worker_settings.py. `max_tries` is named here,
+        # not inherited from the class attribute below, because the runner
+        # is told the same number: on the last try its time budget fails
+        # the run rather than raising a `Retry` arq would never act on.
+        func(run_evaluation_task, timeout=3600, max_tries=EVALUATION_MAX_TRIES),
     ]
     on_startup = _on_startup
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)

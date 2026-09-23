@@ -9,7 +9,7 @@ reference, and whether it is *grounded* in the evidence rather than
 invented, which is what lets a run catch a hallucinated price that happens
 to still match the required phrases.
 
-Decision: `generate_structured`, not `generate`. Both `OpenAIProvider.
+Decision: `generate`, not `generate_structured`. Both `OpenAIProvider.
 generate_structured` and `AnthropicProvider.generate_structured` are
 `raise NotImplementedError(...)` today (Phase 4 only wired up `generate`/
 `stream`; structured output was never built) -- so calling it here would
@@ -26,7 +26,9 @@ validates the result with `JudgeVerdict.model_validate_json` -- which is
 also what turns "the model didn't return valid JSON" into a `pydantic.
 ValidationError` (pydantic v2's JSON parser reports invalid JSON as a
 validation error, not `json.JSONDecodeError`), so the malformed-output case
-falls through the same `except` clause as an invalid enum value.
+falls through the same `except` clause as an invalid enum value. That parse
+runs outside the `generate()` call's own `try`: a response that came back
+was billed, so its real `usage` is kept even when its verdict is garbage.
 
 The fence: exactly Phase 3's `app/prompts/context.py` idiom (a
 `secrets.token_hex(8)` nonce, fresh per call, framed in the system prompt as
@@ -44,13 +46,14 @@ import secrets
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
-from app.core.errors import AppError
+from app.core.logging import get_logger
 from app.evaluations.scorers import Observation, ObservedToolCall, ScoreResult
 from app.llm.base import LLMProvider
-from app.llm.errors import LLMError
-from app.llm.types import CompletionRequest, Message, Usage
+from app.llm.types import CompletionRequest, CompletionResponse, Message, Usage
+
+logger = get_logger(__name__)
 
 EVIDENCE_MAX_CHARS = 12_000
 RATIONALE_MAX_CHARS = 1_000
@@ -103,9 +106,11 @@ class JudgeOutcome:
     """`result.score` is 1 / 0.5 / 0 for correct / partially_correct /
     incorrect, or `None` if the call failed outright. `passed` is true only
     for a `correct` verdict that is also `grounded` -- matching but
-    hallucinated is not a pass. `usage` is the zero `Usage()` when the call
-    failed before a response came back, so a caller can always price it
-    (as zero) without a None-check.
+    hallucinated is not a pass. `usage` is the provider-reported figure
+    whenever a response came back -- a verdict that then failed to parse
+    included -- and the zero `Usage()` only when the call itself raised, so
+    a caller can always price it without a None-check (and skips billing a
+    zero).
     """
 
     result: ScoreResult
@@ -152,45 +157,25 @@ class Judge:
         self._model = model
 
     async def score(self, question: str, reference_answer: str, obs: Observation) -> JudgeOutcome:
-        """Never raises: a provider error, an `AppError`, or a verdict that
-        fails to validate (invalid JSON, an unrecognised `correctness`
-        value) is caught here and reported as `status="error"`, `passed=
-        False`, matching docs/PHASE-6.md §4 ("a judge failure ... marks that
-        scorer error and fails the case; it never turns into a pass") and
-        the constraints doc's review focus #4.
+        """Never raises: a failed call, or a verdict that fails to validate
+        (invalid JSON, an unrecognised `correctness` value), is reported as
+        `status="error"`, `passed=False`, matching docs/PHASE-6.md §4 ("a
+        judge failure ... marks that scorer error and fails the case; it
+        never turns into a pass") and the constraints doc's review focus #4.
+
+        The catch is deliberately `Exception`, not a list of expected
+        types: anything escaping here would fail the whole run over one
+        case's grade. Only the exception's class name is logged or stored --
+        its message could quote the question, answer or evidence.
         """
         try:
-            token = secrets.token_hex(8)
-            evidence = _build_evidence(obs.tool_calls)
-            system = _SYSTEM_PROMPT_TEMPLATE.format(token=token)
-            user_text = (
-                f"Question: {question}\n\n"
-                f"Reference answer: {reference_answer}\n\n"
-                f"<<{token}>>\n"
-                f"Agent's answer:\n{obs.answer}\n\n"
-                f"Evidence the agent saw:\n{evidence}\n"
-                f"<</{token}>>"
-            )
-            caps = self._provider.capabilities(self._model)
-            request = CompletionRequest(
-                model=self._model,
-                messages=[Message.text("user", user_text)],
-                system=system,
-                max_tokens=_MAX_TOKENS,
-                temperature=0.0 if caps.supports_sampling else None,
-            )
-            response = await self._provider.generate(request)
+            response = await self._generate(question, reference_answer, obs)
+        except Exception as exc:
+            return _error(exc, Usage())
+        try:
             verdict = JudgeVerdict.model_validate_json(_strip_json_fence(response.text))
-        except (LLMError, AppError, ValidationError) as exc:
-            return JudgeOutcome(
-                result=ScoreResult(
-                    score=None,
-                    passed=False,
-                    status="error",
-                    detail={"error": type(exc).__name__},
-                ),
-                usage=Usage(),
-            )
+        except Exception as exc:  # a `ValidationError`, in practice
+            return _error(exc, response.usage)
 
         rationale = verdict.rationale[:RATIONALE_MAX_CHARS]
         passed = verdict.correctness == "correct" and verdict.grounded
@@ -207,3 +192,40 @@ class Judge:
             ),
             usage=response.usage,
         )
+
+    async def _generate(
+        self, question: str, reference_answer: str, obs: Observation
+    ) -> CompletionResponse:
+        token = secrets.token_hex(8)
+        evidence = _build_evidence(obs.tool_calls)
+        system = _SYSTEM_PROMPT_TEMPLATE.format(token=token)
+        user_text = (
+            f"Question: {question}\n\n"
+            f"Reference answer: {reference_answer}\n\n"
+            f"<<{token}>>\n"
+            f"Agent's answer:\n{obs.answer}\n\n"
+            f"Evidence the agent saw:\n{evidence}\n"
+            f"<</{token}>>"
+        )
+        caps = self._provider.capabilities(self._model)
+        request = CompletionRequest(
+            model=self._model,
+            messages=[Message.text("user", user_text)],
+            system=system,
+            max_tokens=_MAX_TOKENS,
+            temperature=0.0 if caps.supports_sampling else None,
+        )
+        return await self._provider.generate(request)
+
+
+def _error(exc: Exception, usage: Usage) -> JudgeOutcome:
+    logger.warning("evaluation_judge_failed", error_type=type(exc).__name__)
+    return JudgeOutcome(
+        result=ScoreResult(
+            score=None,
+            passed=False,
+            status="error",
+            detail={"error": type(exc).__name__},
+        ),
+        usage=usage,
+    )

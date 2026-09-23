@@ -20,17 +20,31 @@ Per case, three transactions:
 
 Only a failure outside any one case's own handling (the run row gone, the
 database unreachable) fails the run -- marked through an independent
-session, then re-raised. A turn that errors is that case's result, not the
-run's failure.
+session, logged with a bounded message, and then *returned from*, not
+re-raised: arq does not retry a job that raised an ordinary exception (and
+`claim_run` would refuse a failed run if it did), while arq's own traceback
+log would print the exception -- for a `DBAPIError`, its bound parameters,
+i.e. case content. A turn that errors is that case's result, not the run's
+failure.
+
+The time budget: a job that outlives its arq `timeout` is cancelled and not
+retried, which would strand the run `running`. So before each case the
+runner checks how long this job attempt has run; past
+`EVALUATION_TIME_BUDGET_S` (comfortably inside the 1-hour timeout) it raises
+`arq.worker.Retry(defer=0)`, and the next attempt resumes from the cases
+that already hold a result. On the last try arq allows there is no next
+attempt, so the run is failed with a "time budget exhausted" error instead.
 
 Nothing here logs case content: ids, counts, durations and scores only.
 """
 
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 
+from arq.worker import Retry
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -82,6 +96,11 @@ logger = get_logger(__name__)
 # `eval_results.error` is rendered in the dashboard; a provider's message is
 # already normalised (`app/llm/errors.py`), this only bounds its length.
 _CASE_ERROR_MAX_CHARS = 1000
+
+#: How long one job attempt may keep starting cases: 55 minutes, well inside
+#: the 3600s `timeout` `run_evaluation_task` is registered with, leaving
+#: room for the case in flight to finish.
+EVALUATION_TIME_BUDGET_S = 55 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +156,10 @@ async def run_evaluation(
     *,
     provider_override: LLMProvider | None = None,
     judge_provider_override: LLMProvider | None = None,
+    job_try: int = 1,
+    max_tries: int = 1,
+    time_budget_s: float = EVALUATION_TIME_BUDGET_S,
+    clock: Callable[[], float] = time.monotonic,
 ) -> None:
     """Run (or resume) one evaluation run to completion.
 
@@ -145,11 +168,21 @@ async def run_evaluation(
     Without them the run's pinned `provider`/`judge_provider` names are
     resolved through the registry.
 
+    `job_try`/`max_tries` are arq's try number and the most it allows
+    (`run_evaluation_task` passes both); the defaults describe a caller with
+    no retry behind it, for whom every try is the last. `time_budget_s` and
+    `clock` exist for tests.
+
     Safe to call again for the same run: a terminal run returns at once, and
-    a `running` one (a worker that died part-way, retried by arq) resumes,
-    skipping every case that already holds a result.
+    a `running` one resumes, skipping every case that already holds a
+    result -- what the next arq try does after a worker was killed or shut
+    down mid-run, or after this function handed off with `Retry`.
+
+    Raises only `Retry` (the budget hand-off) or a `BaseException` such as
+    the `CancelledError` of a worker shutting down; every other failure
+    marks the run failed and returns.
     """
-    started_at = time.monotonic()
+    started_at = clock()
     try:
         async with tenant_session(tenant) as session:
             run = await EvaluationService(session, tenant).claim_run(run_id)
@@ -176,6 +209,7 @@ async def run_evaluation(
             recorded = await service.recorded_case_ids(run_id)
 
         judge, judge_unavailable = _build_judge(pinned, judge_provider_override)
+        done = sum(1 for case in cases if case.id in recorded)
 
         for case in cases:
             if case.id in recorded:
@@ -187,6 +221,31 @@ async def run_evaluation(
                 # checked between cases, never mid-turn (§5).
                 logger.info("evaluation_run_stopped", run_id=str(run_id), status=status.value)
                 break
+            if clock() - started_at > time_budget_s:
+                duration_ms = int((clock() - started_at) * 1000)
+                if job_try >= max_tries:
+                    # No further try will ever run: raising `Retry` now
+                    # would leave the run `running` for good.
+                    error = f"stopped after {done} of {len(cases)} cases: time budget exhausted"
+                    await _mark_failed(tenant, run_id, error)
+                    logger.error(
+                        "evaluation_run_failed",
+                        run_id=str(run_id),
+                        organization_id=str(tenant.organization_id),
+                        duration_ms=duration_ms,
+                        error=error,
+                    )
+                    return
+                logger.info(
+                    "evaluation_run_deferred",
+                    run_id=str(run_id),
+                    organization_id=str(tenant.organization_id),
+                    job_try=job_try,
+                    completed_count=done,
+                    case_count=len(cases),
+                    duration_ms=duration_ms,
+                )
+                raise Retry(defer=0)
             await _run_case(
                 tenant,
                 run_id,
@@ -196,6 +255,7 @@ async def run_evaluation(
                 judge=judge,
                 judge_unavailable=judge_unavailable,
             )
+            done += 1
 
         async with tenant_session(tenant) as session:
             completed = await EvaluationService(session, tenant).complete_run(run_id)
@@ -211,8 +271,10 @@ async def run_evaluation(
                     failed=summary.get("failed"),
                     errored=summary.get("errored"),
                     pass_rate=summary.get("pass_rate"),
-                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                    duration_ms=int((clock() - started_at) * 1000),
                 )
+    except Retry:
+        raise
     except Exception as exc:
         error = bounded_error_message(exc)
         await _mark_failed(tenant, run_id, error)
@@ -220,18 +282,17 @@ async def run_evaluation(
             "evaluation_run_failed",
             run_id=str(run_id),
             organization_id=str(tenant.organization_id),
-            duration_ms=int((time.monotonic() - started_at) * 1000),
+            duration_ms=int((clock() - started_at) * 1000),
             # Bounded, and deliberately no `exc_info` -- see
             # `ingest_document_task` for why a traceback would leak content.
             error=error,
         )
-        raise
+        # Not re-raised -- see the module docstring.
 
 
 async def _mark_failed(tenant: TenantContext, run_id: uuid.UUID, error: str) -> None:
     """An independent session: whatever broke may have taken the session it
-    broke on with it. Its own failure is logged, never raised -- the
-    original exception is the one the caller must see."""
+    broke on with it. Its own failure is logged, never raised."""
     try:
         async with tenant_session(tenant) as session:
             await EvaluationService(session, tenant).mark_failed(run_id, error)
@@ -285,14 +346,16 @@ async def _run_case(
 ) -> None:
     turn = await _run_turn(tenant, pinned, case, provider_override)
     observation = turn.observation
-    scores = deterministic_scores(case.expectations, observation)
+    # A turn that errored is not scored at all -- neither deterministically
+    # nor by the judge. The case fails regardless (`case_passed`); zeros
+    # from an outage would only drag down every scorer's mean, and grading
+    # an answer that never finished would be spend for nothing.
+    errored = observation.error is not None
+    scores = {} if errored else deterministic_scores(case.expectations, observation)
 
     verdict: _JudgeVerdict | None = None
     reference_answer = case.expectations.reference_answer
-    # Not judged when the turn errored: the case fails regardless
-    # (`case_passed`), and grading an answer that never finished would be
-    # spend for nothing.
-    if reference_answer and observation.error is None:
+    if reference_answer and not errored:
         if judge is not None:
             outcome = await judge.score(case.question, reference_answer, observation)
             assert pinned.judge_model is not None
@@ -317,7 +380,9 @@ async def _run_case(
     passed = case_passed(scores, observation)
 
     usage_rows: list[RecordUsageInput] = []
-    if turn.usage is not None:
+    # A figure of zero tokens both ways bills nothing (a judge call that
+    # raised reports `Usage()`), so it gets no `usage_events` row.
+    if turn.usage is not None and (turn.usage.input_tokens or turn.usage.output_tokens):
         usage_rows.append(
             RecordUsageInput(
                 agent_id=pinned.agent_id,
@@ -331,7 +396,11 @@ async def _run_case(
                 cost_usd=turn.usage.cost_usd,
             )
         )
-    if verdict is not None and verdict.usage is not None:
+    if (
+        verdict is not None
+        and verdict.usage is not None
+        and (verdict.usage.input_tokens or verdict.usage.output_tokens)
+    ):
         assert pinned.judge_provider is not None and pinned.judge_model is not None
         usage_rows.append(
             RecordUsageInput(

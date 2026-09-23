@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
 from app.evaluations.judge import EVIDENCE_MAX_CHARS, RATIONALE_MAX_CHARS, Judge
 from app.evaluations.scorers import Observation, ObservedToolCall
@@ -158,6 +159,41 @@ class TestFailureHandling:
         assert outcome.result.status == "error"
         assert outcome.result.score is None
         assert outcome.result.detail == {"error": "ValidationError"}
+
+    async def test_malformed_json_keeps_the_real_usage_of_the_call_that_returned_it(
+        self,
+    ) -> None:
+        """`generate()` succeeded -- the tokens were billed -- so the usage
+        must survive a verdict that fails to parse; only a call that itself
+        raised has nothing to bill."""
+        provider = _StubProvider(
+            text="not json at all", usage=Usage(input_tokens=7, output_tokens=3)
+        )
+        judge = Judge(provider, "fake-model")
+        outcome = await judge.score("q", "ref", _obs())
+        assert outcome.result.status == "error"
+        assert outcome.usage == Usage(input_tokens=7, output_tokens=3)
+
+    async def test_invalid_enum_value_keeps_the_real_usage(self) -> None:
+        provider = _StubProvider(text=_verdict_json("sort-of", True))
+        judge = Judge(provider, "fake-model")
+        outcome = await judge.score("q", "ref", _obs())
+        assert outcome.result.status == "error"
+        assert outcome.usage == Usage(input_tokens=11, output_tokens=22)
+
+    async def test_an_unexpected_exception_is_an_error_score_not_a_crash(self) -> None:
+        provider = _StubProvider(fail_with=RuntimeError("secret answer text"))
+        judge = Judge(provider, "fake-model")
+        with capture_logs() as logs:
+            outcome = await judge.score("q", "ref", _obs())
+        assert outcome.result.status == "error"
+        assert outcome.result.passed is False
+        assert outcome.result.detail == {"error": "RuntimeError"}
+        assert outcome.usage == Usage()
+        # Only the class name is logged, never the message (which may carry
+        # case content).
+        assert "secret answer text" not in repr(logs)
+        assert any(entry.get("error_type") == "RuntimeError" for entry in logs)
 
     async def test_invalid_enum_value_becomes_error_status(self) -> None:
         provider = _StubProvider(text=_verdict_json("sort-of", True))

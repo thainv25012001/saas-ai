@@ -361,6 +361,11 @@ class EvaluationService:
                 f"this dataset has {case_count}"
             )
 
+        if data.judge_provider is None:
+            reference_only = await self._count_reference_only_cases(dataset.id)
+            if reference_only:
+                raise ValidationError(reference_only_message(reference_only))
+
         agent = await AgentService(self.session, self.tenant).get_agent(data.agent_id)
 
         # Pinned now, not resolved per case: a version activated halfway
@@ -421,14 +426,37 @@ class EvaluationService:
         await self.session.refresh(run)
         return run
 
+    async def _count_reference_only_cases(self, dataset_id: uuid.UUID) -> int:
+        """Cases whose only expectation is `reference_answer` -- nothing but
+        a judge can grade them (`CaseInput` guarantees each case has at
+        least one expectation, so "no deterministic one" means exactly
+        this)."""
+        result = await self.session.execute(
+            select(func.count())
+            .select_from(EvalCase)
+            .where(
+                EvalCase.dataset_id == dataset_id,
+                EvalCase.organization_id == self.tenant.organization_id,
+                func.cardinality(EvalCase.required_phrases) == 0,
+                func.cardinality(EvalCase.expected_tool_names) == 0,
+                func.cardinality(EvalCase.expected_document_ids) == 0,
+                func.cardinality(EvalCase.expected_product_ids) == 0,
+            )
+        )
+        return result.scalar_one()
+
     async def cancel_run(self, run_id: uuid.UUID) -> EvalRun:
-        """`pending`/`running` -> `cancelled`; a terminal run is returned
+        """`pending`/`running` -> `cancelled`, with a summary of whatever
+        results the run already holds; a terminal run is returned
         unchanged. The runner re-reads the status between cases, so a
-        running run stops after the case in flight (§5)."""
+        running run stops after the case in flight (§5) -- and, since that
+        case's result lands after this summary, `complete_run` refreshes the
+        summary (never the status) when the runner stops."""
         run = await self._get_run_for_update(run_id)
         if run.status in _ACTIVE_STATUSES:
             run.status = EvalRunStatus.CANCELLED
             run.finished_at = datetime.now(UTC)
+            run.summary = build_summary(await self.list_results(run_id))
             await self.session.flush()
         return run
 
@@ -543,11 +571,16 @@ class EvaluationService:
     async def complete_run(self, run_id: uuid.UUID) -> EvalRun | None:
         """The last step: if the run is still `running`, write its summary
         from ALL its results (a resumed run's earlier attempt included) and
-        mark it `completed`. A run cancelled meanwhile is left exactly as
-        the cancel left it -- the row lock is what makes that check-then-
-        write safe against a concurrent `cancel_run`. Returns `None` when
-        nothing was completed."""
+        mark it `completed`. A run cancelled meanwhile keeps its status --
+        the row lock is what makes that check-then-write safe against a
+        concurrent `cancel_run` -- and only has its summary refreshed, to
+        take in the case that was in flight when the cancel landed. Returns
+        `None` when nothing was completed."""
         run = await self._get_run_for_update(run_id)
+        if run.status is EvalRunStatus.CANCELLED:
+            run.summary = build_summary(await self.list_results(run_id))
+            await self.session.flush()
+            return None
         if run.status is not EvalRunStatus.RUNNING:
             return None
         results = await self.list_results(run_id)
@@ -561,9 +594,19 @@ class EvaluationService:
         return run
 
     async def mark_failed(self, run_id: uuid.UUID, error: str) -> None:
-        """`pending`/`running` -> `failed`. A single conditional UPDATE, so
-        a run already cancelled or completed is never overwritten, and a run
-        id this organization does not own matches nothing."""
+        """`pending`/`running` -> `failed`, with a summary of the results
+        written so far. A single conditional UPDATE, so a run already
+        cancelled or completed is never overwritten, and a run id this
+        organization does not own matches nothing."""
+        results = await self.session.execute(
+            select(EvalResult)
+            .where(
+                EvalResult.run_id == run_id,
+                EvalResult.organization_id == self.tenant.organization_id,
+            )
+            .order_by(EvalResult.created_at, EvalResult.id)
+        )
+        summary = build_summary(list(results.scalars().all()))
         await self.session.execute(
             update(EvalRun)
             .where(
@@ -574,6 +617,7 @@ class EvaluationService:
             .values(
                 status=EvalRunStatus.FAILED,
                 error=error[:_RUN_ERROR_MAX_CHARS],
+                summary=summary,
                 finished_at=datetime.now(UTC),
             )
         )
@@ -610,12 +654,21 @@ def _require_usable_provider(name: str) -> None:
         raise ValidationError(f"provider '{name}' has no API key configured")
 
 
+def reference_only_message(count: int) -> str:
+    """The 422 `create_run` gives a judge-less start (docs/PHASE-6.md §4);
+    `StartRunForm.tsx` builds the same sentence from the cases it shows."""
+    cases = "1 case has" if count == 1 else f"{count} cases have"
+    return f"{cases} only a reference answer; add a judge or a deterministic expectation"
+
+
 def build_summary(results: list[EvalResult]) -> dict[str, Any]:
     """The run summary docs/PHASE-6.md §5 defines, from every result.
 
     `scorers[key].mean` averages the numeric scores only -- a judge that
     errored has `score` NULL, which counts as applicable (and not passed)
-    but has no number to average.
+    but has no number to average. A case whose turn errored stores no
+    scores at all (`scores = {}`), so it is in `errored` and `failed` but
+    in no scorer's `applicable` or `mean`.
 
     `cost_usd` is the exact `Decimal` sum as a string, or `None` as soon as
     any result that reported usage has no cost (an unpriced model). A result

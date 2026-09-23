@@ -32,8 +32,8 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/evaluations", tags=["evaluations"])
 
-# Each run is up to 200 real, billed provider turns (plus as many judge
-# calls), so starts are throttled per user on top of the one-active-run-per-
+# Each run is up to 200 real, billed provider turns (plus a judge call per
+# case with a reference answer), so starts are throttled per user on top of the one-active-run-per-
 # dataset rule `create_run` enforces -- that rule alone still lets a caller
 # start one run on every dataset they own at once.
 START_RUN_RATE_LIMIT = 20
@@ -86,14 +86,20 @@ async def start_run(
     tenant: Annotated[TenantContext, Depends(get_current_tenant)],
 ) -> EvalRunResponse:
     rate_limit_subject = tenant.user_id or tenant.organization_id
-    await enforce_rate_limit(
-        f"evaluation_run:{rate_limit_subject}",
-        limit=START_RUN_RATE_LIMIT,
-        window_seconds=START_RUN_RATE_LIMIT_WINDOW_SECONDS,
-    )
-
     async with tenant_session(tenant) as session:
         run = await EvaluationService(session, tenant).create_run(payload)
+        # After validation, inside the transaction: only a start that would
+        # actually create a run spends the limit (a 404/409/422 costs no
+        # provider call), and a 429 here raises out of the block, so the
+        # run is rolled back rather than committed. Unlike `chat_stream`,
+        # which limits first because its work IS the provider call, the
+        # expensive part here is the run itself -- validation is a few
+        # indexed reads.
+        await enforce_rate_limit(
+            f"evaluation_run:{rate_limit_subject}",
+            limit=START_RUN_RATE_LIMIT,
+            window_seconds=START_RUN_RATE_LIMIT_WINDOW_SECONDS,
+        )
         response = EvalRunResponse.from_model(run)
 
     # After the commit, not before -- `run_evaluation_task` looks this row up

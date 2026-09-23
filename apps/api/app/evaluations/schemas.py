@@ -145,10 +145,15 @@ class CaseInput(BaseModel):
     @field_validator("tags")
     @classmethod
     def _validate_tags(cls, values: list[str]) -> list[str]:
+        # Stripped and deduped exactly like `required_phrases`; the list's
+        # `max_length` above bounds the payload before either happens.
+        stripped: list[str] = []
         for value in values:
-            if not 1 <= len(value) <= 50:
+            tag = value.strip()
+            if not 1 <= len(tag) <= 50:
                 raise ValueError("each tag must be 1-50 characters")
-        return values
+            stripped.append(tag)
+        return _dedupe(stripped)
 
     @model_validator(mode="after")
     def _at_least_one_expectation(self) -> Self:

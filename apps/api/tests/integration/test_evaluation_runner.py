@@ -19,10 +19,10 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from arq.worker import Retry
 from sqlalchemy import text
 
 from app.agents.service import AgentService
-from app.core.errors import NotFoundError
 from app.core.ids import uuid7
 from app.core.tenancy import TenantContext, tenant_session
 from app.db.models import DocumentSourceType, EvalResult, EvalRun, EvalRunStatus
@@ -495,6 +495,58 @@ async def test_a_judge_that_raises_fails_only_its_case(tenant_a):
     assert run.summary["scorers"]["judge"] == {"mean": 1.0, "passed": 2, "applicable": 3}
 
 
+async def test_a_judge_call_that_raised_writes_no_zero_token_usage_row(tenant_a, owner_connection):
+    agent_id, dataset_id, _ = await _setup(
+        tenant_a, [_case(reference_answer="30 days"), _case(reference_answer="Two years")]
+    )
+    run_id = await _start(
+        tenant_a, dataset_id, agent_id, judge_provider="fake", judge_model="judge-model-x"
+    )
+
+    await run_evaluation(
+        tenant_a,
+        run_id,
+        provider_override=_AgentProvider(turns=["30 days", "Two years"]),
+        judge_provider_override=_JudgeProvider(raise_on_call=2),
+    )
+
+    org = tenant_a.organization_id
+    # Two turns plus the one judge call that returned; the one that raised
+    # spent nothing and is not billed as a 0-token row.
+    assert await _count(owner_connection, "usage_events", org) == 3
+    assert await _count(owner_connection, "usage_events", org, "AND input_tokens = 0") == 0
+
+
+async def test_a_garbage_verdict_still_bills_the_judge_call_that_returned_it(
+    tenant_a, owner_connection
+):
+    agent_id, dataset_id, _ = await _setup(tenant_a, [_case(reference_answer="30 days")])
+    run_id = await _start(
+        tenant_a, dataset_id, agent_id, judge_provider="fake", judge_model="judge-model-x"
+    )
+
+    await run_evaluation(
+        tenant_a,
+        run_id,
+        provider_override=_AgentProvider(turns=["30 days"]),
+        judge_provider_override=_JudgeProvider(verdict="this is not json"),
+    )
+
+    _, [result] = await _load(tenant_a, run_id)
+    assert result.scores["judge"]["status"] == "error"
+    assert result.passed is False
+    # FakeProvider reports 10 input / 5 output tokens for every call.
+    assert (
+        await _count(
+            owner_connection,
+            "usage_events",
+            tenant_a.organization_id,
+            "AND model = 'judge-model-x' AND input_tokens = 10 AND output_tokens = 5",
+        )
+        == 1
+    )
+
+
 # ---------------------------------------------------------------------------
 # Turn errors, cancellation, retrieval, tenancy, run failure
 # ---------------------------------------------------------------------------
@@ -520,9 +572,16 @@ async def test_a_turn_error_records_the_error_and_the_run_continues(tenant_a):
     assert second.error is not None
     assert "provider unavailable" in second.error
     assert second.passed is False
+    # Not scored at all: an outage is not a 0 on every scorer (R6).
+    assert second.scores == {}
     assert first.passed is True and third.passed is True
     assert run.summary["errored"] == 1
     assert run.summary["passed"] == 2
+    assert run.summary["failed"] == 1
+    # ...so the scorer means cover only the two cases that were scored.
+    assert run.summary["scorers"] == {
+        "required_phrases": {"mean": 1.0, "passed": 2, "applicable": 2}
+    }
     # An errored turn reported no usage, so it has no cost figure -- but it
     # spent nothing either, so the run's total is still known.
     assert second.cost_usd is None
@@ -555,7 +614,11 @@ async def test_cancelling_between_cases_stops_the_run_and_stays_cancelled(tenant
     assert run.finished_at is not None
     assert len(results) < 3
     assert provider.calls == 1
-    assert run.summary == {}
+    # A summary of the results the run did produce, the in-flight case
+    # recorded after the cancel included (R8).
+    assert run.summary["passed"] + run.summary["failed"] == len(results) == 1
+    assert run.summary["pass_rate"] == 1.0
+    assert run.summary["cost_usd"] is not None
 
 
 async def test_cancel_run_leaves_a_terminal_run_unchanged(tenant_a):
@@ -623,8 +686,9 @@ async def test_another_tenant_cannot_run_or_touch_a_run(tenant_a, tenant_b):
     run_id = await _start(tenant_a, dataset_id, agent_id)
     provider = _AgentProvider(turns=["a"])
 
-    with pytest.raises(NotFoundError):
-        await run_evaluation(tenant_b, run_id, provider_override=provider)
+    # Returns rather than raising (R7); `mark_failed` under tenant_b matches
+    # no row, so tenant_a's run is untouched.
+    await run_evaluation(tenant_b, run_id, provider_override=provider)
 
     run, results = await _load(tenant_a, run_id)
     assert provider.calls == 0
@@ -633,7 +697,11 @@ async def test_another_tenant_cannot_run_or_touch_a_run(tenant_a, tenant_b):
     assert results == []
 
 
-async def test_a_failure_outside_any_case_fails_the_run_and_reraises(tenant_a, monkeypatch):
+async def test_a_failure_outside_any_case_fails_the_run_and_returns(tenant_a, monkeypatch):
+    """Marked failed and NOT re-raised: arq would not retry a generic
+    exception anyway (`claim_run` refuses a failed run), and arq's own
+    traceback log would print the exception -- for a `DBAPIError`, its bound
+    parameters, i.e. case content (R7)."""
     agent_id, dataset_id, _ = await _setup(tenant_a, [_case(required_phrases=["a"])])
     run_id = await _start(tenant_a, dataset_id, agent_id)
 
@@ -642,8 +710,7 @@ async def test_a_failure_outside_any_case_fails_the_run_and_reraises(tenant_a, m
 
     monkeypatch.setattr(runner_module.EvaluationService, "recorded_case_ids", _boom)
 
-    with pytest.raises(RuntimeError):
-        await run_evaluation(tenant_a, run_id, provider_override=_AgentProvider(turns=["a"]))
+    await run_evaluation(tenant_a, run_id, provider_override=_AgentProvider(turns=["a"]))
 
     run, results = await _load(tenant_a, run_id)
     assert run.status is EvalRunStatus.FAILED
@@ -651,6 +718,9 @@ async def test_a_failure_outside_any_case_fails_the_run_and_reraises(tenant_a, m
     assert "RuntimeError" in run.error
     assert run.finished_at is not None
     assert results == []
+    # A failed run gets a summary too (R8) -- of no results here.
+    assert run.summary["passed"] == 0
+    assert run.summary["pass_rate"] is None
 
 
 async def test_recording_the_same_case_twice_is_a_no_op_not_an_error(tenant_a, owner_connection):
@@ -697,3 +767,119 @@ async def test_recording_the_same_case_twice_is_a_no_op_not_an_error(tenant_a, o
     assert len(results) == 1
     assert run.completed_count == 1
     assert await _count(owner_connection, "usage_events", tenant_a.organization_id) == 1
+
+
+# ---------------------------------------------------------------------------
+# The time budget (R7) -- hand off to the next arq try before the job timeout
+# ---------------------------------------------------------------------------
+
+
+class _Clock:
+    """A settable `time.monotonic` stand-in."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+async def _three_case_run(tenant: TenantContext) -> tuple[uuid.UUID, list[uuid.UUID]]:
+    agent_id, dataset_id, case_ids = await _setup(
+        tenant,
+        [
+            _case(question="first", required_phrases=["one"]),
+            _case(question="second", required_phrases=["two"]),
+            _case(question="third", required_phrases=["three"]),
+        ],
+    )
+    return await _start(tenant, dataset_id, agent_id), case_ids
+
+
+async def test_an_exhausted_budget_raises_retry_and_keeps_the_results_so_far(
+    tenant_a, owner_connection
+):
+    run_id, case_ids = await _three_case_run(tenant_a)
+    clock = _Clock()
+
+    async def _time_passes() -> None:
+        clock.now += 61
+
+    provider = _AgentProvider(turns=["one", "two", "three"], on_first_call=_time_passes)
+
+    with pytest.raises(Retry):
+        await run_evaluation(
+            tenant_a,
+            run_id,
+            provider_override=provider,
+            job_try=1,
+            max_tries=3,
+            time_budget_s=60,
+            clock=clock,
+        )
+
+    run, results = await _load(tenant_a, run_id)
+    assert provider.calls == 1
+    assert run.status is EvalRunStatus.RUNNING
+    assert run.finished_at is None
+    assert [r.case_id for r in results] == case_ids[:1]
+
+    # The next arq try resumes where the budget stopped it.
+    resumed = _AgentProvider(turns=["two", "three"])
+    await run_evaluation(tenant_a, run_id, provider_override=resumed, job_try=2, max_tries=3)
+
+    run, results = await _load(tenant_a, run_id)
+    assert resumed.calls == 2
+    assert run.status is EvalRunStatus.COMPLETED
+    assert len(results) == 3
+    assert run.summary["passed"] == 3
+    # Each case billed exactly once across the two tries.
+    assert await _count(owner_connection, "usage_events", tenant_a.organization_id) == 3
+
+
+async def test_an_exhausted_budget_on_the_last_try_fails_the_run_with_a_summary(tenant_a):
+    """arq never calls a job again past `max_tries`, so raising `Retry` here
+    would leave the run `running` forever."""
+    run_id, _ = await _three_case_run(tenant_a)
+    clock = _Clock()
+
+    async def _time_passes() -> None:
+        clock.now += 61
+
+    provider = _AgentProvider(turns=["one", "two", "three"], on_first_call=_time_passes)
+
+    await run_evaluation(
+        tenant_a,
+        run_id,
+        provider_override=provider,
+        job_try=3,
+        max_tries=3,
+        time_budget_s=60,
+        clock=clock,
+    )
+
+    run, results = await _load(tenant_a, run_id)
+    assert provider.calls == 1
+    assert run.status is EvalRunStatus.FAILED
+    assert run.error == "stopped after 1 of 3 cases: time budget exhausted"
+    assert run.finished_at is not None
+    assert len(results) == 1
+    assert run.summary["passed"] == 1
+    assert run.summary["pass_rate"] == 1.0
+
+
+async def test_the_arq_task_passes_its_try_number_and_max_tries_to_the_runner(monkeypatch):
+    from app.workers import tasks as tasks_module
+
+    seen: dict[str, Any] = {}
+
+    async def _record(tenant, run_id, **kwargs):  # type: ignore[no-untyped-def]
+        seen.update(kwargs)
+
+    monkeypatch.setattr(tasks_module, "run_evaluation", _record)
+
+    await run_evaluation_task(
+        {"job_try": 2}, organization_id=str(uuid.uuid4()), evaluation_run_id=str(uuid.uuid4())
+    )
+
+    assert seen == {"job_try": 2, "max_tries": tasks_module.EVALUATION_MAX_TRIES}

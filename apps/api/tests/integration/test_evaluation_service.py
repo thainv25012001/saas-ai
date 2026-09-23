@@ -211,6 +211,16 @@ async def test_create_case_requires_at_least_one_expectation():
         CaseInput(question="What colour is the sky?")
 
 
+async def test_tags_are_stripped_and_deduped_like_phrases():
+    case = _case_input(tags=["  pricing ", "pricing", "returns", " returns"])
+    assert case.tags == ["pricing", "returns"]
+
+
+async def test_a_blank_tag_is_rejected():
+    with pytest.raises(ValueError):
+        _case_input(tags=["   "])
+
+
 async def test_create_list_update_delete_case(tenant_a):
     async with tenant_session(tenant_a) as session:
         dataset = await _dataset(session, tenant_a)

@@ -96,11 +96,14 @@ def normalize(text: str) -> str:
 
 
 def _phrase_matches(phrase: str, normalized_answer_padded: str) -> bool:
-    """Word-boundary match by padding both sides with a space: `f" {phrase}
-    " in f" {answer} "`. Padding (rather than a regex `\\b`) is what makes
-    "3 years" fail to match inside "13 years" -- `\\b` sits at a
-    digit/non-digit transition, which "1" -> "3" is not, so a naive regex
-    `\\b` approach would (wrongly) match here.
+    """Whole-token match by padding both sides with a space: `f" {phrase}
+    " in f" {answer} "` -- so "3 years" does not match inside "13 years".
+
+    After `normalize`, both strings are alphanumeric tokens separated by
+    single spaces, so this is equivalent to a regex `\\b{phrase}\\b` (which
+    would not match "3 years" inside "13 years" either: there is no word
+    boundary between "1" and "3"). Padding is used because it is a plain
+    substring test, with no regex escaping of the phrase to get wrong.
     """
     return f" {normalize(phrase)} " in normalized_answer_padded
 

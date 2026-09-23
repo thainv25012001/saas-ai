@@ -128,3 +128,24 @@ def test_run_evaluation_task_is_registered_under_its_own_name_with_a_one_hour_ti
     assert function.name == "run_evaluation_task"
     assert function.coroutine is run_evaluation_task
     assert function.timeout_s == 3600
+
+
+def test_run_evaluation_task_pins_the_max_tries_the_runner_is_told() -> None:
+    """`run_evaluation` must know which try is the last one (a time-budget
+    hand-off there fails the run instead of raising `Retry`, which arq would
+    never act on) -- so the `max_tries` arq enforces and the one the task
+    passes down must be the same number."""
+    from arq.worker import Function
+
+    from app.workers.tasks import EVALUATION_MAX_TRIES, run_evaluation_task
+
+    [function] = [
+        entry
+        for entry in WorkerSettings.functions
+        if isinstance(entry, Function) and entry.coroutine is run_evaluation_task
+    ]
+    assert function.max_tries == EVALUATION_MAX_TRIES
+    assert function.timeout_s is not None
+    from app.evaluations.runner import EVALUATION_TIME_BUDGET_S
+
+    assert EVALUATION_TIME_BUDGET_S < function.timeout_s
