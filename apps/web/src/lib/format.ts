@@ -34,3 +34,26 @@ export function formatPrice(price: string | null, currency: string | null): stri
     return `${price} ${currency}`;
   }
 }
+
+/** A USD cost as the API sends it -- a decimal *string* -- or `—` when it is
+ * `null`, which the API means as "not priced" (an unpriced model), never as
+ * zero. Up to four decimals: one eval turn often costs a fraction of a cent,
+ * and `$0.00` would claim it was free. */
+export function formatUsd(value: string | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  const amount = Number(value);
+  if (Number.isNaN(amount)) return value;
+  return amount.toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  });
+}
+
+/** Milliseconds as `840 ms` or `2.1 s`; `—` for no figure. */
+export function formatLatency(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return "—";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(1)} s`;
+}
