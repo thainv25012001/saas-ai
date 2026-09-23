@@ -19,6 +19,24 @@ describe("UploadDropzone", () => {
     expect(screen.getByText(/19\.9 MB/)).toBeInTheDocument();
   });
 
+  it("states another page's accepted types, limit and note when given them", () => {
+    // The Products page reuses this zone for catalogue imports.
+    render(
+      <UploadDropzone
+        onUpload={vi.fn()}
+        acceptedTypes={{ "text/csv": ".csv", "application/json": ".json" }}
+        maxBytes={1024 * 1024}
+        pickLabel="Choose a catalogue file to import"
+        note="One product per row."
+      />,
+    );
+    expect(screen.getByText(/Accepts \.csv, \.json — up to 1 MB/)).toBeInTheDocument();
+    expect(screen.getByText("One product per row.")).toBeInTheDocument();
+    expect(screen.queryByText(/shared wording, not meaning/i)).not.toBeInTheDocument();
+    const input = screen.getByLabelText("Choose a catalogue file to import") as HTMLInputElement;
+    expect(input.accept).toContain(".csv");
+  });
+
   it("names the lexical embedder plainly, without alarm", () => {
     render(<UploadDropzone onUpload={vi.fn()} />);
     expect(screen.getByText(/shared wording, not meaning/i)).toBeInTheDocument();

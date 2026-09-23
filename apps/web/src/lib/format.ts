@@ -15,3 +15,22 @@ export function formatTimestamp(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
+
+/** A product price as the API sends it -- a decimal *string*, exact, with an
+ * optional ISO 4217 code -- in the viewer's locale.
+ *
+ * `null` for no price, so the caller decides what an empty cell says. An
+ * unknown currency code makes `Intl.NumberFormat` throw; it then falls back
+ * to the plain amount and code, exactly as they arrived, rather than hiding a
+ * price behind an error. */
+export function formatPrice(price: string | null, currency: string | null): string | null {
+  if (price === null) return null;
+  const amount = Number(price);
+  if (Number.isNaN(amount)) return currency ? `${price} ${currency}` : price;
+  if (!currency) return amount.toLocaleString(undefined, { minimumFractionDigits: 2 });
+  try {
+    return amount.toLocaleString(undefined, { style: "currency", currency });
+  } catch {
+    return `${price} ${currency}`;
+  }
+}

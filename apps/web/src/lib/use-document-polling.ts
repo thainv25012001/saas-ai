@@ -28,9 +28,20 @@ export function useDocumentPolling(
   tabHidden: boolean,
   onPoll: () => void,
 ): void {
+  usePollWhile(shouldPollDocuments(documents, tabHidden), onPoll);
+}
+
+/**
+ * The interval itself, with the "should it run" decision taken as a plain
+ * boolean -- so a second list with its own predicate (product imports:
+ * `shouldPollImports`) reuses this one torn-down-on-every-change interval
+ * rather than carrying a copy of it. `useDocumentPolling`'s fake-timer tests
+ * exercise exactly this effect.
+ */
+export function usePollWhile(active: boolean, onPoll: () => void): void {
   useEffect(() => {
-    if (!shouldPollDocuments(documents, tabHidden)) return;
+    if (!active) return;
     const interval = setInterval(onPoll, POLL_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [documents, tabHidden, onPoll]);
+  }, [active, onPoll]);
 }
