@@ -234,10 +234,9 @@ describe("parseSSEStream", () => {
   });
 
   it("reads a citation with no product_id key as a document citation", async () => {
-    const { product_id: _omitted, ...wire } = {
+    const wire = {
       chunk_id: "c1",
       document_id: "doc1",
-      product_id: null,
       document_title: "FAQ.md",
       rank: 1,
       score: 0.6,
