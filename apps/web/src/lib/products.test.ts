@@ -37,7 +37,37 @@ describe("validateImportFile", () => {
   });
 
   it("believes a reported type even when the extension disagrees", () => {
-    expect(resolveImportType("text/plain", "catalogue.csv")).toBe("text/plain");
+    expect(resolveImportType("application/pdf", "catalogue.csv")).toBe("application/pdf");
+    expect(resolveImportType("application/json", "catalogue.csv")).toBe("application/json");
+  });
+
+  it("treats the types a real .csv is reported as, on a .csv file, as CSV", () => {
+    // Chromium/Firefox on Windows with Excel installed report
+    // application/vnd.ms-excel for a .csv -- mirrored from the server.
+    for (const reported of [
+      "application/vnd.ms-excel",
+      "text/plain",
+      "text/x-csv",
+      "application/csv",
+      "application/x-csv",
+      "text/comma-separated-values",
+    ]) {
+      expect(resolveImportType(reported, "catalogue.csv")).toBe("text/csv");
+    }
+    expect(
+      validateImportFile({ type: "application/vnd.ms-excel", size: 10, name: "Catalogue.CSV" }),
+    ).toBeNull();
+  });
+
+  it("does not turn an actual Excel workbook into CSV", () => {
+    expect(resolveImportType("application/vnd.ms-excel", "catalogue.xls")).toBe(
+      "application/vnd.ms-excel",
+    );
+  });
+
+  it("strips MIME parameters before comparing", () => {
+    expect(resolveImportType("text/csv; charset=utf-8", "catalogue.csv")).toBe("text/csv");
+    expect(resolveImportType("application/json; charset=utf-8")).toBe("application/json");
   });
 });
 

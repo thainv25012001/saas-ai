@@ -122,19 +122,44 @@ _EXTENSION_MIME_TYPES: dict[str, str] = {
     ".json": "application/json",
 }
 
+# Types browsers and operating systems report for a file that is really a
+# `.csv` (final review I4). Chromium and Firefox on Windows take `.csv`'s
+# type from the registry, which is `application/vnd.ms-excel` whenever Excel
+# is installed -- the most common source of a customer's catalogue -- and
+# other platforms report `text/plain` or one of the older CSV spellings.
+# For these, and only when the filename ends in `.csv`, the extension is
+# authoritative. Anything else reported is still believed over the
+# extension, as before.
+_CSV_ALIAS_MIME_TYPES: frozenset[str] = frozenset(
+    {
+        "application/vnd.ms-excel",
+        "text/plain",
+        "text/x-csv",
+        "application/csv",
+        "application/x-csv",
+        "text/comma-separated-values",
+    }
+)
+
 
 def resolve_import_mime_type(reported: str | None, filename: str | None) -> str:
     """What to treat this upload as -- see `resolve_mime_type`'s docstring
     in app/rag/extract.py for why the reported type wins whenever it is
     anything other than empty/octet-stream, and the extension is only ever
-    a fallback for the browsers that report nothing useful."""
+    a fallback for the browsers that report nothing useful. The one
+    exception is `_CSV_ALIAS_MIME_TYPES` on a `.csv` file. MIME parameters
+    (`text/csv; charset=utf-8`) are stripped before any comparison."""
     reported = reported or ""
-    if reported.lower() not in _GENERIC_MIME_TYPES:
-        return reported
-    if not filename:
-        return reported
-    _, _, suffix = filename.rpartition(".")
-    return _EXTENSION_MIME_TYPES.get(f".{suffix.lower()}", reported)
+    base = reported.split(";", 1)[0].strip().lower()
+    suffix_type: str | None = None
+    if filename:
+        _, _, suffix = filename.rpartition(".")
+        suffix_type = _EXTENSION_MIME_TYPES.get(f".{suffix.lower()}")
+    if base in _GENERIC_MIME_TYPES:
+        return suffix_type or reported
+    if base in _CSV_ALIAS_MIME_TYPES and suffix_type == "text/csv":
+        return suffix_type
+    return base
 
 
 # ---------------------------------------------------------------------------

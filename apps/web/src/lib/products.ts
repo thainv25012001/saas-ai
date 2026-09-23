@@ -31,9 +31,24 @@ export const MAX_IMPORT_BYTES = MAX_UPLOAD_BYTES;
  * `resolve_import_mime_type` in the importer, mirrored: a browser that
  * reports nothing useful for `.csv`/`.json` (empty, or octet-stream -- common
  * for `.csv` on Windows without Excel) falls back to the extension. A
- * reported type is otherwise believed, as on the server.
+ * reported type is otherwise believed, as on the server, with one exception:
+ * the types a real `.csv` is reported as (`CSV_ALIAS_MIME_TYPES`) defer to a
+ * `.csv` extension. MIME parameters are stripped before comparing.
  */
 const GENERIC_MIME_TYPES = new Set(["", "application/octet-stream", "binary/octet-stream"]);
+
+/** `_CSV_ALIAS_MIME_TYPES` on the server. Chromium and Firefox on Windows
+ * report a `.csv` as `application/vnd.ms-excel` whenever Excel is installed
+ * -- where most catalogues come from -- and other platforms use `text/plain`
+ * or an older CSV spelling. */
+const CSV_ALIAS_MIME_TYPES = new Set([
+  "application/vnd.ms-excel",
+  "text/plain",
+  "text/x-csv",
+  "application/csv",
+  "application/x-csv",
+  "text/comma-separated-values",
+]);
 
 const EXTENSION_MIME_TYPES: Record<string, string> = {
   csv: "text/csv",
@@ -41,10 +56,13 @@ const EXTENSION_MIME_TYPES: Record<string, string> = {
 };
 
 export function resolveImportType(reported: string, filename?: string): string {
-  if (!GENERIC_MIME_TYPES.has(reported.toLowerCase())) return reported;
-  if (!filename) return reported;
-  const suffix = filename.slice(filename.lastIndexOf(".") + 1).toLowerCase();
-  return EXTENSION_MIME_TYPES[suffix] ?? reported;
+  const base = reported.split(";", 1)[0].trim().toLowerCase();
+  const suffixType = filename
+    ? EXTENSION_MIME_TYPES[filename.slice(filename.lastIndexOf(".") + 1).toLowerCase()]
+    : undefined;
+  if (GENERIC_MIME_TYPES.has(base)) return suffixType ?? reported;
+  if (CSV_ALIAS_MIME_TYPES.has(base) && suffixType === "text/csv") return suffixType;
+  return base;
 }
 
 /** The server's two door checks, run client-side so a doomed pick fails

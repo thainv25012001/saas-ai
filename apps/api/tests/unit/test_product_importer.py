@@ -375,6 +375,45 @@ def test_resolve_import_mime_type_falls_back_to_the_extension(reported, filename
 
 def test_resolve_import_mime_type_believes_a_declared_type_over_the_extension():
     assert resolve_import_mime_type("application/json", "catalogue.csv") == "application/json"
+    assert resolve_import_mime_type("application/pdf", "catalogue.csv") == "application/pdf"
+
+
+@pytest.mark.parametrize(
+    "reported",
+    [
+        # Chromium/Firefox on Windows with Excel installed (final review I4).
+        "application/vnd.ms-excel",
+        "text/plain",
+        "text/x-csv",
+        "application/csv",
+        "application/x-csv",
+        "text/comma-separated-values",
+        "Application/Vnd.MS-Excel",
+    ],
+)
+def test_resolve_import_mime_type_treats_csv_aliases_on_a_csv_file_as_csv(reported):
+    assert resolve_import_mime_type(reported, "catalogue.csv") == "text/csv"
+
+
+def test_resolve_import_mime_type_does_not_turn_an_excel_workbook_into_csv():
+    # The alias rule needs the `.csv` extension: an actual `.xls` is still
+    # the unsupported type it says it is.
+    assert resolve_import_mime_type("application/vnd.ms-excel", "catalogue.xls") == (
+        "application/vnd.ms-excel"
+    )
+    assert resolve_import_mime_type("text/plain", "notes.txt") == "text/plain"
+
+
+@pytest.mark.parametrize(
+    ("reported", "filename", "expected"),
+    [
+        ("text/csv; charset=utf-8", "catalogue.csv", "text/csv"),
+        ("application/json; charset=utf-8", "catalogue.json", "application/json"),
+        ("application/vnd.ms-excel; charset=utf-8", "catalogue.csv", "text/csv"),
+    ],
+)
+def test_resolve_import_mime_type_strips_mime_parameters(reported, filename, expected):
+    assert resolve_import_mime_type(reported, filename) == expected
 
 
 def test_row_error_to_dict_round_trips_for_jsonb_storage():

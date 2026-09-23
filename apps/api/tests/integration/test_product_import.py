@@ -729,3 +729,34 @@ async def test_a_non_database_error_in_phase_1_fails_the_import_instead_of_a_row
     body = (await api_client.get(f"{IMPORT_URL}/{import_id}", headers=_auth(token))).json()
     assert body["status"] == "failed"
     assert calls["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 7. The door: Excel-on-Windows CSVs (final review I4) and over-long
+# filenames (final review M4).
+# ---------------------------------------------------------------------------
+
+
+async def test_a_csv_reported_as_vnd_ms_excel_is_accepted_and_imports(
+    api_client, clean_users, queue
+):
+    token = await _register(api_client, "impexcel@example.com", "Ada Motors Import Excel")
+    org_id = await _organization_id(api_client, token)
+    response = await _upload(
+        api_client, token, content=_VALID_CSV, content_type="application/vnd.ms-excel"
+    )
+    assert response.status_code == 202, response.text
+    assert response.json()["mime_type"] == "text/csv"
+
+    await _run_import(org_id, uuid.UUID(response.json()["id"]))
+    products = await _products_for(org_id)
+    assert {p.external_id for p in products} == {"sku-1", "sku-2", "sku-3"}
+
+
+async def test_an_over_long_filename_is_truncated_not_a_500(api_client, clean_users, queue):
+    token = await _register(api_client, "implongname@example.com", "Ada Motors Import LongName")
+    long_name = "c" * 400 + ".csv"
+    response = await _upload(api_client, token, content=_VALID_CSV, filename=long_name)
+    assert response.status_code == 202, response.text
+    assert response.json()["filename"] == long_name[:255]
+    assert len(queue.calls) == 1
