@@ -128,6 +128,14 @@ class EvaluationService:
             # same name must not let the second one raise a raw
             # IntegrityError. See AgentService.update_agent.
             raise ConflictError(f"a dataset named '{dataset.name}' already exists") from exc
+        # `updated_at`'s `onupdate=func.now()` is a server-side expression:
+        # flush() does not fetch its new value back, so the attribute is left
+        # expired. Refreshed now for the same reason `create_run` refreshes
+        # below -- the GraphQL resolver serialises this row before the
+        # request's session closes, and an expired attribute accessed off
+        # the async event loop raises `MissingGreenlet` rather than lazily
+        # reloading.
+        await self.session.refresh(dataset)
         return dataset
 
     async def delete_dataset(self, dataset_id: uuid.UUID) -> None:
@@ -255,6 +263,8 @@ class EvaluationService:
         case.expected_product_ids = data.expected_product_ids
         case.tags = data.tags
         await self.session.flush()
+        # Same reasoning as `update_dataset`'s refresh above.
+        await self.session.refresh(case)
         return case
 
     async def delete_case(self, case_id: uuid.UUID) -> None:

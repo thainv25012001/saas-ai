@@ -69,6 +69,11 @@ input CreateAgentInput {
   maxTokens: Int! = 1024
 }
 
+input CreateEvaluationDatasetInput {
+  name: String!
+  description: String = null
+}
+
 input CreatePromptInput {
   name: String!
   key: String!
@@ -102,6 +107,121 @@ enum DocumentStatus {
   PROCESSING
   READY
   FAILED
+}
+
+type EvaluationCase {
+  id: UUID!
+  question: String!
+  referenceAnswer: String
+  requiredPhrases: [String!]!
+  expectedToolNames: [String!]!
+  expectedDocumentIds: [UUID!]!
+  expectedProductIds: [UUID!]!
+  tags: [String!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+input EvaluationCaseInput {
+  question: String!
+  referenceAnswer: String = null
+  requiredPhrases: [String!]! = []
+  expectedToolNames: [String!]! = []
+  expectedDocumentIds: [UUID!]! = []
+  expectedProductIds: [UUID!]! = []
+  tags: [String!]! = []
+}
+
+type EvaluationDataset {
+  id: UUID!
+  name: String!
+  description: String
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  caseCount: Int!
+  latestRun: EvaluationRun
+}
+
+type EvaluationResult {
+  id: UUID!
+  caseId: UUID
+  question: String!
+  answer: String
+  error: String
+  passed: Boolean!
+  citedDocumentIds: [UUID!]!
+  citedProductIds: [UUID!]!
+  promptVersionId: UUID
+  latencyMs: Int
+  inputTokens: Int
+  outputTokens: Int
+  costUsd: String
+  createdAt: DateTime!
+  scores: [EvaluationScore!]!
+  toolCalls: [EvaluationToolCall!]!
+}
+
+type EvaluationRun {
+  id: UUID!
+  datasetId: UUID!
+  agentId: UUID!
+  promptVersionId: UUID
+  provider: String!
+  model: String!
+  judgeProvider: String
+  judgeModel: String
+  status: EvaluationRunStatus!
+  caseCount: Int!
+  completedCount: Int!
+  error: String
+  triggeredBy: UUID
+  createdAt: DateTime!
+  startedAt: DateTime
+  finishedAt: DateTime
+  summary: EvaluationRunSummary
+  agentName: String
+  promptVersion: Int
+  results: [EvaluationResult!]!
+}
+
+enum EvaluationRunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+type EvaluationRunSummary {
+  passed: Int!
+  failed: Int!
+  errored: Int!
+  passRate: Float
+  costUsd: String
+  meanLatencyMs: Int
+  scorers: [EvaluationScorerSummary!]!
+}
+
+type EvaluationScore {
+  name: String!
+  score: Float
+  passed: Boolean!
+  status: String!
+  detail: String!
+}
+
+type EvaluationScorerSummary {
+  name: String!
+  mean: Float
+  passed: Int!
+  applicable: Int!
+}
+
+type EvaluationToolCall {
+  name: String!
+  arguments: String!
+  isError: Boolean!
+  excerpt: String!
 }
 
 type Lead {
@@ -185,6 +305,13 @@ type Mutation {
   activatePromptVersion(versionId: UUID!): PromptVersion!
   deleteDocument(id: UUID!): Boolean!
   setAgentToolEnabled(agentId: UUID!, toolId: UUID!, isEnabled: Boolean!): AgentTool!
+  createEvaluationDataset(input: CreateEvaluationDatasetInput!): EvaluationDataset!
+  updateEvaluationDataset(id: UUID!, input: UpdateEvaluationDatasetInput!): EvaluationDataset!
+  deleteEvaluationDataset(id: UUID!): Boolean!
+  createEvaluationCase(datasetId: UUID!, input: EvaluationCaseInput!): EvaluationCase!
+  updateEvaluationCase(id: UUID!, input: EvaluationCaseInput!): EvaluationCase!
+  deleteEvaluationCase(id: UUID!): Boolean!
+  cancelEvaluationRun(id: UUID!): EvaluationRun!
 }
 
 type Organization {
@@ -296,6 +423,11 @@ type Query {
   productCategories: [String!]!
   productImports(limit: Int! = 20, offset: Int! = 0): [ProductImport!]!
   agentTools(agentId: UUID!): [AgentTool!]!
+  evaluationDatasets: [EvaluationDataset!]!
+  evaluationDataset(id: UUID!): EvaluationDataset!
+  evaluationCases(datasetId: UUID!): [EvaluationCase!]!
+  evaluationRuns(datasetId: UUID = null, limit: Int! = 20): [EvaluationRun!]!
+  evaluationRun(id: UUID!): EvaluationRun
 }
 
 scalar UUID
@@ -318,4 +450,9 @@ input UpdateAgentInput {
   model: String = null
   temperature: Float = null
   maxTokens: Int = null
+}
+
+input UpdateEvaluationDatasetInput {
+  name: String = null
+  description: String = null
 }

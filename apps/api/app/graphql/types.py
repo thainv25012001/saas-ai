@@ -12,6 +12,10 @@ from app.db.models import AgentConfig as AgentConfigModel
 from app.db.models import Conversation as ConversationModel
 from app.db.models import ConversationMessage as MessageModel
 from app.db.models import Document as DocumentModel
+from app.db.models import EvalCase as EvalCaseModel
+from app.db.models import EvalDataset as EvalDatasetModel
+from app.db.models import EvalResult as EvalResultModel
+from app.db.models import EvalRun as EvalRunModel
 from app.db.models import Lead as LeadModel
 from app.db.models import MessageCitation as MessageCitationModel
 from app.db.models import Organization as OrganizationModel
@@ -707,3 +711,369 @@ class CreatePromptInput:
 class CreatePromptVersionInput:
     system_prompt: str
     notes: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 -- evaluations (docs/PHASE-6.md). Starting a run is REST
+# (`POST /api/v1/evaluations/runs`), not a mutation -- see the comment above
+# `Mutation` in resolvers.py and docs/PHASE-6.md §7 for why. Everything else
+# (dataset/case CRUD, listing runs and results, cancelling) is here.
+# ---------------------------------------------------------------------------
+
+
+@strawberry.enum
+class EvaluationRunStatus(enum.Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+def _json_text(value: Any) -> str:
+    """Free-form jsonb (a score's `detail`, a tool call's `arguments`)
+    flattened to a JSON string, the same idiom `_attribute_value` above uses
+    for product attributes -- the dashboard parses it client-side rather than
+    the server committing to a typed shape for something this open-ended."""
+    return json.dumps(value, ensure_ascii=False)
+
+
+@strawberry.type
+class EvaluationDataset:
+    id: uuid.UUID
+    name: str
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_model(cls, model: EvalDatasetModel) -> "EvaluationDataset":
+        return cls(
+            id=model.id,
+            name=model.name,
+            description=model.description,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
+    @strawberry.field
+    async def case_count(self, info: strawberry.Info[Context, None]) -> int:
+        # Same reasoning as `Document.chunk_count`: an unauthenticated
+        # request builds a Context with no loader, and that must fail as a
+        # clean `unauthenticated` error from the `evaluationDatasets`/
+        # `evaluationDataset` resolver itself, not an AttributeError here.
+        if info.context.eval_case_count_loader is None:
+            raise AuthenticationError("authentication required")
+        return await info.context.eval_case_count_loader.load(self.id)
+
+    @strawberry.field
+    async def latest_run(self, info: strawberry.Info[Context, None]) -> "EvaluationRun | None":
+        """The dashboard's dataset list shows the most recent run's status
+        without a second round trip per row -- batched for the same reason
+        `case_count` is."""
+        if info.context.eval_latest_run_loader is None:
+            raise AuthenticationError("authentication required")
+        model = await info.context.eval_latest_run_loader.load(self.id)
+        return EvaluationRun.from_model(model) if model else None
+
+
+@strawberry.type
+class EvaluationCase:
+    id: uuid.UUID
+    question: str
+    reference_answer: str | None
+    required_phrases: list[str]
+    expected_tool_names: list[str]
+    expected_document_ids: list[uuid.UUID]
+    expected_product_ids: list[uuid.UUID]
+    tags: list[str]
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_model(cls, model: EvalCaseModel) -> "EvaluationCase":
+        return cls(
+            id=model.id,
+            question=model.question,
+            reference_answer=model.reference_answer,
+            required_phrases=list(model.required_phrases),
+            expected_tool_names=list(model.expected_tool_names),
+            expected_document_ids=list(model.expected_document_ids),
+            expected_product_ids=list(model.expected_product_ids),
+            tags=list(model.tags),
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
+
+# The fixed order docs/PHASE-6.md §5's summary and this task's brief both
+# name: judge first (it is the one a human reads a rationale for), then the
+# three deterministic recall/selection scorers. Not-applicable scorers are
+# simply absent from a given result or run, never emitted as a null entry.
+_SCORE_ORDER: tuple[str, ...] = (
+    "judge",
+    "required_phrases",
+    "tool_selection",
+    "document_recall",
+    "product_recall",
+)
+
+
+@strawberry.type
+class EvaluationScore:
+    name: str
+    score: float | None
+    passed: bool
+    status: str
+    #: `score_to_json`'s `detail` -- shape differs per scorer (missing
+    #: phrases, missing tool names, a judge's rationale), so it crosses the
+    #: wire as JSON text rather than a scorer-specific type.
+    detail: str
+
+
+@strawberry.type
+class EvaluationToolCall:
+    name: str
+    #: The tool call's arguments, as the model produced them -- JSON text,
+    #: same reasoning as `EvaluationScore.detail`.
+    arguments: str
+    is_error: bool
+    #: `app.rag.retrieve.excerpt`'s bounded excerpt of the tool's full
+    #: result, not the result itself -- the eval result row never stores the
+    #: full content (docs/PHASE-6.md §2).
+    excerpt: str
+
+
+@strawberry.type
+class EvaluationResult:
+    id: uuid.UUID
+    case_id: uuid.UUID | None
+    question: str
+    answer: str | None
+    error: str | None
+    passed: bool
+    cited_document_ids: list[uuid.UUID]
+    cited_product_ids: list[uuid.UUID]
+    prompt_version_id: uuid.UUID | None
+    latency_ms: int | None
+    input_tokens: int | None
+    output_tokens: int | None
+    #: A string, not a float, for the same reason `Product.price` and
+    #: `Message.cost_usd` are: `Numeric(12, 6)` is exact.
+    cost_usd: str | None
+    created_at: datetime
+    _scores: strawberry.Private[dict[str, Any]]
+    _tool_calls: strawberry.Private[list[dict[str, Any]]]
+
+    @classmethod
+    def from_model(cls, model: EvalResultModel) -> "EvaluationResult":
+        return cls(
+            id=model.id,
+            case_id=model.case_id,
+            question=model.question,
+            answer=model.answer,
+            error=model.error,
+            passed=model.passed,
+            cited_document_ids=list(model.cited_document_ids),
+            cited_product_ids=list(model.cited_product_ids),
+            prompt_version_id=model.prompt_version_id,
+            latency_ms=model.latency_ms,
+            input_tokens=model.input_tokens,
+            output_tokens=model.output_tokens,
+            cost_usd=None if model.cost_usd is None else str(model.cost_usd),
+            created_at=model.created_at,
+            _scores=model.scores,
+            _tool_calls=model.tool_calls,
+        )
+
+    @strawberry.field
+    def scores(self) -> list[EvaluationScore]:
+        """Ordered per `_SCORE_ORDER`, not `dict` insertion order -- the
+        runner writes whichever scorers applied in whatever order it
+        computed them, and the brief pins a fixed, human-meaningful order
+        (judge first) for the dashboard to render."""
+        return [
+            EvaluationScore(
+                name=key,
+                score=self._scores[key].get("score"),
+                passed=self._scores[key]["passed"],
+                status=self._scores[key]["status"],
+                detail=_json_text(self._scores[key].get("detail", {})),
+            )
+            for key in _SCORE_ORDER
+            if key in self._scores
+        ]
+
+    @strawberry.field
+    def tool_calls(self) -> list[EvaluationToolCall]:
+        return [
+            EvaluationToolCall(
+                name=call["name"],
+                arguments=_json_text(call.get("arguments", {})),
+                is_error=call["is_error"],
+                excerpt=call["excerpt"],
+            )
+            for call in self._tool_calls
+        ]
+
+
+@strawberry.type
+class EvaluationScorerSummary:
+    name: str
+    mean: float | None
+    passed: int
+    applicable: int
+
+
+@strawberry.type
+class EvaluationRunSummary:
+    passed: int
+    failed: int
+    errored: int
+    pass_rate: float | None
+    #: A string, not a float -- the exact `Decimal` sum `build_summary`
+    #: writes, same reasoning as `EvaluationResult.cost_usd`. `None` as soon
+    #: as any priced component was unpriced.
+    cost_usd: str | None
+    mean_latency_ms: int | None
+    #: In `_SCORE_ORDER`, only the scorers that had at least one applicable
+    #: case in this run -- the dashboard's per-scorer means (Task 6).
+    scorers: list[EvaluationScorerSummary]
+
+    @classmethod
+    def from_json(cls, raw: dict[str, Any]) -> "EvaluationRunSummary":
+        scorers_raw = raw.get("scorers") or {}
+        return cls(
+            passed=raw["passed"],
+            failed=raw["failed"],
+            errored=raw["errored"],
+            pass_rate=raw.get("pass_rate"),
+            cost_usd=raw.get("cost_usd"),
+            mean_latency_ms=raw.get("mean_latency_ms"),
+            scorers=[
+                EvaluationScorerSummary(
+                    name=key,
+                    mean=scorers_raw[key].get("mean"),
+                    passed=scorers_raw[key]["passed"],
+                    applicable=scorers_raw[key]["applicable"],
+                )
+                for key in _SCORE_ORDER
+                if key in scorers_raw
+            ],
+        )
+
+
+@strawberry.type
+class EvaluationRun:
+    id: uuid.UUID
+    dataset_id: uuid.UUID
+    agent_id: uuid.UUID
+    prompt_version_id: uuid.UUID | None
+    provider: str
+    model: str
+    judge_provider: str | None
+    judge_model: str | None
+    status: EvaluationRunStatus
+    case_count: int
+    completed_count: int
+    error: str | None
+    triggered_by: uuid.UUID | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    _summary: strawberry.Private[dict[str, Any]]
+
+    @classmethod
+    def from_model(cls, model: EvalRunModel) -> "EvaluationRun":
+        return cls(
+            id=model.id,
+            dataset_id=model.dataset_id,
+            agent_id=model.agent_id,
+            prompt_version_id=model.prompt_version_id,
+            provider=model.provider,
+            model=model.model,
+            judge_provider=model.judge_provider,
+            judge_model=model.judge_model,
+            status=EvaluationRunStatus(model.status.value),
+            case_count=model.case_count,
+            completed_count=model.completed_count,
+            error=model.error,
+            triggered_by=model.triggered_by,
+            created_at=model.created_at,
+            started_at=model.started_at,
+            finished_at=model.finished_at,
+            _summary=model.summary,
+        )
+
+    @strawberry.field
+    def summary(self) -> EvaluationRunSummary | None:
+        """`None` until the run completes -- `EvalRun.summary` defaults to
+        `{}` (Ruling 1: a typed object, not raw JSON, so the dashboard never
+        parses jsonb client-side)."""
+        if not self._summary:
+            return None
+        return EvaluationRunSummary.from_json(self._summary)
+
+    @strawberry.field
+    async def agent_name(self, info: strawberry.Info[Context, None]) -> str | None:
+        """Batched across a page of runs -- see `Context._load_eval_agent_names`.
+        `None` only in principle: `eval_runs.agent_id` is `ON DELETE CASCADE`
+        from `agents`, so a run always has a live agent, but a loader keyed
+        by id has no way to assume that stays true forever (same reasoning as
+        `Lead.conversation`)."""
+        if info.context.eval_agent_name_loader is None:
+            raise AuthenticationError("authentication required")
+        return await info.context.eval_agent_name_loader.load(self.agent_id)
+
+    @strawberry.field
+    async def prompt_version(self, info: strawberry.Info[Context, None]) -> int | None:
+        """The pinned `PromptVersion.version` number, not its id -- the
+        dashboard wants "v3", not a UUID. `None` when no version was pinned
+        at all (the agent had no prompt) or, in principle, when the pinned
+        version has since been deleted (`ON DELETE SET NULL`)."""
+        if self.prompt_version_id is None:
+            return None
+        if info.context.eval_prompt_version_loader is None:
+            raise AuthenticationError("authentication required")
+        return await info.context.eval_prompt_version_loader.load(self.prompt_version_id)
+
+    @strawberry.field
+    async def results(self, info: strawberry.Info[Context, None]) -> list[EvaluationResult]:
+        """Resolved only when asked for -- `evaluationRuns` (the list) never
+        touches `eval_results` at all, since this field is not selected
+        there; `evaluationRun(id)` (the detail page) is the one place a
+        client asks for it. Still batched through a loader, matching every
+        other per-parent collection in this file (`Message.citations`,
+        `Conversation.messages`), so a query that *did* ask for it on a list
+        would cost one query rather than one per run."""
+        if info.context.eval_results_loader is None:
+            raise AuthenticationError("authentication required")
+        rows = await info.context.eval_results_loader.load(self.id)
+        return [EvaluationResult.from_model(row) for row in rows]
+
+
+@strawberry.input
+class CreateEvaluationDatasetInput:
+    name: str
+    description: str | None = None
+
+
+@strawberry.input
+class UpdateEvaluationDatasetInput:
+    name: str | None = None
+    description: str | None = None
+
+
+@strawberry.input
+class EvaluationCaseInput:
+    """The full write shape for both `createEvaluationCase` and
+    `updateEvaluationCase` -- `updateEvaluationCase` is a full replace, not a
+    patch, matching `EvaluationService.update_case`/`CaseInput`."""
+
+    question: str
+    reference_answer: str | None = None
+    required_phrases: list[str] = strawberry.field(default_factory=list)
+    expected_tool_names: list[str] = strawberry.field(default_factory=list)
+    expected_document_ids: list[uuid.UUID] = strawberry.field(default_factory=list)
+    expected_product_ids: list[uuid.UUID] = strawberry.field(default_factory=list)
+    tags: list[str] = strawberry.field(default_factory=list)

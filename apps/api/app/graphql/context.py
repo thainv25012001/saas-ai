@@ -11,12 +11,17 @@ from app.auth.dependencies import tenant_from_bearer
 from app.core.errors import AuthenticationError
 from app.core.tenancy import TenantContext, tenant_session
 from app.db.models import (
+    Agent,
     AgentConfig,
     Conversation,
     ConversationMessage,
     DocumentChunk,
+    EvalCase,
+    EvalResult,
+    EvalRun,
     MessageCitation,
     MessageRole,
+    PromptVersion,
 )
 
 #: How much of a first question the list needs. The panel truncates to one
@@ -60,6 +65,24 @@ class Context(BaseContext):
         )
         self.conversation_loader: DataLoader[uuid.UUID, Conversation | None] | None = (
             DataLoader(load_fn=self._load_conversations) if session is not None else None
+        )
+        # Phase 6 evaluations (docs/PHASE-6.md, Task 5) -- same batching
+        # reasoning as every loader above, applied to `EvaluationDataset` and
+        # `EvaluationRun`'s per-parent fields.
+        self.eval_case_count_loader: DataLoader[uuid.UUID, int] | None = (
+            DataLoader(load_fn=self._load_eval_case_counts) if session is not None else None
+        )
+        self.eval_latest_run_loader: DataLoader[uuid.UUID, EvalRun | None] | None = (
+            DataLoader(load_fn=self._load_eval_latest_runs) if session is not None else None
+        )
+        self.eval_agent_name_loader: DataLoader[uuid.UUID, str | None] | None = (
+            DataLoader(load_fn=self._load_eval_agent_names) if session is not None else None
+        )
+        self.eval_prompt_version_loader: DataLoader[uuid.UUID, int | None] | None = (
+            DataLoader(load_fn=self._load_eval_prompt_versions) if session is not None else None
+        )
+        self.eval_results_loader: DataLoader[uuid.UUID, list[EvalResult]] | None = (
+            DataLoader(load_fn=self._load_eval_results) if session is not None else None
         )
 
     async def _load_messages(
@@ -237,6 +260,93 @@ class Context(BaseContext):
         )
         by_document = {document_id: count for document_id, count in result.all()}
         return [by_document.get(document_id, 0) for document_id in document_ids]
+
+    async def _load_eval_case_counts(self, dataset_ids: Sequence[uuid.UUID]) -> list[int]:
+        """Batches `evaluationDatasets { caseCount }` into one query instead
+        of one per dataset -- the same reasoning as `_load_chunk_counts`."""
+        assert self.session is not None
+        assert self.tenant is not None
+        result = await self.session.execute(
+            select(EvalCase.dataset_id, func.count())
+            .where(
+                EvalCase.dataset_id.in_(list(dataset_ids)),
+                EvalCase.organization_id == self.tenant.organization_id,
+            )
+            .group_by(EvalCase.dataset_id)
+        )
+        by_dataset = {dataset_id: count for dataset_id, count in result.all()}
+        return [by_dataset.get(dataset_id, 0) for dataset_id in dataset_ids]
+
+    async def _load_eval_latest_runs(
+        self, dataset_ids: Sequence[uuid.UUID]
+    ) -> list[EvalRun | None]:
+        """The most recent run per dataset (by `created_at`, tie-broken by
+        `id`) in one query, via `DISTINCT ON` -- same pattern as
+        `_load_previews`'s "first question per conversation"."""
+        assert self.session is not None
+        assert self.tenant is not None
+        result = await self.session.execute(
+            select(EvalRun)
+            .where(
+                EvalRun.dataset_id.in_(list(dataset_ids)),
+                EvalRun.organization_id == self.tenant.organization_id,
+            )
+            .distinct(EvalRun.dataset_id)
+            .order_by(EvalRun.dataset_id, EvalRun.created_at.desc(), EvalRun.id.desc())
+        )
+        by_dataset = {run.dataset_id: run for run in result.scalars().all()}
+        return [by_dataset.get(dataset_id) for dataset_id in dataset_ids]
+
+    async def _load_eval_agent_names(self, agent_ids: Sequence[uuid.UUID]) -> list[str | None]:
+        """Batches `evaluationRuns { agentName }` into one query instead of
+        one per run."""
+        assert self.session is not None
+        assert self.tenant is not None
+        result = await self.session.execute(
+            select(Agent.id, Agent.name).where(
+                Agent.id.in_(list(agent_ids)),
+                Agent.organization_id == self.tenant.organization_id,
+            )
+        )
+        by_agent = {agent_id: name for agent_id, name in result.all()}
+        return [by_agent.get(agent_id) for agent_id in agent_ids]
+
+    async def _load_eval_prompt_versions(
+        self, version_ids: Sequence[uuid.UUID]
+    ) -> list[int | None]:
+        """Batches `evaluationRuns { promptVersion }` (the version *number*,
+        not the id) into one query instead of one per run. Called only with
+        non-`None` ids -- `EvaluationRun.prompt_version` short-circuits a
+        `None` `prompt_version_id` before ever reaching the loader."""
+        assert self.session is not None
+        assert self.tenant is not None
+        result = await self.session.execute(
+            select(PromptVersion.id, PromptVersion.version).where(
+                PromptVersion.id.in_(list(version_ids)),
+                PromptVersion.organization_id == self.tenant.organization_id,
+            )
+        )
+        by_version = {version_id: version for version_id, version in result.all()}
+        return [by_version.get(version_id) for version_id in version_ids]
+
+    async def _load_eval_results(self, run_ids: Sequence[uuid.UUID]) -> list[list[EvalResult]]:
+        """Batches `EvaluationRun.results` into one query instead of one per
+        run -- see that field's own docstring for why a run detail page,
+        which asks for exactly one run, still goes through a loader."""
+        assert self.session is not None
+        assert self.tenant is not None
+        result = await self.session.execute(
+            select(EvalResult)
+            .where(
+                EvalResult.run_id.in_(list(run_ids)),
+                EvalResult.organization_id == self.tenant.organization_id,
+            )
+            .order_by(EvalResult.run_id, EvalResult.created_at, EvalResult.id)
+        )
+        by_run: dict[uuid.UUID, list[EvalResult]] = {}
+        for row in result.scalars().all():
+            by_run.setdefault(row.run_id, []).append(row)
+        return [by_run.get(run_id, []) for run_id in run_ids]
 
 
 async def build_context(request: Request) -> AsyncIterator[Context]:
