@@ -1,5 +1,6 @@
-"""`POST /api/v1/products/import` -- multipart CSV/JSON catalogue upload for
-Task 3 (`docs/PHASE-5.md` §5) -- and `GET /api/v1/products/import/{id}`, so a
+"""`POST /api/v1/products/import` -- multipart CSV/XLSX/JSON catalogue upload
+for Task 3 (`docs/PHASE-5.md` §5), `GET /api/v1/products/import/template`
+for a sample file to start from -- and `GET /api/v1/products/import/{id}`, so a
 customer can come back later and see why row 12 failed. That second route
 is not optional decoration: the import runs in an arq job well after this
 module has answered 202, so the counts and per-row errors the brief
@@ -18,7 +19,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from pydantic import BaseModel
 from starlette.datastructures import UploadFile
 
@@ -30,6 +31,7 @@ from app.core.logging import get_logger
 from app.core.tenancy import TenantContext, tenant_session
 from app.db.models import ProductImport as ProductImportModel
 from app.db.models import ProductImportStatus
+from app.products.import_template import TemplateFormat, build_import_template
 from app.products.importer import (
     SUPPORTED_IMPORT_MIME_TYPES,
     ProductImportService,
@@ -159,6 +161,23 @@ async def import_products(
         file_size=len(data),
     )
     return response
+
+
+@router.get("/import/template", dependencies=[Depends(get_current_tenant)])
+async def download_import_template(
+    fmt: Annotated[TemplateFormat, Query(alias="format")] = "csv",
+) -> Response:
+    """A sample catalogue in one of the formats `import_products` accepts,
+    with every column it reads -- see `app/products/import_template.py`.
+    Registered before `/import/{product_import_id}` so "template" is never
+    tried as an import id. Behind auth like the rest of the router, though
+    the file holds nothing tenant-specific."""
+    template = build_import_template(fmt)
+    return Response(
+        content=template.content,
+        media_type=template.media_type,
+        headers={"Content-Disposition": f'attachment; filename="{template.filename}"'},
+    )
 
 
 @router.get("/import/{product_import_id}")

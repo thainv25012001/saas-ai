@@ -13,8 +13,11 @@ import { type DocumentAuth, formatByteLimit, formatBytes, MAX_UPLOAD_BYTES } fro
  * duplicated for the same reason `ACCEPTED_DOCUMENT_TYPES` is: the picker has
  * to say what it accepts before a file is chosen, and no endpoint exposes it.
  */
+const XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
 export const ACCEPTED_IMPORT_TYPES: Record<string, string> = {
   "text/csv": ".csv",
+  [XLSX_MIME_TYPE]: ".xlsx",
   "application/json": ".json",
 };
 
@@ -29,7 +32,7 @@ export const MAX_IMPORT_BYTES = MAX_UPLOAD_BYTES;
 
 /**
  * `resolve_import_mime_type` in the importer, mirrored: a browser that
- * reports nothing useful for `.csv`/`.json` (empty, or octet-stream -- common
+ * reports nothing useful for `.csv`/`.xlsx`/`.json` (empty, or octet-stream -- common
  * for `.csv` on Windows without Excel) falls back to the extension. A
  * reported type is otherwise believed, as on the server, with one exception:
  * the types a real `.csv` is reported as (`CSV_ALIAS_MIME_TYPES`) defer to a
@@ -52,6 +55,7 @@ const CSV_ALIAS_MIME_TYPES = new Set([
 
 const EXTENSION_MIME_TYPES: Record<string, string> = {
   csv: "text/csv",
+  xlsx: XLSX_MIME_TYPE,
   json: "application/json",
 };
 
@@ -102,4 +106,28 @@ export async function importProducts(file: File, auth: DocumentAuth): Promise<vo
     auth.onAccessToken,
   );
   if (!response.ok) throw await parseErrorEnvelope(response, "internal_error");
+}
+
+export type ImportTemplateFormat = "csv" | "xlsx" | "json";
+
+/** The sample catalogue from `GET /api/v1/products/import/template` -- built
+ * server-side from the importer's own column list, so it always matches what
+ * an import reads. Fetched rather than linked because the route sits behind
+ * the same Bearer auth as the rest of the products API. */
+export async function downloadImportTemplate(
+  format: ImportTemplateFormat,
+  auth: DocumentAuth,
+): Promise<{ blob: Blob; filename: string }> {
+  const response = await fetchWithRefresh(
+    (token) =>
+      fetch(`${auth.apiUrl}/api/v1/products/import/template?format=${format}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+    auth.accessToken,
+    auth.onAccessToken,
+  );
+  if (!response.ok) throw await parseErrorEnvelope(response, "internal_error");
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? `product-import-sample.${format}`;
+  return { blob: await response.blob(), filename };
 }

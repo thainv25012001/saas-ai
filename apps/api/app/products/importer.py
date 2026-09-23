@@ -1,4 +1,4 @@
-"""Task 3: turning an uploaded CSV or JSON catalogue into product rows and
+"""Task 3: turning an uploaded CSV, XLSX or JSON catalogue into product rows and
 vectors -- `docs/PHASE-5.md` §5.
 
 Two things this module deliberately does NOT do, because Tasks 1 and 2
@@ -56,11 +56,13 @@ import io
 import json
 import re
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from openpyxl import load_workbook
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
@@ -111,7 +113,11 @@ class ImportParseError(AppError):
 # document-upload module to this one for a dozen lines saved.
 # ---------------------------------------------------------------------------
 
-SUPPORTED_IMPORT_MIME_TYPES: frozenset[str] = frozenset({"text/csv", "application/json"})
+XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+SUPPORTED_IMPORT_MIME_TYPES: frozenset[str] = frozenset(
+    {"text/csv", "application/json", XLSX_MIME_TYPE}
+)
 
 _GENERIC_MIME_TYPES: frozenset[str] = frozenset(
     {"", "application/octet-stream", "binary/octet-stream"}
@@ -120,6 +126,7 @@ _GENERIC_MIME_TYPES: frozenset[str] = frozenset(
 _EXTENSION_MIME_TYPES: dict[str, str] = {
     ".csv": "text/csv",
     ".json": "application/json",
+    ".xlsx": XLSX_MIME_TYPE,
 }
 
 # Types browsers and operating systems report for a file that is really a
@@ -311,21 +318,22 @@ def _build_product_input(raw: dict[str, Any]) -> ProductInput:
     return ProductInput(**fields)
 
 
-def _parse_csv(data: bytes) -> ParseResult:
-    # `utf-8-sig`: Excel's "CSV UTF-8" export prepends a BOM, which -- left
-    # in place -- would land inside the *value* of the first header cell
-    # ("﻿external_id"), silently making that column invisible to every
-    # lookup below and turning "CSV is missing required column(s):
-    # external_id" into a support ticket about a column that is right there
-    # on screen.
-    reader = csv.DictReader(io.StringIO(data.decode("utf-8-sig")))
-    header = set(reader.fieldnames or [])
-    missing = {"external_id", "name"} - header
+def _parse_table(
+    header: Iterable[str | None], rows: Iterable[tuple[int, dict[str | None, Any]]], kind: str
+) -> ParseResult:
+    """The row loop CSV and XLSX share: one required-column check for the
+    whole file, then every row validated on its own. `rows` carries each
+    row's own number -- the one the customer sees in their file -- because
+    only the source knows it (an XLSX skips blank rows without renumbering
+    the ones after them)."""
+    missing = {"external_id", "name"} - set(header)
     if missing:
-        raise ImportParseError(f"CSV is missing required column(s): {', '.join(sorted(missing))}")
+        raise ImportParseError(
+            f"{kind} is missing required column(s): {', '.join(sorted(missing))}"
+        )
 
     result = ParseResult()
-    for row_number, raw_row in enumerate(reader, start=2):  # the header consumes row 1
+    for row_number, raw_row in rows:
         result.total_rows += 1
         # A short row (fewer cells than the header) fills the missing keys
         # with `None` (csv.DictReader's `restval`); a long one adds a
@@ -344,6 +352,73 @@ def _parse_csv(data: bytes) -> ParseResult:
             continue
         result.rows.append(ParsedRow(row=row_number, product=product))
     return result
+
+
+def _parse_csv(data: bytes) -> ParseResult:
+    # `utf-8-sig`: Excel's "CSV UTF-8" export prepends a BOM, which -- left
+    # in place -- would land inside the *value* of the first header cell
+    # ("﻿external_id"), silently making that column invisible to every
+    # lookup below and turning "CSV is missing required column(s):
+    # external_id" into a support ticket about a column that is right there
+    # on screen.
+    reader = csv.DictReader(io.StringIO(data.decode("utf-8-sig")))
+    return _parse_table(
+        reader.fieldnames or [],
+        enumerate(reader, start=2),  # the header consumes row 1
+        "CSV",
+    )
+
+
+def _xlsx_cell_text(value: Any) -> str:
+    """A cell as the text the same value would be in a CSV export, so an
+    XLSX row goes through exactly the rules a CSV row does. Excel keeps
+    numbers as numbers: a SKU typed as 1001 arrives as an int (which the
+    string-typed `external_id` would reject) and a quantity of 50 often as
+    50.0 (which `stock_quantity` would reject as "not a whole number" only
+    by luck of float formatting). Booleans become the `true`/`false` a CSV
+    would carry."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _parse_xlsx(data: bytes) -> ParseResult:
+    """The first sheet, row 1 the header. Read-only (streamed, not the
+    whole workbook model in memory) and `data_only`, so a formula cell
+    imports the value Excel last computed for it rather than its formula
+    text. Rows with no value in any cell are skipped rather than reported:
+    Excel routinely leaves formatted-but-empty rows below the data, and
+    listing each as a failed row would bury the real ones."""
+    try:
+        workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        try:
+            cells = [
+                [_xlsx_cell_text(value) for value in row]
+                for row in workbook.worksheets[0].iter_rows(values_only=True)
+            ]
+        finally:
+            workbook.close()
+    except Exception as exc:
+        # Anything openpyxl raises on these bytes -- not a zip, a zip that
+        # is not a workbook, a workbook with no sheet -- means the same
+        # thing to the customer, and none of it is one row's fault.
+        raise ImportParseError(
+            "file is not a readable .xlsx workbook (an older .xls must be saved as .xlsx)"
+        ) from exc
+
+    if not cells:
+        raise ImportParseError("XLSX has no header row")
+    header: list[str | None] = [name or None for name in cells[0]]
+    rows = (
+        (row_number, dict(zip(header, row, strict=False)))
+        for row_number, row in enumerate(cells[1:], start=2)
+        if any(row)
+    )
+    return _parse_table(header, rows, "XLSX")
 
 
 def _parse_json(data: bytes) -> ParseResult:
@@ -386,6 +461,8 @@ def parse_import(data: bytes, mime_type: str) -> ParseResult:
         return _parse_csv(data)
     if mime_type == "application/json":
         return _parse_json(data)
+    if mime_type == XLSX_MIME_TYPE:
+        return _parse_xlsx(data)
     raise UnsupportedImportType(f"unsupported import type '{mime_type}'")
 
 

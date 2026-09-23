@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "urql";
 import { UploadDropzone } from "@/components/knowledge/UploadDropzone";
+import { ImportTemplateDownload } from "@/components/products/ImportTemplateDownload";
 import { ProductImports } from "@/components/products/ProductImports";
 import { ProductsTable } from "@/components/products/ProductsTable";
 import { Alert } from "@/components/ui/Alert";
@@ -179,7 +180,7 @@ export default function ProductsPage() {
       />
 
       <Card>
-        <div className="p-5">
+        <div className="space-y-4 p-5">
           <UploadDropzone
             uploading={uploading}
             error={uploadError}
@@ -189,6 +190,11 @@ export default function ProductsPage() {
             pickLabel="Choose a catalogue file to import"
             note={IMPORT_NOTE}
           />
+          {accessToken ? (
+            <ImportTemplateDownload
+              auth={{ accessToken, apiUrl: API_URL, onAccessToken: setAccessToken }}
+            />
+          ) : null}
         </div>
         {importsQueryError ? (
           <div className="px-5 pb-5">
