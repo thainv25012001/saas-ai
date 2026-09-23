@@ -43,6 +43,49 @@ async def tenant_session(tenant: TenantContext) -> AsyncIterator[AsyncSession]:
 
 
 @asynccontextmanager
+async def rolled_back_tenant_session(tenant: TenantContext) -> AsyncIterator[AsyncSession]:
+    """Like `tenant_session`, but the transaction is ALWAYS rolled back on
+    exit, success or failure -- for work whose writes must not survive it.
+
+    PHASE-6.md §2's reason this exists: an evaluation case's turn runs the
+    real `ChatService.send` -- unmodified, so the agent sees exactly what
+    production would show it, `create_lead` included -- and afterwards none
+    of it may persist: no lead, conversation, message, tool-call or citation
+    row. `app.current_org_id` is applied exactly as `tenant_session` applies
+    it, in the same `is_local=true` transaction-scoped way, so RLS and every
+    two-layer predicate see this session precisely as a real turn would;
+    only what happens to the transaction at the end differs.
+
+    `session.begin()` is kept, not left to autobegin, for the same reason
+    `tenant_session` keeps it: one transaction for the whole block, so a
+    caller that flushes repeatedly mid-block (`ChatService.send` does) never
+    risks the `set_config` value being discarded by an early commit. Tools
+    inside `send` additionally open their own `session.begin_nested()`
+    savepoints (`app/chat/service.py::_LockedSessionTool._run_bounded`) --
+    those nest inside this outer transaction exactly as they would inside
+    `tenant_session`'s, and rolling the outer transaction back discards them
+    regardless of whether any one of them was itself released or rolled
+    back on its own.
+
+    The rollback runs in a `finally`, not in place of re-raising: a case
+    whose turn errors still needs that error to reach its caller, after the
+    rollback has already happened -- so `run_evaluation_task` (Task 4) can
+    record the failure rather than lose it along with everything else this
+    block discards.
+    """
+    async with session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                text("SELECT set_config('app.current_org_id', :org_id, true)"),
+                {"org_id": str(tenant.organization_id)},
+            )
+            try:
+                yield session
+            finally:
+                await session.rollback()
+
+
+@asynccontextmanager
 async def untenanted_session() -> AsyncIterator[AsyncSession]:
     """For work that happens before an organization is known: registration,
     login, and refresh. Only reaches organizations/users/memberships, which

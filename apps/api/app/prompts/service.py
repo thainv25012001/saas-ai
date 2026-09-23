@@ -116,6 +116,30 @@ class PromptService:
         await self.session.flush()
         return version
 
+    async def get_version(self, version_id: uuid.UUID) -> PromptVersion:
+        """Load one version by id, two-layer scoped like every other lookup
+        here: the explicit `organization_id` predicate plus this session's
+        own RLS. A version id from another organization is indistinguishable
+        from one that does not exist -- `NotFoundError`, not a more specific
+        error, for the same reason `get_prompt`/`activate_version` never
+        confirm whether a foreign id belongs to someone else.
+
+        Used by `ChatService._resolve_system_prompt` (Phase 6) to resolve a
+        pinned version *before* checking it belongs to the calling agent's
+        prompt -- that check needs the row's own `prompt_id`, which only
+        this lookup can supply.
+        """
+        result = await self.session.execute(
+            select(PromptVersion).where(
+                PromptVersion.id == version_id,
+                PromptVersion.organization_id == self.tenant.organization_id,
+            )
+        )
+        version = result.scalar_one_or_none()
+        if version is None:
+            raise NotFoundError("prompt version not found")
+        return version
+
     async def active_version(self, prompt_id: uuid.UUID) -> PromptVersion:
         result = await self.session.execute(
             select(PromptVersion).where(
