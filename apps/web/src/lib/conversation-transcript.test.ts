@@ -90,6 +90,7 @@ describe("toTranscript", () => {
           {
             chunkId: "c1",
             documentId: "d1",
+            productId: null,
             documentTitle: "Pricing",
             excerpt: "…",
             rank: 1,
@@ -103,12 +104,49 @@ describe("toTranscript", () => {
       {
         chunkId: "c1",
         documentId: "d1",
+        productId: null,
         documentTitle: "Pricing",
         excerpt: "…",
         rank: 1,
         score: 0.91,
         page: null,
       },
+    ]);
+  });
+
+  it("keeps a product citation's product id, with no chunk or document", () => {
+    // A reloaded conversation must still show a product source (final
+    // review I1), and several product citations must not collapse onto one
+    // shared empty-string id.
+    const [answer] = toTranscript([
+      {
+        ...ASSISTANT,
+        citations: [
+          {
+            chunkId: null,
+            documentId: null,
+            productId: "p1",
+            documentTitle: "Aurora Sedan",
+            excerpt: "28499.00 USD · in_stock",
+            rank: 1,
+            score: 0,
+          },
+          {
+            chunkId: null,
+            documentId: null,
+            productId: "p2",
+            documentTitle: "Borealis SUV",
+            excerpt: "35999.00 USD · in_stock",
+            rank: 2,
+            score: 0,
+          },
+        ],
+      },
+    ]);
+
+    expect(answer.citations?.map((c) => [c.chunkId, c.documentId, c.productId])).toEqual([
+      [null, null, "p1"],
+      [null, null, "p2"],
     ]);
   });
 

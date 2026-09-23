@@ -1,7 +1,7 @@
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import type { ProductAvailability, ProductSearchIndex } from "@/graphql/generated";
-import { formatPrice } from "@/lib/format";
+import { formatPrice, formatTimestamp } from "@/lib/format";
 import { availabilityLabel, availabilityTone, searchIndexLabel } from "@/lib/product-status";
 
 export type ProductRow = {
@@ -17,6 +17,10 @@ export type ProductRow = {
   stockQuantity: number | null;
   isActive: boolean;
   searchIndex: ProductSearchIndex;
+  /** When the row last changed -- an import or sync touching it. Shown
+   * because a stale catalogue answers confidently (docs/PHASE-5.md §8), and
+   * the date is how an owner spots one. */
+  updatedAt: string;
 };
 
 export type ProductsTableProps = {
@@ -73,6 +77,9 @@ export function ProductsTable({ products, filtered = false }: ProductsTableProps
               <th scope="col" className="px-5 py-2.5 font-medium">
                 Availability
               </th>
+              <th scope="col" className="px-5 py-2.5 font-medium">
+                Last updated
+              </th>
             </tr>
           </thead>
           <tbody className="divide-y divide-line">
@@ -121,6 +128,9 @@ export function ProductsTable({ products, filtered = false }: ProductsTableProps
                     {product.stockQuantity !== null ? (
                       <p className="mt-1 text-xs text-ink-subtle">{product.stockQuantity} in stock</p>
                     ) : null}
+                  </td>
+                  <td className="whitespace-nowrap px-5 py-3 text-xs text-ink-subtle">
+                    {formatTimestamp(product.updatedAt)}
                   </td>
                 </tr>
               );

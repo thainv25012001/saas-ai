@@ -19,9 +19,14 @@ export type ChatMessageError = {
 };
 
 export type ChatCitation = {
-  chunkId: string;
-  documentId: string;
-  /** Untrusted -- the uploaded document's own title. See the module
+  /** `null` for a product citation, and for a stored citation whose chunk
+   * has since been deleted. */
+  chunkId: string | null;
+  documentId: string | null;
+  /** Set for a product citation (`search_products`/`get_product`). */
+  productId: string | null;
+  /** Untrusted -- the uploaded document's own title, or a product's name.
+   * See the module
    * docstring on `Citation` in `@/lib/sse` for why this must only ever be
    * rendered as JSX text, never through `dangerouslySetInnerHTML` or a
    * markdown renderer. */
@@ -109,10 +114,20 @@ function Citations({ citations }: { citations: ChatCitation[] }) {
     <div className="mt-2.5 border-t border-line pt-2.5">
       <p className="text-xs font-medium uppercase tracking-wide text-ink-subtle">Sources</p>
       <ol className="mt-1.5 space-y-1.5">
-        {sorted.map((citation) => (
-          <li key={citation.chunkId} className="flex gap-1.5 text-xs text-ink-muted">
+        {sorted.map((citation, index) => (
+          // Index in the key: neither id is guaranteed -- a product citation
+          // has no chunk, a stored one may have lost both to a deletion --
+          // and one step's calls can cite the same row twice. The list is
+          // re-sorted from scratch on every render, never reordered in place.
+          <li
+            key={`${citation.chunkId ?? citation.productId ?? "source"}-${index}`}
+            className="flex gap-1.5 text-xs text-ink-muted"
+          >
             <span className="shrink-0 font-medium text-ink-subtle">{citation.rank}.</span>
             <span className="min-w-0">
+              {citation.productId !== null ? (
+                <span className="text-ink-subtle">Product: </span>
+              ) : null}
               <span className="font-medium text-ink">{citation.documentTitle}</span>
               {/* Most corpora are not PDFs, so a missing page must read as
                 * deliberate (nothing rendered) rather than a blank where a

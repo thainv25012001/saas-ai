@@ -156,6 +156,7 @@ export default function ProductsPage() {
         stockQuantity: product.stockQuantity,
         isActive: product.isActive,
         searchIndex: product.searchIndex,
+        updatedAt: String(product.updatedAt),
       })),
     [rows],
   );

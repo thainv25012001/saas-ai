@@ -66,13 +66,15 @@ export function toTranscript(messages: readonly StoredMessage[]): ChatMessageDat
     // retrieval happened, versus retrieval that found nothing.
     if (message.citations.length > 0) {
       entry.citations = message.citations.map((citation) => ({
-        // Both are `ON DELETE SET NULL`: a citation outlives the chunk and
-        // the document it points at, and the row is kept so the transcript
-        // still shows what grounded the answer. Empty string, not `String(
-        // null)`, because these are only ever used as React keys and as the
-        // link target the viewer suppresses when there is nothing to open.
-        chunkId: citation.chunkId ?? "",
-        documentId: citation.documentId ?? "",
+        // All three are `ON DELETE SET NULL`: a citation outlives the chunk,
+        // document or product it points at, and the row is kept so the
+        // transcript still shows what grounded the answer. A product
+        // citation has no chunk or document at all. Passed through as
+        // `null` -- `ChatMessage` keys and labels sources without assuming
+        // any of them is set.
+        chunkId: citation.chunkId ?? null,
+        documentId: citation.documentId ?? null,
+        productId: citation.productId ?? null,
         documentTitle: citation.documentTitle,
         excerpt: citation.excerpt,
         rank: citation.rank,

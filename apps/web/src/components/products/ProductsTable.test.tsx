@@ -20,11 +20,20 @@ function product(overrides: Partial<ProductRow> = {}): ProductRow {
     stockQuantity: 4,
     isActive: true,
     searchIndex: "INDEXED",
+    updatedAt: "2026-09-20T10:30:00Z",
     ...overrides,
   };
 }
 
 describe("ProductsTable", () => {
+  it("shows when each product was last updated", () => {
+    render(<ProductsTable products={[product()]} />);
+    expect(screen.getByRole("columnheader", { name: "Last updated" })).toBeInTheDocument();
+    expect(
+      screen.getByText(new Date("2026-09-20T10:30:00Z").toLocaleString()),
+    ).toBeInTheDocument();
+  });
+
   it("says nothing has been imported yet when the catalogue is empty", () => {
     render(<ProductsTable products={[]} />);
     expect(screen.getByText("No products yet")).toBeInTheDocument();

@@ -61,7 +61,7 @@ query Conversation($id: UUID!) {
     title
     messages {
       id seq role content model inputTokens outputTokens costUsd latencyMs error
-      citations { chunkId documentId documentTitle excerpt rank score }
+      citations { chunkId documentId productId documentTitle excerpt rank score }
     }
   }
 }
@@ -99,7 +99,7 @@ query Products(
   ) {
     id externalId name description category price currency
     attributes { key value }
-    availability stockQuantity isActive searchIndex
+    availability stockQuantity isActive searchIndex updatedAt
   }
 }
 

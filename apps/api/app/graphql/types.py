@@ -269,9 +269,15 @@ class MessageCitation:
     id: uuid.UUID
     chunk_id: uuid.UUID | None
     document_id: uuid.UUID | None
-    #: Untrusted -- the uploaded document's own title, never escaped by the
-    #: server. Rendering it must go through JSX text interpolation only; see
-    #: the same warning on `Citation` in `apps/web/src/lib/sse.ts`.
+    #: Set for a product citation (`search_products`/`get_product`), where
+    #: `chunk_id`/`document_id` are `None`. `ON DELETE SET NULL` like the
+    #: other two, so a citation of a since-deleted product has all three
+    #: `None`.
+    product_id: uuid.UUID | None
+    #: Untrusted -- the uploaded document's own title (or, for a product
+    #: citation, the product's name), never escaped by the server.
+    #: Rendering it must go through JSX text interpolation only; see the
+    #: same warning on `Citation` in `apps/web/src/lib/sse.ts`.
     document_title: str
     excerpt: str
     rank: int
@@ -283,6 +289,7 @@ class MessageCitation:
             id=model.id,
             chunk_id=model.chunk_id,
             document_id=model.document_id,
+            product_id=model.product_id,
             document_title=model.document_title,
             excerpt=model.excerpt,
             rank=model.rank,

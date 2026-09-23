@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ChatMessage, type ChatMessageData } from "./ChatMessage";
 
 const assistant = (overrides: Partial<ChatMessageData> = {}): ChatMessageData => ({
@@ -57,6 +57,7 @@ describe("ChatMessage", () => {
             {
               chunkId: "c2",
               documentId: "d2",
+              productId: null,
               documentTitle: "FAQ.md",
               rank: 2,
               score: 0.5,
@@ -66,6 +67,7 @@ describe("ChatMessage", () => {
             {
               chunkId: "c1",
               documentId: "d1",
+              productId: null,
               documentTitle: "Pricing.pdf",
               rank: 1,
               score: 0.9,
@@ -92,6 +94,7 @@ describe("ChatMessage", () => {
             {
               chunkId: "c1",
               documentId: "d1",
+              productId: null,
               documentTitle: "Pricing.pdf",
               rank: 1,
               score: 0.9,
@@ -101,6 +104,7 @@ describe("ChatMessage", () => {
             {
               chunkId: "c2",
               documentId: "d2",
+              productId: null,
               documentTitle: "FAQ.md",
               rank: 2,
               score: 0.5,
@@ -116,6 +120,64 @@ describe("ChatMessage", () => {
     // Most corpora are not PDFs -- absent must render as nothing, not as a
     // literal "page null" or an empty "page" label.
     expect(items[1]).not.toHaveTextContent(/page/i);
+  });
+
+  it("renders product sources alongside document ones, labelled as products", () => {
+    // Two product citations share null chunk/document ids, and one step's
+    // calls can repeat a rank; keys must not collide (React warns on a
+    // duplicate key and may drop or merge the rows).
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(
+      <ChatMessage
+        message={assistant({
+          citations: [
+            {
+              chunkId: "c1",
+              documentId: "d1",
+              productId: null,
+              documentTitle: "Pricing.pdf",
+              rank: 1,
+              score: 0.9,
+              excerpt: "first",
+              page: null,
+            },
+            {
+              chunkId: null,
+              documentId: null,
+              productId: "p1",
+              documentTitle: "Aurora Sedan",
+              rank: 1,
+              score: 0,
+              excerpt: "28499.00 USD · in_stock",
+              page: null,
+            },
+            {
+              chunkId: null,
+              documentId: null,
+              productId: "p2",
+              documentTitle: "Borealis SUV",
+              rank: 2,
+              score: 0,
+              excerpt: "35999.00 USD · in_stock",
+              page: null,
+            },
+          ],
+        })}
+      />,
+    );
+    const items = screen.getAllByRole("listitem");
+    expect(items).toHaveLength(3);
+    expect(items.filter((item) => item.textContent?.includes("Product:"))).toHaveLength(2);
+    expect(screen.getByText("Aurora Sedan")).toBeInTheDocument();
+    expect(screen.getByText("Borealis SUV")).toBeInTheDocument();
+    expect(items.find((item) => item.textContent?.includes("Pricing.pdf"))).not.toHaveTextContent(
+      "Product:",
+    );
+    const keyWarnings = consoleError.mock.calls.filter((call) =>
+      String(call[0]).includes("same key"),
+    );
+    consoleError.mockRestore();
+    expect(keyWarnings).toEqual([]);
   });
 
   it("renders no Sources section when there are no citations yet", () => {
@@ -136,6 +198,7 @@ describe("ChatMessage", () => {
             {
               chunkId: "c1",
               documentId: "d1",
+              productId: null,
               documentTitle: "<script>alert(1)</script>",
               rank: 1,
               score: 0.9,

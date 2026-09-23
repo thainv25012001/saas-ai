@@ -155,6 +155,7 @@ type MessageCitation {
   id: UUID!
   chunkId: UUID
   documentId: UUID
+  productId: UUID
   documentTitle: String!
   excerpt: String!
   rank: Int!
