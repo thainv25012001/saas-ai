@@ -11,7 +11,9 @@ export type ProductImportRow = {
   totalRows: number | null;
   succeededCount: number;
   failedCount: number;
-  /** A whole-file failure -- set instead of any per-row error. */
+  /** On a failed import, the whole-file failure -- set instead of any
+   * per-row error. On a completed one, a warning about the import as a whole
+   * (today: the rows landed but could not all be embedded). */
   error: string | null;
   createdAt: string;
   /** The first page of failed rows, by row number; `failedCount` is the
@@ -56,6 +58,13 @@ export function ProductImports({ imports }: { imports: readonly ProductImportRow
 
           {record.status === "FAILED" && record.error ? (
             <Alert tone="danger">{record.error}</Alert>
+          ) : null}
+
+          {/* The rows are in; only search by meaning is missing for some of
+            * them, which the product list badges row by row. A warning, not
+            * a failure -- and it says how to retry. */}
+          {record.status === "COMPLETED" && record.error ? (
+            <Alert tone="warn">{record.error}</Alert>
           ) : null}
 
           {record.errors.length > 0 ? <RowErrors record={record} /> : null}

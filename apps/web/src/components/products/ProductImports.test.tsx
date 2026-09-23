@@ -88,6 +88,15 @@ describe("ProductImports", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("CSV is missing required column(s): name");
   });
 
+  it("shows a completed import's warning, such as an embedding failure", () => {
+    const warning =
+      "All valid rows were imported, but 10 could not be embedded for search by meaning.";
+    render(<ProductImports imports={[record({ error: warning })]} />);
+    expect(screen.getByText("Completed")).toBeInTheDocument();
+    expect(screen.getByText(/10 of 10 rows imported/)).toBeInTheDocument();
+    expect(screen.getByText(warning)).toBeInTheDocument();
+  });
+
   it("shows an import still in flight without counts it does not have yet", () => {
     render(
       <ProductImports imports={[record({ status: "PROCESSING", totalRows: null, succeededCount: 0 })]} />,
