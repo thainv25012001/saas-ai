@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000"]
     )
+    # `Host` header values `/mcp` answers (docs/PHASE-7.md §4): the MCP
+    # transport's DNS-rebinding check rejects anything else with 421. A
+    # `:*` suffix admits any port. A deployment adds its public host here.
+    mcp_allowed_hosts: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["localhost:*", "127.0.0.1:*"]
+    )
 
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
@@ -272,10 +278,11 @@ class Settings(BaseSettings):
             )
         return value
 
-    @field_validator("cors_origins", mode="before")
+    @field_validator("cors_origins", "mcp_allowed_hosts", mode="before")
     @classmethod
     def split_comma_separated(cls, value: object) -> object:
-        """CORS_ORIGINS is a comma-separated string in .env, a list in code."""
+        """CORS_ORIGINS and MCP_ALLOWED_HOSTS are comma-separated strings in
+        .env, lists in code."""
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value

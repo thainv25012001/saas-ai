@@ -69,6 +69,24 @@ def test_cors_origins_single_value_without_comma_yields_one_element_list(monkeyp
         get_settings.cache_clear()
 
 
+def test_mcp_allowed_hosts_parses_comma_separated_real_env_var(monkeypatch):
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "api.example.com, localhost:*")
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+        assert settings.mcp_allowed_hosts == ["api.example.com", "localhost:*"]
+    finally:
+        get_settings.cache_clear()
+
+
+def test_mcp_allowed_hosts_defaults_to_loopback_any_port(monkeypatch):
+    monkeypatch.delenv("MCP_ALLOWED_HOSTS", raising=False)
+    from app.core.config import Settings
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.mcp_allowed_hosts == ["localhost:*", "127.0.0.1:*"]
+
+
 class TestNormalizeDatabaseUrl:
     """Neon (like Render, Heroku and Supabase) hands out libpq-shaped URLs:
     a `postgresql://` scheme with no driver, and `sslmode`/`channel_binding`

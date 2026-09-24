@@ -8,12 +8,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.routing import Route
 
 from app.api import auth, chat, documents, evaluations, health, products
 from app.core.config import get_settings
 from app.core.errors import AppError, format_validation_errors
 from app.core.logging import configure_logging, get_logger, request_id_var
 from app.core.security_headers import add_security_headers
+from app.mcp.app import build_mcp_asgi
 from app.workers.embedded import embedded_worker
 
 # Starlette raises HTTPException for framework-level failures that never
@@ -48,6 +50,9 @@ def _probe_passed(request: Request, status: int) -> bool:
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
+    # Built per app, not per module: a session manager's `run()` can be
+    # entered only once, and tests build many apps.
+    mcp_asgi, mcp_session_manager = build_mcp_asgi(settings)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -56,8 +61,11 @@ def create_app() -> FastAPI:
         `embedded_worker` is a no-op unless `RUN_EMBEDDED_WORKER` is set --
         see that module for why a single-service deploy needs the arq
         worker in this process, and what it costs.
+
+        The MCP session manager's task group runs here too: without it
+        every `/mcp` request fails (docs/PHASE-7.md §4).
         """
-        async with embedded_worker():
+        async with embedded_worker(), mcp_session_manager.run():
             yield
 
     app = FastAPI(title="AI Sales Agent API", version="0.1.0", lifespan=lifespan)
@@ -163,6 +171,13 @@ def create_app() -> FastAPI:
     app.include_router(documents.router)
     app.include_router(products.router)
     app.include_router(evaluations.router)
+
+    # An exact route, not a `Mount`: `/mcp/` redirects to `/mcp` rather than
+    # being a second endpoint. Bearer-key auth is inside `mcp_asgi`, so it
+    # applies to this route only. A `Route` built directly rather than
+    # `add_route`, whose signature only admits request/response endpoints:
+    # `Route` treats a non-function endpoint as a raw ASGI app.
+    app.router.routes.append(Route("/mcp", endpoint=mcp_asgi, methods=["GET", "POST", "DELETE"]))
 
     from strawberry.fastapi import GraphQLRouter
 
