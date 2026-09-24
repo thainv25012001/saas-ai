@@ -364,6 +364,15 @@ every caller:
 - **The same checks run client-side first** (`validateDocumentFile`,
   `validateImportFile`) so the honest path never waits on a 422 or 413 — the
   server's checks remain the ones that count.
+- **A structured import offers a sample file beside the zone.** The Products
+  page's `ImportTemplateDownload` puts one small secondary button per accepted
+  format (CSV, Excel, JSON) under the zone, so the columns are learned from a
+  file that imports cleanly rather than from the first import's failed rows.
+  The sample comes from the API, which builds it from the importer's own
+  column list, not from a static file in `public/` that could drift. It is
+  fetched with the user's token and saved via an object URL, because a plain
+  link would not carry the Bearer header. A failed download shows a `danger`
+  alert under the buttons.
 
 An upload whose outcome arrives later (a worker parses and embeds) shows that
 outcome where the upload happened: the Products page lists recent imports

@@ -13,7 +13,7 @@ tool-calling loop where the model decides when to search the knowledge base
 (`retrieve_knowledge`) or capture a lead (`create_lead`), with `tool_call_start` /
 `tool_call_end` events on the same SSE stream, a per-agent Tools card that grants or
 revokes each tool, and a Leads page for what `create_lead` captured; and products as
-structured knowledge — a `products` table, CSV/JSON catalogue import through a
+structured knowledge — a `products` table, CSV/XLSX/JSON catalogue import through a
 background arq worker with per-row errors, embedding, three-way search (exact filters,
 full-text, semantic), the `search_products`/`get_product` tools (on by default), product
 citations, and a Products dashboard page; and evaluation — datasets of test questions,

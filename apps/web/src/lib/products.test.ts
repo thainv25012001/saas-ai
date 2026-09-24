@@ -2,16 +2,25 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { MAX_UPLOAD_BYTES } from "./documents";
 import {
   ACCEPTED_IMPORT_EXTENSIONS,
+  downloadImportTemplate,
   importProducts,
   MAX_IMPORT_BYTES,
   resolveImportType,
   validateImportFile,
 } from "./products";
 
+const XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
 describe("validateImportFile", () => {
-  it("accepts a CSV and a JSON catalogue under the limit", () => {
+  it("accepts a CSV, an XLSX and a JSON catalogue under the limit", () => {
     expect(validateImportFile({ type: "text/csv", size: 1024 })).toBeNull();
     expect(validateImportFile({ type: "application/json", size: 1024 })).toBeNull();
+    expect(validateImportFile({ type: XLSX, size: 1024, name: "catalogue.xlsx" })).toBeNull();
+  });
+
+  it("recognises an .xlsx by its extension when the browser reports nothing useful", () => {
+    expect(resolveImportType("", "Catalogue.XLSX")).toBe(XLSX);
+    expect(resolveImportType("application/octet-stream", "catalogue.xlsx")).toBe(XLSX);
   });
 
   it("rejects an unsupported type and names what is accepted", () => {
@@ -110,5 +119,52 @@ describe("importProducts", () => {
       code: "unsupported_import_type",
       message: "nope",
     });
+  });
+});
+
+describe("downloadImportTemplate", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("fetches the sample in the asked format with a Bearer token and returns it with its file name", async () => {
+    const calls: { url: string; init: RequestInit | undefined }[] = [];
+    vi.stubGlobal("fetch", async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response("external_id,name\n", {
+        status: 200,
+        headers: {
+          "Content-Type": "text/csv",
+          "Content-Disposition": 'attachment; filename="product-import-sample.csv"',
+        },
+      });
+    });
+
+    const result = await downloadImportTemplate("csv", { accessToken: "tok", apiUrl: "http://api.test" });
+
+    expect(calls[0].url).toBe("http://api.test/api/v1/products/import/template?format=csv");
+    expect((calls[0].init?.headers as Record<string, string>).Authorization).toBe("Bearer tok");
+    expect(result.filename).toBe("product-import-sample.csv");
+    expect(await result.blob.text()).toBe("external_id,name\n");
+  });
+
+  it("names the file after its format when the server sends no file name", async () => {
+    vi.stubGlobal("fetch", async () => new Response("{}", { status: 200 }));
+    const result = await downloadImportTemplate("xlsx", { accessToken: "tok", apiUrl: "http://api.test" });
+    expect(result.filename).toBe("product-import-sample.xlsx");
+  });
+
+  it("throws the server's error envelope on a rejection", async () => {
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response(JSON.stringify({ error: { code: "unauthorized", message: "no" } }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    await expect(
+      downloadImportTemplate("json", { accessToken: "tok", apiUrl: "http://api.test" }),
+    ).rejects.toEqual({ code: "unauthorized", message: "no" });
   });
 });

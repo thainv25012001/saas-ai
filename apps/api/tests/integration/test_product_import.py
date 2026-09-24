@@ -760,3 +760,60 @@ async def test_an_over_long_filename_is_truncated_not_a_500(api_client, clean_us
     assert response.status_code == 202, response.text
     assert response.json()["filename"] == long_name[:255]
     assert len(queue.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# XLSX upload and the downloadable sample
+# ---------------------------------------------------------------------------
+
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+TEMPLATE_URL = "/api/v1/products/import/template"
+
+
+async def test_an_xlsx_upload_is_accepted_and_imports(api_client, clean_users, queue):
+    token = await _register(api_client, "impxlsx@example.com", "Ada Motors Import Xlsx")
+    org_id = await _organization_id(api_client, token)
+    template = await api_client.get(TEMPLATE_URL, params={"format": "xlsx"}, headers=_auth(token))
+    assert template.status_code == 200, template.text
+
+    # Windows browsers without Excel report nothing useful for `.xlsx`.
+    response = await _upload(
+        api_client,
+        token,
+        content=template.content,
+        content_type="application/octet-stream",
+        filename="catalogue.xlsx",
+    )
+    assert response.status_code == 202, response.text
+    assert response.json()["mime_type"] == XLSX
+
+    await _run_import(org_id, uuid.UUID(response.json()["id"]))
+    products = await _products_for(org_id)
+    assert [product.external_id for product in products] == ["SKU-001", "SKU-002", "SKU-003"]
+
+
+@pytest.mark.parametrize(
+    ("fmt", "media_type"),
+    [("csv", "text/csv"), ("xlsx", XLSX), ("json", "application/json")],
+)
+async def test_the_import_template_downloads_as_an_attachment(
+    api_client, clean_users, fmt, media_type
+):
+    token = await _register(api_client, f"imptpl-{fmt}@example.com", f"Ada Motors Template {fmt}")
+    response = await api_client.get(TEMPLATE_URL, params={"format": fmt}, headers=_auth(token))
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].split(";")[0] == media_type
+    assert response.headers["content-disposition"] == (
+        f'attachment; filename="product-import-sample.{fmt}"'
+    )
+
+
+async def test_the_import_template_rejects_an_unknown_format(api_client, clean_users):
+    token = await _register(api_client, "imptplbad@example.com", "Ada Motors Template Bad")
+    response = await api_client.get(TEMPLATE_URL, params={"format": "xls"}, headers=_auth(token))
+    assert response.status_code == 422, response.text
+
+
+async def test_the_import_template_requires_auth(api_client):
+    response = await api_client.get(TEMPLATE_URL, params={"format": "csv"})
+    assert response.status_code == 401, response.text

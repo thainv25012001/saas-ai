@@ -6,11 +6,14 @@ number a customer sees, which cell shapes are accepted, and which failures
 abort the whole file versus just one row.
 """
 
+import io
 import json
 
 import pytest
 
+from app.products.import_template import build_import_template
 from app.products.importer import (
+    _KNOWN_FIELDS,
     ImportParseError,
     RowError,
     UnsupportedImportType,
@@ -419,3 +422,104 @@ def test_resolve_import_mime_type_strips_mime_parameters(reported, filename, exp
 def test_row_error_to_dict_round_trips_for_jsonb_storage():
     error = RowError(row=5, external_id="sku-9", message="boom")
     assert error.to_dict() == {"row": 5, "external_id": "sku-9", "message": "boom"}
+
+
+# ---------------------------------------------------------------------------
+# XLSX: the first sheet, row 1 the header, every cell read the way the same
+# value would read as a CSV cell
+# ---------------------------------------------------------------------------
+
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _xlsx(*rows: list[object], header: list[str] | None = None) -> bytes:
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(header or ["external_id", "name", "price"])
+    for row in rows:
+        sheet.append(row)
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def test_xlsx_parses_every_valid_row_with_sheet_row_numbers():
+    data = _xlsx(["sku-1", "Camry", 32999], ["sku-2", "Corolla", 24999.5])
+    result = parse_import(data, XLSX)
+    assert [row.product.external_id for row in result.rows] == ["sku-1", "sku-2"]
+    assert [row.row for row in result.rows] == [2, 3]
+    assert result.errors == []
+    assert result.total_rows == 2
+
+
+def test_xlsx_numeric_cells_become_the_text_a_csv_would_hold():
+    """Excel stores a SKU typed as 1001 as a number and a quantity of 50 as
+    50.0; `external_id` is a string field, so either would be a row error
+    if passed through as-is."""
+    data = _xlsx(
+        [1001, "Camry", 19.99, 50, False],
+        header=["external_id", "name", "price", "stock_quantity", "is_active"],
+    )
+    result = parse_import(data, XLSX)
+    assert result.errors == []
+    product = result.rows[0].product
+    assert product.external_id == "1001"
+    assert str(product.price) == "19.99"
+    assert product.stock_quantity == 50
+    assert product.is_active is False
+
+
+def test_xlsx_blank_rows_are_skipped_not_reported():
+    data = _xlsx(
+        ["sku-1", "Camry", 1], [None, None, None], ["sku-2", "Corolla", 2], [None, None, None]
+    )
+    result = parse_import(data, XLSX)
+    assert [row.row for row in result.rows] == [2, 4]
+    assert result.errors == []
+    assert result.total_rows == 2
+
+
+def test_xlsx_a_bad_row_is_reported_by_its_sheet_row_number():
+    data = _xlsx(["sku-1", "Camry", 1], ["sku-2", "Corolla", "not-a-price"])
+    result = parse_import(data, XLSX)
+    assert [row.product.external_id for row in result.rows] == ["sku-1"]
+    assert [(error.row, error.external_id) for error in result.errors] == [(3, "sku-2")]
+
+
+def test_xlsx_missing_a_required_header_column_aborts_the_whole_file():
+    data = _xlsx(["Camry", 1], header=["name", "price"])
+    with pytest.raises(ImportParseError, match="external_id"):
+        parse_import(data, XLSX)
+
+
+def test_xlsx_that_is_not_a_workbook_aborts_the_whole_file():
+    with pytest.raises(ImportParseError):
+        parse_import(b"external_id,name\nsku-1,Camry\n", XLSX)
+
+
+@pytest.mark.parametrize("reported", ["", "application/octet-stream"])
+def test_resolve_import_mime_type_recognises_an_xlsx_extension(reported):
+    assert resolve_import_mime_type(reported, "catalogue.xlsx") == XLSX
+
+
+# ---------------------------------------------------------------------------
+# Downloadable sample: built from the same field list the parser reads, so
+# every format must import cleanly
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fmt", ["csv", "xlsx", "json"])
+def test_every_import_template_imports_with_no_errors(fmt):
+    template = build_import_template(fmt)
+    result = parse_import(template.content, template.media_type)
+    assert result.errors == []
+    assert result.total_rows >= 2
+    assert template.filename == f"product-import-sample.{fmt}"
+
+
+def test_the_csv_template_header_is_every_importable_field():
+    template = build_import_template("csv")
+    header = template.content.decode("utf-8-sig").splitlines()[0].split(",")
+    assert tuple(header) == _KNOWN_FIELDS
