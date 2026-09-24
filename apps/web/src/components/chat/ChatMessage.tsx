@@ -1,3 +1,4 @@
+import { AnswerText } from "@/components/chat/AnswerText";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { cn } from "@/components/ui/cn";
@@ -202,15 +203,19 @@ export function ChatMessage({ message }: { message: ChatMessageData }) {
       >
         {stoppedWithNoText ? (
           <p className="italic text-ink-subtle">Stopped before any response arrived.</p>
+        ) : isUser ? (
+          <p className="whitespace-pre-wrap break-words">{message.text}</p>
         ) : (
-          <p className="whitespace-pre-wrap break-words">
-            {message.text}
+          <>
+            {/* Mid-stream the text can end in half a construct (a lone `**`);
+              * that shows as literal text until the rest arrives. */}
+            <AnswerText text={message.text} />
             {message.status === "streaming" && (
               <span aria-hidden className="ml-0.5 inline-block animate-pulse text-ink-subtle">
                 ▍
               </span>
             )}
-          </p>
+          </>
         )}
 
         {message.status === "error" && message.error ? <TurnError error={message.error} /> : null}

