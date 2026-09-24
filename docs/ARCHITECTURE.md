@@ -1,11 +1,13 @@
 # AI Sales Agent — Architecture Proposal
 
-> Status: **approved, and partly built.** Phases 1 to 6 are implemented in this
-> repository — see §9 for Phase 1 as delivered, §9.6 for Phase 3, §9.7 for Phase 5 and
-> §9.8 for Phase 6, and [`docs/PHASE-2.md`](PHASE-2.md) to
-> [`docs/PHASE-6.md`](PHASE-6.md) for the design notes of each. Where a phase document
+> Status: **approved, and partly built.** Phases 1 to 7 are implemented in this
+> repository — see §9 for Phase 1 as delivered, §9.6 for Phase 3, §9.7 for Phase 5,
+> §9.8 for Phase 6 and §9.9 for Phase 7, and [`docs/PHASE-2.md`](PHASE-2.md) to
+> [`docs/PHASE-7.md`](PHASE-7.md) for the design notes of each. Where a phase document
 > departs from this one (marked ★ there), the phase document describes what was built.
-> §8 (MCP) and the SaaS features (billing, widget) remain a proposal.
+> §8 Direction 2 (exposing our tools as an MCP server) was delivered in Phase 7;
+> §8 Direction 1 (consuming remote MCP servers) and the SaaS features (billing, widget)
+> remain a proposal.
 > Scope: items 1–10 of the "First Task" in `init.md`.
 
 ---
@@ -166,6 +168,13 @@ entire premise is holding other companies' proprietary data, that trade is worth
 A test asserting that org A cannot read org B's rows through every public entry point is
 part of the Phase 1 definition of done.
 
+**The one sanctioned pre-tenant lookup.** An MCP request's API key is what *tells* the
+server which organization it is for, so authenticating it cannot run inside a tenant
+session. Phase 7 resolves it through a single `SECURITY DEFINER` function,
+`resolve_api_key(hash)`, which returns three ids for one exact hash of an unrevoked key and
+nothing else; everything after it runs in an ordinary `tenant_session`
+([`docs/PHASE-7.md`](PHASE-7.md) §3). No other query runs before the tenant is known.
+
 ### 2.4 Why no agent framework
 
 No LangChain, LlamaIndex, or CrewAI. The orchestrator is roughly 300 lines of explicit
@@ -204,10 +213,16 @@ memberships
   role enum(owner, admin, member), created_at
   UNIQUE (organization_id, user_id)
 
-api_keys                                -- server-to-server + widget embedding later
-  id, organization_id, name, key_prefix, key_hash, scopes text[],
-  last_used_at, revoked_at, created_at
+api_keys                                -- MCP access (Phase 7); widget embedding later
+  id, organization_id, agent_id → agents, name, key_prefix, key_hash,
+  created_by → users, last_used_at, revoked_at, created_at, updated_at
 ```
+
+As built in Phase 7, a key is **bound to one agent** and has **no `scopes`**: what it can do
+is exactly that agent's granted tools (∩ the MCP-exposed read tools), so there is no
+second permission model to drift. Authentication resolves a key through the
+`resolve_api_key` `SECURITY DEFINER` function (§2.3). See
+[`docs/PHASE-7.md`](PHASE-7.md) §3.
 
 `users` is deliberately global rather than org-scoped: a consultant serving three
 dealerships needs one login. Org context comes from the membership selected at login.
@@ -471,13 +486,15 @@ ai-sales-agent/
 │   │   │   ├── tools/
 │   │   │   │   ├── base.py             # AgentTool, ToolContext, ToolResult
 │   │   │   │   ├── registry.py
-│   │   │   │   ├── builtin/            # retrieve_knowledge, search_products, …
-│   │   │   │   └── mcp/                # MCP client adapter (Phase 6)
+│   │   │   │   ├── runtime.py          # granted-tool resolution + registry, shared by chat and MCP
+│   │   │   │   └── builtin/            # retrieve_knowledge, search_products, …
+│   │   │   │                           # (no MCP client adapter: Direction 1 is not built)
 │   │   │   ├── documents/  products/  conversations/
 │   │   │   ├── prompts/    leads/     evaluations/
 │   │   │   │                           # each: service.py, schemas.py
 │   │   │   ├── workers/                # arq task definitions + worker entrypoint
-│   │   │   └── mcp/                    # MCP *server* exposing our tools (Phase 6)
+│   │   │   ├── api_keys/               # agent-bound API keys (Phase 7)
+│   │   │   └── mcp/                    # the MCP *server* at /mcp exposing our tools (Phase 7)
 │   │   ├── alembic/
 │   │   ├── tests/
 │   │   │   └── unit/  integration/  e2e/  fixtures/
@@ -806,13 +823,15 @@ drops in on both sides without a rewrite.
      (our builtins)   (remote MCP srv)   (customer webhook)
 ```
 
-**Direction 1 — consuming MCP servers (Phase 6).** `MCPToolAdapter(AgentTool)` wraps a
+**Direction 1 — consuming MCP servers (still a proposal; not built).** `MCPToolAdapter(AgentTool)` wraps a
 remote MCP server's tool: it maps MCP's `inputSchema` onto our `args_model`, and MCP's
 `CallToolResult` content onto our `ToolResult`. A `tools` row with `type='mcp'` and a
 config holding the server URL and credentials is all it takes to give an org access to its
 own CRM or inventory system.
 
-**Direction 2 — exposing our capabilities as an MCP server (Phase 6).** `app/mcp/` mounts
+**Direction 2 — exposing our capabilities as an MCP server (delivered in Phase 7, §9.9;
+it exposes the three read tools only — `create_lead` is not reachable, and a key is bound
+to one agent rather than scoped to an org).** `app/mcp/` mounts
 an MCP server publishing the same registry: `search_products`, `get_product`,
 `create_lead`, `retrieve_knowledge`. A customer's Claude Desktop or internal agent can then
 query their own catalog. Auth is an org-scoped API key mapped to a `TenantContext` — the
@@ -943,6 +962,23 @@ pinning is reachable only for seeded agents. This is what exists in the reposito
 | Runs / pinning | `create_run` locks the dataset, allows one `pending`/`running` run per dataset, and pins `prompt_version_id` (the one named, else the agent's active one at start), `provider`/`model` and the optional judge. `ChatService.send` gained `prompt_version_id`, validated against the agent's prompt, so a *draft* version can be evaluated before it is activated. The summary (pass rate, per-scorer mean/passed/applicable, `cost_usd` as an exact decimal string or `null`, mean latency) is written on completion and also on cancel and failure. |
 | API | REST `POST /api/v1/evaluations/runs` — commit, then enqueue (the `products/import` ordering); a failed enqueue fails the run instead of leaving it `pending`; 20 starts per user per hour, spent only by a start that passed validation. GraphQL: `evaluationDatasets`, `evaluationDataset`, `evaluationCases`, `evaluationRuns`, `evaluationRun` (with `results` and `summary`), dataset/case create/update/delete and `cancelEvaluationRun`, plus a prompt's versions for the run form. |
 | Frontend | `/dashboard/evaluations` (datasets with their latest run), `/dashboard/evaluations/[id]` (dataset editing, cases with document/product pickers, the start-run form with a call estimate and the reference-only guard, recent runs) and `/dashboard/evaluations/runs/[runId]` (progress with polling, summary tiles, expandable per-case results, and a browser-side comparison against another completed run: regressed / improved / errored / unchanged / new). Every model- or customer-written field renders as text. |
+
+### 9.9 Phase 7 in detail, as delivered
+
+The design argument is in [`docs/PHASE-7.md`](PHASE-7.md), including §9's list of what is not
+delivered — first among it, consuming remote MCP servers (§8 Direction 1). This is what exists in
+the repository.
+
+| Area | Deliverable |
+|---|---|
+| Tool runtime | `app/tools/runtime.py` — granted-tool resolution, the registry of only those tools, and the per-call savepoint + `statement_timeout` wrapper, moved out of `ChatService` unchanged in behaviour so chat and MCP share one implementation. `ToolContext.conversation_id` is optional; `create_lead` refuses a call without one. |
+| Schema | `api_keys` (`0015_api_keys`), RLS-enabled, **bound to one agent** (`ON DELETE CASCADE`) with no `scopes` column. Only `sha256(token)` is stored (`key_hash` unique) plus a 15-character display prefix. `resolve_api_key(bytea)` is `SECURITY DEFINER` with a pinned `search_path`, EXECUTE granted to `app_user` only, and returns three ids for one unrevoked hash — the one sanctioned pre-tenant lookup (§2.3). |
+| Keys | `app/api_keys/` — tokens are `sa_mcp_` + 43 characters of `secrets.token_urlsafe(32)`, shape-checked before any query. Create/revoke require owner or admin; at most 10 active keys per agent. `last_used_at` is written at most once a minute per key. The plaintext token appears only in `createApiKey`'s response. |
+| Server | `app/mcp/` — the SDK's low-level `Server` behind a stateless, JSON-response `StreamableHTTPSessionManager`, mounted as the exact route `/mcp` (`/mcp/` → 307) with the session manager run from FastAPI's lifespan. `tools/list` is the agent's grants ∩ `MCP_EXPOSED_TOOL_NAMES` (`search_products`, `get_product`, `retrieve_knowledge`), with the same schemas chat shows the model. `tools/call` goes through the shared runtime; results carry `content`, `structured_content` (data + citations) and `is_error`. Unknown/ungranted/unexposed names are `-32602 Unknown tool: <name>` (64 chars max); invalid arguments are an `is_error` result; any other exception is a generic error, never the raw text. |
+| Auth / transport | Bearer key via Starlette `AuthenticationMiddleware` + the SDK's `BearerAuthBackend` on `/mcp` only. Missing, malformed, unknown, revoked, or disabled-agent keys are one identical 401 with `WWW-Authenticate: Bearer error="invalid_token"`. Host allow-list from `MCP_ALLOWED_HOSTS` (421 otherwise; `host:*` also admits the bare host; a production startup warning when it is loopback-only); a browser `Origin` outside `CORS_ORIGINS` is 403. |
+| Limits / logs | 120 `tools/call` per key per minute (a `Rate limit exceeded; retry later.` error result); listing is free. `mcp_tool_call` logs ids, tool name, `is_error`, `duration_ms` — never arguments or results; `tool_call_invalid_args` never logs pydantic's `input`; `mcp_auth_rejected` logs a reason and the token prefix only. |
+| GraphQL | `apiKeys(agentId)`, `agentMcpInfo(agentId)` (the exposed tool names), `createApiKey(agentId, name) → {apiKey, token}`, `revokeApiKey(id)`. |
+| Frontend | The agent page's **MCP access** card: endpoint, exposed tools, key list with Revoke, a create form, and a one-time token reveal with a shell-quoted `claude mcp add --transport http …` command and a `.mcp.json` block (Claude Code, Cursor and other HTTP-capable clients). A disabled agent shows a warning that its keys are refused. Members see the card without the create/revoke controls. |
 
 ---
 

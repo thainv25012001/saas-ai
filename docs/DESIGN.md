@@ -627,6 +627,21 @@ right alongside its existing `refetchTools` call, rather than the MCP card
 polling or the two cards sharing a cache key — one page, one place that
 knows a toggle just happened, telling both queries to catch up.
 
+The JSON snippet is labelled "`.mcp.json` (Claude Code, Cursor and other
+HTTP-capable clients)", not "for Claude Desktop": its `{"type": "http", url,
+headers}` shape is the `.mcp.json` format, and Claude Desktop's config file
+does not take a remote HTTP server with headers. A label that names a client
+the snippet does not work in is a support ticket waiting to happen.
+
+When the agent's *saved* status is DISABLED, the card opens with a `warn`
+Alert — "This agent is disabled, so its keys are refused." — because `/mcp`
+answers every one of its keys 401 until it is re-enabled, and a key list
+that looks healthy would otherwise leave the failure unexplained. It keys
+off the saved `agent.status`, not the settings form's unsaved selection. The
+endpoint is built by `mcpEndpointUrl`, which strips a trailing slash from
+`NEXT_PUBLIC_API_URL` so a configured `https://api.example.com/` never shows
+`//mcp`.
+
 ## Adding a component
 
 1. Does a primitive already do it? Extend that one instead — a second thing

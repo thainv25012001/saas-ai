@@ -2,7 +2,7 @@
 
 A multi-tenant SaaS where a business configures an AI sales assistant over its own
 knowledge — products, documents, prompts — and that assistant talks to the business's
-customers. This repository is **Phases 1 to 6**: authentication, organizations, agents
+customers. This repository is **Phases 1 to 7**: authentication, organizations, agents
 and prompts; a real LLM call — a provider abstraction (OpenAI, Anthropic, and a
 network-free `fake`), conversations and messages, a streaming `POST /api/v1/chat/stream`
 endpoint with per-message token and cost accounting, and a working playground; a
@@ -19,8 +19,10 @@ full-text, semantic), the `search_products`/`get_product` tools (on by default),
 citations, and a Products dashboard page; and evaluation — datasets of test questions,
 runs started over `POST /api/v1/evaluations/runs` that drive each case through the real
 chat path in a rolled-back transaction on the arq worker, deterministic scorers plus an
-optional LLM judge, and an Evaluations dashboard that compares two runs case by case.
-Later phases (MCP, billing) build on this foundation; see [Phase roadmap](#phase-roadmap)
+optional LLM judge, and an Evaluations dashboard that compares two runs case by case; and
+MCP — an endpoint at `/mcp` that lets a business's own MCP client (Claude Code, Cursor, an
+internal agent) call an agent's read tools with an agent-bound API key.
+Later phases (billing, widget) build on this foundation; see [Phase roadmap](#phase-roadmap)
 below.
 
 ## Architecture, in one picture
@@ -276,6 +278,26 @@ them, on every push to `main` and every pull request. The web job never starts t
 it typechecks against the committed schema and committed generated types, so a backend
 outage or a slow database never blocks a frontend-only PR.
 
+## Connect an MCP client
+
+1. On an agent's page (**Agents → the agent**), use the **MCP access** card to create a key
+   (owners and admins only). The token is shown **once** — copy it then.
+2. The endpoint is `<API URL>/mcp`, e.g. `http://localhost:8000/mcp` locally.
+3. Register it with your client. For Claude Code:
+
+   ```sh
+   claude mcp add --transport http my-agent 'http://localhost:8000/mcp' --header 'Authorization: Bearer sa_mcp_…'
+   ```
+
+   The card also gives a `.mcp.json` block for Cursor and other HTTP-capable clients.
+4. The client sees the agent's granted read tools (`search_products`, `get_product`,
+   `retrieve_knowledge`). Listing is free; calls are limited to 120 per minute per key.
+   Revoking the key, or disabling the agent, refuses it on the next request.
+
+A deployment must add its public API host to `MCP_ALLOWED_HOSTS` (e.g. `api.example.com:*`,
+which also admits the bare host) or `/mcp` answers 421 — see
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+
 ## Phase roadmap
 
 | Phase | Scope | Status |
@@ -286,7 +308,7 @@ outage or a slow database never blocks a frontend-only PR.
 | **4 — Agent + tools** | The agent decides when to call its tools, instead of retrieval running unconditionally before every turn. | **Complete** (this repository) — see [`docs/PHASE-4.md`](docs/PHASE-4.md). A multi-step `AgentRunner` loop, a tool registry built per turn from the agent's own `agent_tools` grants, `retrieve_knowledge` and `create_lead`, `tool_call_start`/`tool_call_end` SSE events, a per-agent Tools card and a Leads page. `search_products`/`get_product` moved to Phase 5 with products themselves, now complete; PHASE-4.md §8 lists everything else not delivered. |
 | **5 — Products** | Products as structured knowledge: a `products` table, catalogue import, embedding, and the tools that let the agent answer what the organization sells and what it costs from data instead of prose. | **Complete** (this repository) — see [`docs/PHASE-5.md`](docs/PHASE-5.md). The `products` table (RLS-scoped, `attributes jsonb`) and `ProductService`; CSV/JSON import over `POST /api/v1/products/import` on the same arq worker as document ingestion, upserting on `(organization_id, external_id)` with per-row errors that don't abort the batch; embedding of name/description/attributes (deliberately excluding price/stock, so a price change never needs a re-embed) with `embedding_stale` detection; three-way search (exact filters AND full-text OR semantic, RRF-fused) in `app/rag/products.py`; `search_products`/`get_product` tools, on by default, each result naming its source row; `message_citations.product_id` populated; a GraphQL `products`/`productCategories`/`productImports` surface; and a `/dashboard/products` page. PHASE-5.md §2 argues, and §9 restates, that the model can still quote a price from a retrieved document chunk instead of a tool — the tools make that the cheaper path, they do not make it the only one; §9 lists everything else not delivered. |
 | **6 — Evaluation** | Test datasets, evaluation runs, retrieval and answer scoring. | **Complete** (this repository) — see [`docs/PHASE-6.md`](docs/PHASE-6.md). `eval_datasets`/`eval_cases`/`eval_runs`/`eval_results` (RLS-scoped, at most 200 cases per dataset, each with at least one expectation); runs started over `POST /api/v1/evaluations/runs` (commit, then enqueue; one active run per dataset; rate-limited) that pin the prompt version, model and optional judge at start — so a draft prompt version can be evaluated before it is activated; `run_evaluation_task` on the arq worker driving each case through the unmodified `ChatService.send` inside an always-rolled-back transaction, so a `create_lead` or a conversation never survives it, resuming after a killed worker or its own 55-minute hand-off; deterministic scorers (required phrases, tool selection, document and product recall) and an LLM judge for correctness and groundedness behind a per-call fence; summaries with pass rate, per-scorer means and exact cost; a GraphQL surface for datasets, cases, runs and results; and a `/dashboard/evaluations` section with a run comparison (regressed / improved / errored / unchanged / new). PHASE-6.md §9 lists what is not delivered — first, that no API or UI links an agent to a prompt yet, so prompt-version pinning is reachable only for seeded agents. |
-| 7 — MCP | Expose selected business capabilities through MCP, once the built-in tool system is stable. | Not started |
+| **7 — MCP** | Expose selected business capabilities through MCP, once the built-in tool system is stable. | **Complete** (this repository) — see [`docs/PHASE-7.md`](docs/PHASE-7.md). A stateless Streamable HTTP MCP server at `/mcp` exposing `search_products`, `get_product` and `retrieve_knowledge` — the agent's own grants intersected with that read-only set, run through the same tool runtime chat uses (`app/tools/runtime.py`); API keys bound to one agent (`api_keys`, only a SHA-256 stored, resolved through one `SECURITY DEFINER` function before the tenant is known), created and revoked by owners/admins on the agent page with a one-time token reveal and copy-ready client snippets; a Host allow-list (`MCP_ALLOWED_HOSTS`); 120 calls per key per minute; logs that never carry arguments or results. `create_lead` is deliberately not exposed; PHASE-7.md §9 lists what is not delivered — first, consuming remote MCP servers as agent tools. |
 | 8 — SaaS features | Billing/Stripe, usage limits, subscription plans, embeddable widget, analytics, lead dashboard. | Not started |
 
 ## Before you deploy

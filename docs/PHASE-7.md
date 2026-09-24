@@ -4,7 +4,7 @@
 > (`api_keys`). That document is the binding spec; this one records what Phase 7 adds and
 > where it departs from it.
 
-**Goal:** a business can point its own MCP client — Claude Desktop, Claude Code, an
+**Goal:** a business can point its own MCP client — Claude Code, Cursor, an
 internal agent — at this product and ask its catalogue and knowledge base questions, using
 the **same tools, under the same tenant rules**, as the sales assistant itself.
 
@@ -107,17 +107,36 @@ JSON responses because no tool streams.
 `BearerAuthBackend` and a `TokenVerifier` of our own that hashes the bearer token and calls
 `resolve_api_key`, applied to `/mcp` only. A missing, malformed, unknown or revoked key is
 **HTTP 401** before any JSON-RPC is read. A key whose agent is `disabled` is also 401: a
-disabled agent must not answer anyone.
+disabled agent must not answer anyone. Every 401 is the same, whatever the reason, so a
+caller learns nothing about which check failed: the body is
+`{"error":"invalid_token","error_description":"Authentication required"}` and the header
+`WWW-Authenticate: Bearer error="invalid_token", error_description="Authentication required"`.
+A `draft` agent's keys *do* work — only `disabled` is refused (§9).
 
 **Host-header protection must be explicit.** The SDK only enables DNS-rebinding protection
 by default through a convenience wrapper this embedding does not use, so
 `TransportSecuritySettings` is always passed, with allowed hosts from a new setting
-`MCP_ALLOWED_HOSTS` (default `localhost:*,127.0.0.1:*`). A deployment adds its public
-host there; `DEPLOYMENT.md` says so.
+`MCP_ALLOWED_HOSTS` (default `localhost:*,127.0.0.1:*`). A `Host` header not on the list
+is **421**; a request carrying an `Origin` header that is not in `CORS_ORIGINS` is **403**
+(server-to-server callers send no `Origin` and are admitted). Both are answered by the
+transport before any handler runs.
+
+`MCP_ALLOWED_HOSTS` is comma-separated. A bare entry (`api.example.com`) matches exactly
+that `Host` value; `host:*` matches that host with any explicit port. The SDK's own `:*`
+match needs a port to be present, but an HTTPS client on 443 sends a bare `Host`, so the
+setting's parser **also admits the bare host for every `host:*` entry** (deduplicated,
+order kept — the default therefore admits `localhost` and `127.0.0.1` too). A deployment
+sets its public host there, typically `api.example.com:*`; `DEPLOYMENT.md` says so. When
+`ENVIRONMENT=production` and every allowed host is loopback, startup logs the warning
+`mcp_allowed_hosts_loopback_only`: that deployment would answer every real request 421.
+
+`/mcp` is an exact route, not a mount: `/mcp/` answers **307** to `/mcp` rather than being
+a second endpoint.
 
 **Rate limit:** 120 calls per key per minute, through the existing Redis limiter, counted
 on `tools/call` only (listing is free). Exceeding it is a tool error result, not a 5xx, so
-a well-behaved client can back off.
+a well-behaved client can back off: `is_error: true` with the text
+`Rate limit exceeded; retry later.`
 
 `last_used_at` is updated at most once a minute per key, so an active client does not
 turn every call into a write.
@@ -149,10 +168,14 @@ call without one, as a second line behind §5's exclusion.
 
 **Results:** `content` is `ToolResult.content` as text — what our own model reads —
 `structured_content` carries `data` and the citations (document, chunk and product ids,
-titles, excerpts), and `is_error` is `ToolResult.is_error`. An unknown or ungranted tool
-name is a JSON-RPC error (`-32602`), and so is invalid arguments. Any unexpected exception
-is caught and returned as a generic error result. The SDK would otherwise send the raw
-exception text to the caller.
+titles, excerpts), and `is_error` is `ToolResult.is_error`. A tool name that is unknown,
+not granted to the agent, or granted but not exposed (`create_lead`) is a JSON-RPC error
+`-32602` with one wording for all three — `Unknown tool: <name>`, the name truncated to 64
+characters — so a caller learns nothing beyond its own list. **Invalid arguments are not a
+protocol error:** they come back as an ordinary `is_error: true` result naming the bad
+fields, exactly as chat's model sees them, so the calling model can correct itself. Any
+unexpected exception is caught and returned as a generic error result. The SDK would
+otherwise send the raw exception text to the caller.
 
 ---
 
@@ -162,8 +185,9 @@ The agent detail page gets an **MCP access** card:
 
 - the endpoint URL and the tools this agent exposes over MCP;
 - create a key (a name) → the token, shown once, with copy buttons for
-  `claude mcp add --transport http <name> <url> --header "Authorization: Bearer <token>"`
-  and a JSON client config;
+  `claude mcp add --transport http <name> '<url>' --header 'Authorization: Bearer <token>'`
+  and a `.mcp.json` block (Claude Code, Cursor and other HTTP-capable clients);
+- a warning when the agent is disabled, since its keys are then refused;
 - a list of keys: name, prefix, created by, created, last used, **Revoke**.
 
 GraphQL: `apiKeys(agentId)`, `createApiKey(agentId, name) → {apiKey, token}`,
@@ -176,8 +200,11 @@ the session of the person who made it. At most 10 active keys per agent.
 ## 7. Observability
 
 Every `tools/call` logs `mcp_tool_call` with `request_id`, `organization_id`, `agent_id`,
-`api_key_id`, the tool name, `is_error` and `duration_ms` — never arguments or results,
-which can carry customer questions. `tools/list` logs at debug. A rejected key logs
+`api_key_id`, the tool name (truncated to 64 characters), `is_error` and `duration_ms` —
+never arguments or results, which can carry customer questions. The same holds for the
+shared registry's `tool_call_invalid_args` (chat and MCP alike): it logs pydantic's error
+locations and messages, never their `input` (for a missing field, the whole arguments dict)
+or `url`. `tools/list` logs at debug. A rejected key logs
 `mcp_auth_rejected` with the reason (`missing`, `malformed`, `unknown_or_revoked`,
 `agent_disabled`) and the token prefix only.
 
@@ -204,3 +231,8 @@ which can carry customer questions. `tools/list` logs at debug. A rejected key l
 | OAuth / per-user MCP auth | Keys are per organization and agent. OAuth needs an authorization server this product does not have. |
 | Per-key usage metering and a usage view | Calls are logged. `usage_events` records LLM and embedding spend, and MCP calls spend neither directly (retrieval's query embedding is untracked, as in chat). |
 | MCP resources, prompts, stdio transport | No use case yet. |
+| A throttle on `tools/list` and on failed authentication | Only `tools/call` is rate-limited. Each authenticated request costs about 4 queries and each failed well-formed authentication 1 (a malformed token costs none), so a flood is bounded but not free. A per-IP limit on failures is the follow-up. |
+| Resolving grants once per modern-era `tools/call` | Under the per-request-envelope protocol era the SDK looks the tool up before calling, so a `tools/call` resolves the agent's grants twice. Correct, one query wasted; caching per request is the follow-up. |
+| A Claude Desktop config snippet | The card's JSON is the `.mcp.json` format (Claude Code, Cursor and other HTTP-capable clients). Claude Desktop's config file does not take a remote HTTP server with headers; a bridge such as `mcp-remote` would be needed and is not offered. |
+| Refusing `draft` agents | MCP answers for a `draft` agent's keys; only `disabled` is refused (§4). A draft is how an operator tries an agent out before publishing it. |
+| A `cmd.exe`-safe `claude mcp add` snippet | The snippet is POSIX single-quoted, which also works in PowerShell; `cmd.exe` does not treat `'` as a quote. |
