@@ -28,13 +28,30 @@ export function slugifyMcpName(name: string): string {
   return slug || "agent";
 }
 
+/**
+ * Wraps `value` in POSIX single quotes so it reaches the shell as one
+ * literal argument regardless of what it contains -- spaces, `"`, `` ` ``,
+ * `$(...)`, or a single quote of its own. Single quotes admit no escape
+ * sequence at all, so the one character that needs special handling is a
+ * literal `'`: it ends the quoted string, contributes an escaped quote
+ * (`'\''`), and reopens a new quoted string, which is the standard POSIX
+ * idiom for "a single quote inside single quotes".
+ */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 /** The one-line command that registers this MCP server with the Claude Code
- * CLI. The token sits inside a double-quoted shell argument, which is why
- * `name` is slugified first -- an unquoted, unslugged name could break the
- * argument list in ways this string can't recover from. */
+ * CLI. `url` and the whole `Authorization: Bearer <token>` header value are
+ * each shell-quoted independently of what they contain -- the token is
+ * server-generated and the url comes from config today, but the function
+ * does not lean on either of those as a safety net. `name` is slugified
+ * first and left unquoted, since a slug is already a safe bare argument by
+ * construction (`slugifyMcpName` only ever emits `[a-z0-9-]`). */
 export function claudeMcpAddCommand(name: string, url: string, token: string): string {
   const slug = slugifyMcpName(name);
-  return `claude mcp add --transport http ${slug} ${url} --header "Authorization: Bearer ${token}"`;
+  const header = `Authorization: Bearer ${token}`;
+  return `claude mcp add --transport http ${slug} ${shellQuote(url)} --header ${shellQuote(header)}`;
 }
 
 /** The equivalent `mcpServers` JSON block for a client (e.g. Claude Desktop)

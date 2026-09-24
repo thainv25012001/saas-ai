@@ -589,7 +589,13 @@ the equivalent `mcpServers` JSON block — both keyed on the *key's own name*,
 slugified to `[a-z0-9-]` (`slugifyMcpName`) because it becomes a bare shell
 argument in one snippet and a JSON object key in the other; unslugged
 punctuation in a key name someone typed for humans would otherwise land
-somewhere it can break both. `mcpJsonConfig` builds the value with
+somewhere it can break both. The command snippet does not stop at slugging
+the name: `url` and the whole `Authorization: Bearer <token>` header value
+are each wrapped in POSIX single quotes by a small `shellQuote` helper (the
+standard `'` → `'\''` escape), so the command is one correctly quoted
+argument regardless of what characters a configured url or a token ever
+contains — not merely safe today because a token's alphabet and a
+deployment's url happen to be tame. `mcpJsonConfig` builds its value with
 `JSON.stringify`, never string interpolation, so a token or url containing a
 quote still produces valid JSON. `lib/mcp.ts` also carries the app's first
 `copyToClipboard`: `navigator.clipboard` does not exist over plain HTTP or in

@@ -21,9 +21,9 @@ describe("slugifyMcpName", () => {
 });
 
 describe("claudeMcpAddCommand", () => {
-  it("builds the exact CLI command, slugging the name and quoting the token", () => {
+  it("builds the exact CLI command, slugging the name and single-quoting the url and header", () => {
     expect(claudeMcpAddCommand("Support Bot", "http://localhost:8000/mcp", "sa_mcp_abc123")).toBe(
-      'claude mcp add --transport http support-bot http://localhost:8000/mcp --header "Authorization: Bearer sa_mcp_abc123"',
+      "claude mcp add --transport http support-bot 'http://localhost:8000/mcp' --header 'Authorization: Bearer sa_mcp_abc123'",
     );
   });
 
@@ -34,7 +34,59 @@ describe("claudeMcpAddCommand", () => {
       "sa_mcp_x",
     );
     expect(command).toBe(
-      'claude mcp add --transport http my-server-rm-rf http://localhost:8000/mcp --header "Authorization: Bearer sa_mcp_x"',
+      "claude mcp add --transport http my-server-rm-rf 'http://localhost:8000/mcp' --header 'Authorization: Bearer sa_mcp_x'",
+    );
+  });
+
+  // Adversarial: the function must be safe on its own terms, not merely
+  // because a token's charset and a configured url happen to be tame today.
+  // Each case below asserts the *exact* output is one correctly single-quoted
+  // argument, not just "doesn't throw" -- a subtly wrong escape (e.g. missing
+  // the reopening quote) can still produce a string that looks plausible.
+
+  it("keeps a token containing a single quote inside one shell argument", () => {
+    const command = claudeMcpAddCommand("bot", "http://localhost:8000/mcp", "sa_mcp_o'brien");
+    expect(command).toBe(
+      "claude mcp add --transport http bot 'http://localhost:8000/mcp' --header 'Authorization: Bearer sa_mcp_o'\\''brien'",
+    );
+  });
+
+  it("keeps a url containing a single quote inside one shell argument", () => {
+    const command = claudeMcpAddCommand("bot", "http://localhost:8000/mcp?x='hi'", "sa_mcp_x");
+    expect(command).toBe(
+      "claude mcp add --transport http bot 'http://localhost:8000/mcp?x='\\''hi'\\''' --header 'Authorization: Bearer sa_mcp_x'",
+    );
+  });
+
+  it("does not let a double quote in the token end the argument early", () => {
+    const command = claudeMcpAddCommand("bot", "http://localhost:8000/mcp", 'sa_mcp_"quoted"');
+    expect(command).toBe(
+      'claude mcp add --transport http bot \'http://localhost:8000/mcp\' --header \'Authorization: Bearer sa_mcp_"quoted"\'',
+    );
+  });
+
+  it("does not let a command substitution in the token be interpreted by the shell", () => {
+    const command = claudeMcpAddCommand("bot", "http://localhost:8000/mcp", "sa_mcp_$(whoami)");
+    expect(command).toBe(
+      "claude mcp add --transport http bot 'http://localhost:8000/mcp' --header 'Authorization: Bearer sa_mcp_$(whoami)'",
+    );
+  });
+
+  it("does not let a backtick in the token be interpreted by the shell", () => {
+    const command = claudeMcpAddCommand("bot", "http://localhost:8000/mcp", "sa_mcp_`whoami`");
+    expect(command).toBe(
+      "claude mcp add --transport http bot 'http://localhost:8000/mcp' --header 'Authorization: Bearer sa_mcp_`whoami`'",
+    );
+  });
+
+  it("keeps a url containing spaces inside one shell argument", () => {
+    const command = claudeMcpAddCommand(
+      "bot",
+      "http://localhost:8000/mcp?note=hello world",
+      "sa_mcp_x",
+    );
+    expect(command).toBe(
+      "claude mcp add --transport http bot 'http://localhost:8000/mcp?note=hello world' --header 'Authorization: Bearer sa_mcp_x'",
     );
   });
 });

@@ -140,7 +140,7 @@ describe("McpAccessCard", () => {
     expect(screen.getByText(/will not be shown again/i)).toBeInTheDocument();
     expect(
       screen.getByText(
-        'claude mcp add --transport http zapier-integration http://localhost:8000/mcp --header "Authorization: Bearer sa_mcp_secret"',
+        "claude mcp add --transport http zapier-integration 'http://localhost:8000/mcp' --header 'Authorization: Bearer sa_mcp_secret'",
       ),
     ).toBeInTheDocument();
     expect(screen.getByText(/"mcpServers"/)).toBeInTheDocument();
