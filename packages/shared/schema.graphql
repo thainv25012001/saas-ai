@@ -38,6 +38,17 @@ type AgentTool {
   isEnabled: Boolean!
 }
 
+type ApiKey {
+  id: UUID!
+  name: String!
+  keyPrefix: String!
+  agentId: UUID!
+  createdAt: DateTime!
+  lastUsedAt: DateTime
+  revokedAt: DateTime
+  createdByName: String
+}
+
 type Conversation {
   id: UUID!
   agentId: UUID!
@@ -84,6 +95,11 @@ input CreatePromptInput {
 input CreatePromptVersionInput {
   systemPrompt: String!
   notes: String = null
+}
+
+type CreatedApiKey {
+  apiKey: ApiKey!
+  token: String!
 }
 
 """Date with time (isoformat)"""
@@ -245,6 +261,10 @@ enum LeadStatus {
   LOST
 }
 
+type McpInfo {
+  exposedToolNames: [String!]!
+}
+
 type Me {
   userId: UUID!
   email: String!
@@ -312,6 +332,8 @@ type Mutation {
   updateEvaluationCase(id: UUID!, input: EvaluationCaseInput!): EvaluationCase!
   deleteEvaluationCase(id: UUID!): Boolean!
   cancelEvaluationRun(id: UUID!): EvaluationRun!
+  createApiKey(agentId: UUID!, name: String!): CreatedApiKey!
+  revokeApiKey(id: UUID!): ApiKey!
 }
 
 type Organization {
@@ -429,6 +451,8 @@ type Query {
   evaluationCases(datasetId: UUID!): [EvaluationCase!]!
   evaluationRuns(datasetId: UUID = null, limit: Int! = 20): [EvaluationRun!]!
   evaluationRun(id: UUID!): EvaluationRun
+  apiKeys(agentId: UUID!): [ApiKey!]!
+  agentMcpInfo(agentId: UUID!): McpInfo!
 }
 
 scalar UUID

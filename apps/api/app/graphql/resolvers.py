@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.agents import schemas as agent_schemas
 from app.agents.service import AgentService
+from app.api_keys.service import ApiKeyService
 from app.conversations.service import ConversationService
 from app.core.errors import AuthenticationError, NotFoundError, format_validation_errors
 from app.core.errors import ValidationError as AppValidationError
@@ -24,10 +25,12 @@ from app.graphql.context import Context
 from app.leads.service import LeadService
 from app.llm.catalog import models_for
 from app.llm.registry import KNOWN_PROVIDERS, provider_is_configured
+from app.mcp.server import MCP_EXPOSED_TOOL_NAMES
 from app.products.importer import ProductImportService
 from app.products.service import ProductService
 from app.prompts import schemas as prompt_schemas
 from app.prompts.service import PromptService
+from app.tools.runtime import resolve_enabled_tool_names
 
 Info = strawberry.Info[Context, None]
 
@@ -121,6 +124,13 @@ def _evaluations(info: Info) -> EvaluationService:
     assert info.context.tenant is not None
     assert info.context.session is not None
     return EvaluationService(info.context.session, info.context.tenant)
+
+
+def _api_keys(info: Info) -> ApiKeyService:
+    _require_tenant(info)
+    assert info.context.tenant is not None
+    assert info.context.session is not None
+    return ApiKeyService(info.context.session, info.context.tenant)
 
 
 @strawberry.type
@@ -415,6 +425,50 @@ class Query:
         except NotFoundError:
             return None
 
+    # -----------------------------------------------------------------
+    # Phase 7 -- MCP (docs/PHASE-7.md §6): API keys and an agent's MCP
+    # surface.
+    # -----------------------------------------------------------------
+
+    @strawberry.field
+    async def api_keys(self, info: Info, agent_id: uuid.UUID) -> list[gql.ApiKey]:
+        """An agent's keys, newest first, revoked included -- see
+        `ApiKeyService.list_for_agent`. Unlike `leads`/`conversations`, a
+        cross-tenant `agent_id` raises `not_found` here rather than
+        returning an empty list -- the service's own ownership check, and
+        this task's brief pins it explicitly rather than following the
+        Important-5 "empty is indistinguishable from not found" convention
+        those two use: a credential list is not a dashboard row a client
+        should ever see as merely empty for someone else's agent.
+        """
+        rows = await _api_keys(info).list_for_agent(agent_id)
+        return [gql.ApiKey.from_model(row) for row in rows]
+
+    @strawberry.field
+    async def agent_mcp_info(self, info: Info, agent_id: uuid.UUID) -> gql.McpInfo:
+        """The dashboard's per-agent MCP panel: granted tools intersected
+        with `MCP_EXPOSED_TOOL_NAMES`, exactly what an MCP client
+        authenticated as one of this agent's keys sees from `tools/list`
+        (`app/mcp/server.py`'s own `_exposed`, duplicated here in miniature
+        rather than imported, since importing it would need a `Principal`
+        this resolver has no reason to construct).
+
+        The ownership check on `agent_id` (`AgentService.get_agent`) runs
+        first, so another organization's agent id is `not_found`, not an
+        empty-shaped `McpInfo` -- unlike `agentTools`/`leads`, which return
+        an empty list for the same case, this query has no existing
+        dashboard convention to reconcile with, and the task brief pins it
+        to `not_found` explicitly.
+        """
+        await _agents(info).get_agent(agent_id)
+        tenant = info.context.tenant
+        session = info.context.session
+        assert tenant is not None
+        assert session is not None
+        granted = await resolve_enabled_tool_names(session, tenant, agent_id)
+        exposed = sorted(name for name in granted if name in MCP_EXPOSED_TOOL_NAMES)
+        return gql.McpInfo(exposed_tool_names=exposed)
+
 
 @strawberry.type
 class Mutation:
@@ -635,3 +689,28 @@ class Mutation:
         `delete_agent`'s convention rather than returning it as-is."""
         run = await _evaluations(info).cancel_run(id)
         return gql.EvaluationRun.from_model(run)
+
+    # -----------------------------------------------------------------
+    # Phase 7 -- MCP (docs/PHASE-7.md §6): API keys.
+    # -----------------------------------------------------------------
+
+    @strawberry.mutation
+    async def create_api_key(self, info: Info, agent_id: uuid.UUID, name: str) -> gql.CreatedApiKey:
+        """No GraphQL `input` type here for `_build` to translate through --
+        the brief's own signature takes `name` as a bare scalar argument, and
+        `ApiKeyService.create` already validates it against
+        `CreateApiKeyInput` itself, raising the app's own `ValidationError`
+        (rendered by `AppErrorExtension` exactly like `_build`'s translation
+        would be) rather than a raw pydantic one. It also checks the
+        owner/admin role itself, raising `PermissionDeniedError` for a
+        member -- see `ApiKeyService._require_privileged`."""
+        created = await _api_keys(info).create(agent_id, name)
+        return gql.CreatedApiKey.from_service(created)
+
+    @strawberry.mutation
+    async def revoke_api_key(self, info: Info, id: uuid.UUID) -> gql.ApiKey:
+        """Idempotent -- see `ApiKeyService.revoke`. Raises `not_found` for a
+        cross-tenant or nonexistent id, matching `delete_agent`'s convention
+        of never silently no-op'ing a write request."""
+        api_key = await _api_keys(info).revoke(id)
+        return gql.ApiKey.from_model(api_key)

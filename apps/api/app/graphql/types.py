@@ -6,9 +6,11 @@ from typing import Any
 
 import strawberry
 
+from app.api_keys.service import CreatedApiKey as CreatedApiKeyResult
 from app.core.errors import AuthenticationError
 from app.db.models import Agent as AgentModel
 from app.db.models import AgentConfig as AgentConfigModel
+from app.db.models import ApiKey as ApiKeyModel
 from app.db.models import Conversation as ConversationModel
 from app.db.models import ConversationMessage as MessageModel
 from app.db.models import Document as DocumentModel
@@ -483,6 +485,85 @@ class AgentTool:
     @classmethod
     def from_pair(cls, tool: ToolModel, is_enabled: bool) -> "AgentTool":
         return cls(id=tool.id, name=tool.name, description=tool.description, is_enabled=is_enabled)
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 -- MCP (docs/PHASE-7.md §6): API keys and an agent's MCP surface.
+# ---------------------------------------------------------------------------
+
+
+@strawberry.type
+class ApiKey:
+    """One credential row for the dashboard's key list (§6). Deliberately has
+    no field for the plaintext secret at all -- `CreatedApiKey.token` is a
+    sibling field on `createApiKey`'s own response type, never on this one,
+    so there is no field for a client to even try asking `apiKeys` for."""
+
+    id: uuid.UUID
+    name: str
+    key_prefix: str
+    agent_id: uuid.UUID
+    created_at: datetime
+    last_used_at: datetime | None
+    revoked_at: datetime | None
+    _created_by: strawberry.Private[uuid.UUID | None]
+
+    @classmethod
+    def from_model(cls, model: ApiKeyModel) -> "ApiKey":
+        return cls(
+            id=model.id,
+            name=model.name,
+            key_prefix=model.key_prefix,
+            agent_id=model.agent_id,
+            created_at=model.created_at,
+            last_used_at=model.last_used_at,
+            revoked_at=model.revoked_at,
+            _created_by=model.created_by,
+        )
+
+    @strawberry.field
+    async def created_by_name(self, info: strawberry.Info[Context, None]) -> str | None:
+        """The creator's full name, batched through a dataloader -- same
+        unauthenticated guard as `Agent.config`. `None` without a query at
+        all when the creator has been deleted (`created_by IS NULL`, `ON
+        DELETE SET NULL`), and `None` after the loader's own lookup when the
+        creator still exists but is no longer a member of this organization
+        -- that lookup is scoped to THIS organization's `memberships`, never
+        an unscoped `users` read, because `users` is a global table with no
+        `organization_id` of its own."""
+        if self._created_by is None:
+            return None
+        if info.context.api_key_creator_loader is None:
+            raise AuthenticationError("authentication required")
+        return await info.context.api_key_creator_loader.load(self._created_by)
+
+
+@strawberry.type
+class CreatedApiKey:
+    """`createApiKey`'s response -- the only place a plaintext token is ever
+    returned (docs/PHASE-7.md §3/§6). It is generated, hashed and stored,
+    and handed back exactly once; no other query or mutation response ever
+    carries it."""
+
+    api_key: ApiKey
+    token: str
+
+    @classmethod
+    def from_service(cls, created: CreatedApiKeyResult) -> "CreatedApiKey":
+        return cls(api_key=ApiKey.from_model(created.api_key), token=created.token)
+
+
+@strawberry.type
+class McpInfo:
+    """An agent's MCP surface (docs/PHASE-7.md §5/§6): its granted tool
+    names intersected with `MCP_EXPOSED_TOOL_NAMES` -- exactly what an MCP
+    client authenticated as one of this agent's keys would see from
+    `tools/list` (`app/mcp/server.py`'s own `_exposed`). `create_lead` can
+    never appear here even if granted to the agent: it is not in
+    `MCP_EXPOSED_TOOL_NAMES` at all, because an MCP call has no conversation
+    for a lead to belong to."""
+
+    exposed_tool_names: list[str]
 
 
 @strawberry.enum

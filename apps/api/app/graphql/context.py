@@ -19,9 +19,11 @@ from app.db.models import (
     EvalCase,
     EvalResult,
     EvalRun,
+    Membership,
     MessageCitation,
     MessageRole,
     PromptVersion,
+    User,
 )
 from app.prompts.service import PromptService
 
@@ -89,6 +91,12 @@ class Context(BaseContext):
         self.prompt_versions_loader: DataLoader[uuid.UUID, list[PromptVersion]] | None = (
             DataLoader(load_fn=self._load_prompt_versions) if session is not None else None
         )
+        # Phase 7 -- MCP (docs/PHASE-7.md §6): `apiKeys { createdByName }`
+        # batched into one query, joined through this organization's own
+        # memberships rather than an unscoped `users` read.
+        self.api_key_creator_loader: DataLoader[uuid.UUID, str | None] | None = (
+            DataLoader(load_fn=self._load_api_key_creator_names) if session is not None else None
+        )
 
     async def _load_prompt_versions(
         self, prompt_ids: Sequence[uuid.UUID]
@@ -100,6 +108,34 @@ class Context(BaseContext):
         assert self.tenant is not None
         by_prompt = await PromptService(self.session, self.tenant).versions_by_prompt(prompt_ids)
         return [by_prompt[prompt_id] for prompt_id in prompt_ids]
+
+    async def _load_api_key_creator_names(self, user_ids: Sequence[uuid.UUID]) -> list[str | None]:
+        """Batches `apiKeys { createdByName }` into one query instead of one
+        per key.
+
+        `users` has no `organization_id` -- it is a genuinely global table
+        -- so this cannot be `select(User).where(User.id.in_(...))` the way
+        every other loader in this file reads its own tenant-owned table:
+        that would read a user by id regardless of whether they belong to
+        this organization at all. Joining through `memberships`, filtered to
+        THIS organization, is what keeps the read tenant-scoped: a creator
+        who has since left the organization (or, in principle, a stale
+        `created_by` pointing outside it) resolves to `None` here, exactly
+        like one who was deleted (`created_by IS NULL`, checked before this
+        loader is ever called -- see `ApiKey.created_by_name`).
+        """
+        assert self.session is not None
+        assert self.tenant is not None
+        result = await self.session.execute(
+            select(Membership.user_id, User.full_name)
+            .join(User, User.id == Membership.user_id)
+            .where(
+                Membership.user_id.in_(list(user_ids)),
+                Membership.organization_id == self.tenant.organization_id,
+            )
+        )
+        by_user = {user_id: full_name for user_id, full_name in result.all()}
+        return [by_user.get(user_id) for user_id in user_ids]
 
     async def _load_messages(
         self, conversation_ids: Sequence[uuid.UUID]
