@@ -33,11 +33,16 @@ class ToolContext(BaseModel):
 
     organization_id: uuid.UUID
     agent_id: uuid.UUID
-    conversation_id: uuid.UUID
+    #: `None` over MCP (Phase 7): an MCP call has no conversation at all, per
+    #: `docs/PHASE-7.md` §5. Every chat-turn caller still supplies a real id
+    #: (`app/chat/service.py`'s `ChatService.send` always has a
+    #: `conversation.id` by the time it builds a `ToolContext`) -- this is
+    #: optional for the MCP caller, not for chat.
+    conversation_id: uuid.UUID | None = None
     request_id: str
     visitor_id: str | None = None
 
-    def log_fields(self) -> dict[str, str]:
+    def log_fields(self) -> dict[str, str | None]:
         """Correlation fields for every tool-layer log line (whole-branch
         review, Minor 7).
 
@@ -51,6 +56,9 @@ class ToolContext(BaseModel):
         `app/chat/service.py` cannot drift into two dialects of the same
         four fields. Stringified ids, matching the dialect already in use.
 
+        `conversation_id` emits `None` (not the string `"None"`) when this
+        context has none, per `docs/PHASE-7.md` §5's MCP caller.
+
         `visitor_id` is deliberately omitted: it is caller-supplied and
         optional, so it is neither a reliable key nor something to put in
         every log line by default.
@@ -58,7 +66,9 @@ class ToolContext(BaseModel):
         return {
             "organization_id": str(self.organization_id),
             "agent_id": str(self.agent_id),
-            "conversation_id": str(self.conversation_id),
+            "conversation_id": str(self.conversation_id)
+            if self.conversation_id is not None
+            else None,
             "request_id": self.request_id,
         }
 
@@ -78,16 +88,16 @@ class ToolResult(BaseModel):
 
     `duration_ms` is `None` from every tool's own `execute` -- no tool body
     times itself. It is filled in by whatever dispatches the call
-    (`app/chat/service.py`'s `_LockedSessionTool`, which wraps each call in
+    (`app/tools/runtime.py`'s `LockedSessionTool`, which wraps each call in
     an `asyncio.Lock` -- every Phase 4 builtin shares one `AsyncSession` per
     turn, which is not safe for concurrent use, so calls serialise on that
     lock rather than each opening a session of its own -- and already
     brackets the call in a `time.monotonic()` pair to do it) and persisted
     onto `MessageToolCall.duration_ms`, §3.6's declared column for it. It
     measures the call's full wall-clock time, including any wait for a
-    sibling call already holding the lock -- see `_LockedSessionTool`'s own
+    sibling call already holding the lock -- see `LockedSessionTool`'s own
     docstring for why that wait is deliberately still counted here even
-    though a *separate* budget (`_LockedSessionTool._own_timeout_seconds`)
+    though a *separate* budget (`LockedSessionTool._own_timeout_seconds`)
     is what decides whether the call is treated as having timed out.
     """
 

@@ -265,14 +265,15 @@ class ToolRegistry:
             )
             # The number is deliberately NOT in the message. `tool.
             # timeout_seconds` here is the OUTER bound, which
-            # `_LockedSessionTool` widens by `_LOCK_WAIT_BUDGET_SECONDS` to
-            # allow for queueing -- so this path used to tell the model (and
-            # whoever read the transcript) that a tool "timed out after 40.0s"
-            # against a configured budget of 10s, a figure that appears in no
-            # configuration file anywhere. This path only fires when something
-            # is structurally wrong (a leaked lock, a hung sibling), which is
-            # exactly when a misleading number costs the most diagnostic time.
-            # The real figure is on the log line above, where it belongs.
+            # `app.tools.runtime.LockedSessionTool` widens by its lock-wait
+            # budget to allow for queueing -- so this path used to tell the
+            # model (and whoever read the transcript) that a tool "timed out
+            # after 40.0s" against a configured budget of 10s, a figure that
+            # appears in no configuration file anywhere. This path only fires
+            # when something is structurally wrong (a leaked lock, a hung
+            # sibling), which is exactly when a misleading number costs the
+            # most diagnostic time. The real figure is on the log line above,
+            # where it belongs.
             return ToolResult(
                 content=f"'{call.name}' did not finish in time and was stopped.", is_error=True
             )

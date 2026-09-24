@@ -61,7 +61,7 @@ async def rolled_back_tenant_session(tenant: TenantContext) -> AsyncIterator[Asy
     caller that flushes repeatedly mid-block (`ChatService.send` does) never
     risks the `set_config` value being discarded by an early commit. Tools
     inside `send` additionally open their own `session.begin_nested()`
-    savepoints (`app/chat/service.py::_LockedSessionTool._run_bounded`) --
+    savepoints (`app/tools/runtime.py::LockedSessionTool._run_bounded`) --
     those nest inside this outer transaction exactly as they would inside
     `tenant_session`'s, and rolling the outer transaction back discards them
     regardless of whether any one of them was itself released or rolled
