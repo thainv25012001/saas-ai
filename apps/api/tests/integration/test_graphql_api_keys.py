@@ -189,11 +189,11 @@ async def test_api_key_type_has_no_token_field(api_client):
 
 
 async def test_create_api_key_for_a_cross_tenant_agent_is_not_found(api_client):
-    owner_token = await _register(api_client, "create-cross-a@example.com", "Org A")
+    owner_token = await _register(api_client, "create-cross-a@example.com", "Keys Motors A")
     owner_org_id = await _organization_id(api_client, owner_token)
     agent_id = await _agent(owner_org_id)
 
-    other_token = await _register(api_client, "create-cross-b@example.com", "Org B")
+    other_token = await _register(api_client, "create-cross-b@example.com", "Keys Motors B")
 
     response = await graphql(
         api_client,
@@ -254,11 +254,11 @@ async def test_api_keys_lists_newest_first_without_a_token(api_client):
 
 
 async def test_api_keys_for_a_cross_tenant_agent_is_not_found(api_client):
-    owner_token = await _register(api_client, "list-cross-a@example.com", "Org A")
+    owner_token = await _register(api_client, "list-cross-a@example.com", "Keys Motors A")
     owner_org_id = await _organization_id(api_client, owner_token)
     agent_id = await _agent(owner_org_id)
 
-    other_token = await _register(api_client, "list-cross-b@example.com", "Org B")
+    other_token = await _register(api_client, "list-cross-b@example.com", "Keys Motors B")
 
     response = await graphql(
         api_client, API_KEYS_QUERY, {"agentId": str(agent_id)}, _auth(other_token)
@@ -361,12 +361,12 @@ async def test_revoke_api_key_is_idempotent(api_client):
 
 
 async def test_revoke_api_key_for_a_cross_tenant_key_is_not_found(api_client):
-    owner_token = await _register(api_client, "revoke-cross-a@example.com", "Org A")
+    owner_token = await _register(api_client, "revoke-cross-a@example.com", "Keys Motors A")
     owner_org_id = await _organization_id(api_client, owner_token)
     agent_id = await _agent(owner_org_id)
     key_id = await _create_key_directly(owner_org_id, agent_id, "MCP key")
 
-    other_token = await _register(api_client, "revoke-cross-b@example.com", "Org B")
+    other_token = await _register(api_client, "revoke-cross-b@example.com", "Keys Motors B")
 
     response = await graphql(
         api_client, REVOKE_KEY_MUTATION, {"id": str(key_id)}, _auth(other_token)
@@ -486,11 +486,11 @@ async def test_agent_mcp_info_reflects_a_tool_being_disabled(api_client):
 async def test_agent_mcp_info_for_another_organizations_agent_is_not_found(api_client):
     """Ownership check first -- unlike `agentTools`/`leads`, a cross-tenant
     `agentId` here must be a GraphQL error, not an empty-shaped result."""
-    owner_token = await _register(api_client, "mcp-info-cross-a@example.com", "Org A")
+    owner_token = await _register(api_client, "mcp-info-cross-a@example.com", "Keys Motors A")
     owner_org_id = await _organization_id(api_client, owner_token)
     agent_id = await _agent(owner_org_id)
 
-    other_token = await _register(api_client, "mcp-info-cross-b@example.com", "Org B")
+    other_token = await _register(api_client, "mcp-info-cross-b@example.com", "Keys Motors B")
 
     response = await graphql(
         api_client, MCP_INFO_QUERY, {"agentId": str(agent_id)}, _auth(other_token)

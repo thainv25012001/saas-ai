@@ -23,7 +23,8 @@ DISPLAY_PREFIX_LENGTH = 15
 # padding: ceil(32 * 8 / 6) = 43 characters, alphabet [A-Za-z0-9_-].
 _TOKEN_BODY_BYTES = 32
 _TOKEN_BODY_LENGTH = 43
-_TOKEN_RE = re.compile(rf"^{re.escape(TOKEN_PREFIX)}[A-Za-z0-9_-]{{{_TOKEN_BODY_LENGTH}}}$")
+# Used with `fullmatch`: `match` plus `$` would accept a trailing newline.
+_TOKEN_RE = re.compile(rf"{re.escape(TOKEN_PREFIX)}[A-Za-z0-9_-]{{{_TOKEN_BODY_LENGTH}}}")
 
 
 def generate_token() -> str:
@@ -47,4 +48,4 @@ def looks_like_token(value: str) -> bool:
     `resolve_api_key` never spends a query on something that plainly is not
     one of our tokens (and, per docs/PHASE-7.md §3, the lookup function
     would return nothing for it anyway)."""
-    return _TOKEN_RE.match(value) is not None
+    return _TOKEN_RE.fullmatch(value) is not None

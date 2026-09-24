@@ -476,6 +476,35 @@ async def test_a_foreign_host_header_is_rejected_by_the_transport(
     assert "tools" not in response.text
 
 
+async def test_a_bare_public_host_is_admitted_by_its_wildcard_port_entry(
+    tenant_a: TenantContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The documented production form, `MCP_ALLOWED_HOSTS=api.example.com:*`,
+    must admit what an HTTPS client actually sends: a bare
+    `Host: api.example.com`. The SDK's own `:*` match requires a port, so
+    this relies on the setting's bare-host expansion (Ruling R5)."""
+    import app.main as main
+    from app.core.config import Settings
+
+    # Exactly what `MCP_ALLOWED_HOSTS=api.example.com:*` parses to, handed to
+    # this one app only -- clearing `get_settings`' cache instead would leak
+    # the override into every later test's app.
+    settings = Settings(mcp_allowed_hosts="api.example.com:*")  # type: ignore[call-arg]
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    app = main.create_app()
+    _agent_id, _key_id, token = await _new_agent_with_key(tenant_a)
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="https://api.example.com"
+        ) as client:
+            for host in ("api.example.com", "api.example.com:443"):
+                response = await _rpc(client, token, "tools/list", extra_headers={"Host": host})
+                assert response.status_code == 200, (host, response.text)
+                assert "tools" in response.json()["result"]
+            foreign = await _rpc(client, token, "tools/list", extra_headers={"Host": "localhost"})
+            assert foreign.status_code == 421
+
+
 # ---------------------------------------------------------------------------
 # Rate limit, logging, and the no-uncaught-exception rule
 # ---------------------------------------------------------------------------
@@ -519,6 +548,39 @@ async def test_every_call_logs_mcp_tool_call_without_arguments_or_results(
     assert entry["request_id"]
     assert "customer secret question" not in str(entries)
     assert token not in str(entries)
+
+
+async def test_invalid_arguments_never_log_the_submitted_input(
+    mcp_client: AsyncClient, tenant_a: TenantContext
+) -> None:
+    """§7: a missing-field payload's other fields -- a customer's question --
+    must not reach a log line through pydantic's `input` in
+    `tool_call_invalid_args` (Ruling R6)."""
+    _agent_id, _key_id, token = await _new_agent_with_key(tenant_a)
+    sentinel = "SENTINEL-customer-secret-7f3a"
+    with capture_logs() as entries:
+        # `product_id` is required and missing; the sentinel rides beside it.
+        payload = await _call(mcp_client, token, "get_product", {"note": sentinel})
+
+    assert payload["result"]["isError"] is True
+    assert any(e["event"] == "tool_call_invalid_args" for e in entries)
+    assert sentinel not in str(entries)
+
+
+async def test_an_overlong_tool_name_is_truncated_in_the_error_and_the_log(
+    mcp_client: AsyncClient, tenant_a: TenantContext
+) -> None:
+    """M4: a caller-chosen name is unbounded; neither the -32602 message nor
+    the `mcp_tool_call` log line may echo more than 64 characters of it."""
+    _agent_id, _key_id, token = await _new_agent_with_key(tenant_a)
+    name = "x" * 64 + "TAIL-NOT-ECHOED" + "y" * 5000
+    with capture_logs() as entries:
+        payload = await _call(mcp_client, token, name)
+
+    assert payload["error"] == {"code": -32602, "message": f"Unknown tool: {'x' * 64}"}
+    [entry] = [e for e in entries if e["event"] == "mcp_tool_call"]
+    assert entry["tool_name"] == "x" * 64
+    assert "TAIL-NOT-ECHOED" not in str(entries)
 
 
 async def test_the_request_id_header_correlates_the_tool_call_log(

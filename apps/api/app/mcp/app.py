@@ -19,8 +19,35 @@ from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.types import ASGIApp
 
 from app.core.config import Settings
+from app.core.logging import get_logger
 from app.mcp.auth import ApiKeyTokenVerifier, RequireApiKey
 from app.mcp.server import build_mcp_server
+
+logger = get_logger(__name__)
+
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+
+def _host_without_port(entry: str) -> str:
+    if entry.startswith("["):  # `[::1]` or `[::1]:8000`
+        return entry[: entry.find("]") + 1] if "]" in entry else entry
+    if entry.count(":") != 1:  # no port, or an unbracketed IPv6 address
+        return entry
+    return entry.rsplit(":", 1)[0]
+
+
+def warn_if_mcp_hosts_loopback_only(settings: Settings) -> None:
+    """A production deploy that never set `MCP_ALLOWED_HOSTS` boots fine and
+    then answers every `/mcp` request 421 -- the default admits loopback
+    only. Nothing else would say so, hence a startup warning."""
+    if settings.environment != "production":
+        return
+    if all(_host_without_port(host) in _LOOPBACK_HOSTS for host in settings.mcp_allowed_hosts):
+        logger.warning(
+            "mcp_allowed_hosts_loopback_only",
+            allowed_hosts=list(settings.mcp_allowed_hosts),
+            hint="set MCP_ALLOWED_HOSTS to the API's public host, e.g. api.example.com:*",
+        )
 
 
 def build_mcp_asgi(settings: Settings) -> tuple[ASGIApp, StreamableHTTPSessionManager]:
@@ -29,6 +56,7 @@ def build_mcp_asgi(settings: Settings) -> tuple[ASGIApp, StreamableHTTPSessionMa
     Auth wraps only this app, so it applies to `/mcp` and nothing else: the
     rest of the API keeps its own JWT auth untouched.
     """
+    warn_if_mcp_hosts_loopback_only(settings)
     session_manager = StreamableHTTPSessionManager(
         app=build_mcp_server(),
         stateless=True,

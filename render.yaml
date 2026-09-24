@@ -29,6 +29,14 @@ services:
       # The deployed Vercel origin(s), comma separated.
       - key: CORS_ORIGINS
         sync: false
+      # The API's own public hostname, which `/mcp` checks the Host header
+      # against (421 otherwise) -- the Render form is
+      # `saas-ai-api.onrender.com:*` (or your custom domain). `host:*` admits
+      # any port *and* the bare host an HTTPS client sends. Left unset, the
+      # loopback-only default refuses every real MCP request, and startup
+      # logs `mcp_allowed_hosts_loopback_only`. See docs/DEPLOYMENT.md.
+      - key: MCP_ALLOWED_HOSTS
+        sync: false
       - key: ENVIRONMENT
         value: production
       - key: LOG_LEVEL

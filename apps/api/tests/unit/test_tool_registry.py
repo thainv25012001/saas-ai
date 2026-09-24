@@ -12,6 +12,7 @@ import uuid
 import pytest
 from anyio import fail_after
 from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field
+from structlog.testing import capture_logs
 
 from app.llm.types import ToolUseBlock
 from app.tools.base import AgentTool, ToolContext, ToolResult
@@ -213,6 +214,24 @@ async def test_invalid_args_are_an_error_result_naming_the_field() -> None:
 
     assert result.is_error is True
     assert "city" in result.content
+
+
+async def test_invalid_args_log_the_errors_without_the_submitted_input() -> None:
+    """docs/PHASE-7.md §7: pydantic's error dicts carry `input` -- here the
+    whole arguments dict, customer text included -- and `url`. Neither may
+    reach `tool_call_invalid_args` (Ruling R6)."""
+    registry = _registry(_EchoTool())
+    sentinel = "SENTINEL-customer-secret-9b1c"
+    call = ToolUseBlock(id="t1", name="echo", input={"country": sentinel})  # missing "city"
+
+    with capture_logs() as entries:
+        result = await registry.execute(call, _ctx())
+
+    assert result.is_error is True
+    [entry] = [e for e in entries if e["event"] == "tool_call_invalid_args"]
+    assert entry["errors"][0]["loc"] == ("city",)
+    assert all("input" not in error and "url" not in error for error in entry["errors"])
+    assert sentinel not in str(entries)
 
 
 async def test_a_hallucinated_tool_name_is_an_error_result_not_a_crash() -> None:

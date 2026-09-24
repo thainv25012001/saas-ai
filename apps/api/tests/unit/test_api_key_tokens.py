@@ -76,3 +76,9 @@ def test_looks_like_token_rejects_empty_string():
 
 def test_looks_like_token_rejects_none_shaped_near_miss():
     assert looks_like_token("sa_mcp_") is False
+
+
+def test_looks_like_token_rejects_a_trailing_newline():
+    """`re.match` with `$` accepts a single trailing newline -- `$` matches
+    just before one -- so `fullmatch` is what pins "exactly the token"."""
+    assert looks_like_token(generate_token() + "\n") is False

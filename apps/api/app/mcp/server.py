@@ -59,6 +59,10 @@ _RATE_LIMIT_WINDOW_SECONDS = 60
 _SERVER_NAME = "ai-sales-agent"
 _SERVER_VERSION = "0.1.0"
 
+#: A caller-chosen tool name is echoed (log line, -32602 message) only up
+#: to this many characters: nothing bounds it otherwise.
+_TOOL_NAME_ECHO_LIMIT = 64
+
 _RATE_LIMITED_MESSAGE = "Rate limit exceeded; retry later."
 _GENERIC_CALL_FAILURE = "The tool call failed unexpectedly."
 _GENERIC_LIST_FAILURE = "Internal error"
@@ -105,6 +109,10 @@ def _principal(ctx: ServerRequestContext[Any, Any]) -> _Principal:
         raise MCPError(types.INVALID_REQUEST, "Authentication required")
     request_id = request.scope.get(REQUEST_ID_SCOPE_KEY) or str(uuid.uuid4())
     return _Principal(user.access_token.resolved, str(request_id))
+
+
+def _echoable(name: str) -> str:
+    return name[:_TOOL_NAME_ECHO_LIMIT]
 
 
 def _exposed(granted: list[str]) -> list[str]:
@@ -177,7 +185,7 @@ async def _on_call_tool(
         logger.exception(
             "mcp_handler_failed",
             method="tools/call",
-            tool_name=params.name,
+            tool_name=_echoable(params.name),
             **principal.log_fields(),
         )
         return _error_result(_GENERIC_CALL_FAILURE)
@@ -185,7 +193,7 @@ async def _on_call_tool(
         # Never arguments or results (§7): they can carry customer questions.
         logger.info(
             "mcp_tool_call",
-            tool_name=params.name,
+            tool_name=_echoable(params.name),
             is_error=is_error,
             duration_ms=int((time.monotonic() - started) * 1000),
             **principal.log_fields(),
@@ -214,7 +222,7 @@ async def _call_tool(
             # One wording for "exists nowhere", "exists but not granted" and
             # "granted but not exposed" (`create_lead`): a caller learns
             # nothing about what tools exist beyond its own list.
-            raise MCPError(types.INVALID_PARAMS, f"Unknown tool: {params.name}")
+            raise MCPError(types.INVALID_PARAMS, f"Unknown tool: {_echoable(params.name)}")
 
         registry = build_granted_registry(session, names)
         # Invalid arguments come back from `registry.execute` as its

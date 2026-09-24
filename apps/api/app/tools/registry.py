@@ -244,7 +244,9 @@ class ToolRegistry:
             logger.info(
                 "tool_call_invalid_args",
                 tool_name=call.name,
-                errors=exc.errors(),
+                # Never `input` (§7): for a missing field it is the whole
+                # arguments dict, customer text included. `url` is noise.
+                errors=exc.errors(include_input=False, include_url=False),
                 **ctx.log_fields(),
             )
             return ToolResult(
