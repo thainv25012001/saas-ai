@@ -1,4 +1,5 @@
 from app.db.models.agent import Agent, AgentConfig, AgentStatus
+from app.db.models.api_key import ApiKey
 from app.db.models.citation import MessageCitation
 from app.db.models.conversation import (
     Conversation,
@@ -42,6 +43,7 @@ __all__ = [
     "AgentConfig",
     "AgentStatus",
     "AgentToolLink",
+    "ApiKey",
     "Conversation",
     "ConversationChannel",
     "ConversationMessage",

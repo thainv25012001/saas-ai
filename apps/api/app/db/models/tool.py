@@ -23,9 +23,9 @@ class Tool(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     `config`; this row is only what makes it discoverable and toggleable.
 
     **`config` is reserved, not yet read.** Nothing in `app/` reads it as of
-    Phase 4: `ChatService._build_registry` constructs each builtin from its
-    Python class alone. It exists for the `http`/`mcp` tool types this
-    schema declares and Phase 4 ships no adapter for (`docs/ARCHITECTURE.md`
+    Phase 4: `app.tools.runtime.build_granted_registry` constructs each
+    builtin from its Python class alone. It exists for the `http`/`mcp` tool
+    types this schema declares and Phase 4 ships no adapter for (`docs/ARCHITECTURE.md`
     §8 -- MCP is Phase 6), and for per-organization builtin settings, which
     is Phase 5 at the earliest. Recorded plainly here rather than left to be
     inferred, per `docs/PHASE-4.md`'s not-delivered section.

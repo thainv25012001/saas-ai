@@ -69,6 +69,66 @@ def test_cors_origins_single_value_without_comma_yields_one_element_list(monkeyp
         get_settings.cache_clear()
 
 
+def test_mcp_allowed_hosts_parses_comma_separated_real_env_var(monkeypatch):
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "api.example.com, localhost:*")
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+        # `localhost:*` also admits a bare `localhost` (see the next tests).
+        assert settings.mcp_allowed_hosts == ["api.example.com", "localhost:*", "localhost"]
+    finally:
+        get_settings.cache_clear()
+
+
+def test_mcp_allowed_hosts_defaults_to_loopback_any_port_and_bare(monkeypatch):
+    monkeypatch.delenv("MCP_ALLOWED_HOSTS", raising=False)
+    from app.core.config import Settings
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.mcp_allowed_hosts == ["localhost:*", "localhost", "127.0.0.1:*", "127.0.0.1"]
+
+
+def test_a_wildcard_port_entry_also_admits_the_bare_host(monkeypatch):
+    """The SDK's `host:*` matches only a Host header that carries a port
+    (`mcp/server/transport_security.py`), but an HTTPS client on 443 sends a
+    bare `api.example.com`. Without this expansion the documented
+    `MCP_ALLOWED_HOSTS=api.example.com:*` answers every real request 421."""
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "api.example.com:*")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().mcp_allowed_hosts == ["api.example.com:*", "api.example.com"]
+    finally:
+        get_settings.cache_clear()
+
+
+def test_the_bare_host_expansion_dedupes_and_keeps_order(monkeypatch):
+    monkeypatch.setenv(
+        "MCP_ALLOWED_HOSTS", "api.example.com, api.example.com:*, other.test:8443, api.example.com"
+    )
+    get_settings.cache_clear()
+    try:
+        assert get_settings().mcp_allowed_hosts == [
+            "api.example.com",
+            "api.example.com:*",
+            "other.test:8443",
+        ]
+    finally:
+        get_settings.cache_clear()
+
+
+def test_a_list_value_is_expanded_too():
+    from app.core.config import Settings
+
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        database_url="postgresql+asyncpg://u:p@h/d",
+        migration_database_url="postgresql+asyncpg://u:p@h/d",
+        jwt_secret="x",
+        mcp_allowed_hosts=["api.example.com:*"],
+    )
+    assert settings.mcp_allowed_hosts == ["api.example.com:*", "api.example.com"]
+
+
 class TestNormalizeDatabaseUrl:
     """Neon (like Render, Heroku and Supabase) hands out libpq-shaped URLs:
     a `postgresql://` scheme with no driver, and `sslmode`/`channel_binding`

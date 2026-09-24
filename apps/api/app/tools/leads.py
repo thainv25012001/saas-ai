@@ -46,6 +46,21 @@ class CreateLeadTool(AgentTool):
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolResult:
         assert isinstance(args, CreateLeadInput)
 
+        # Checked before anything else -- no DB work, no rate-limit call --
+        # per `docs/PHASE-7.md` §5: `create_lead` is not exposed over MCP at
+        # all (a lead belongs to a conversation, and an MCP call has none),
+        # and this is the second line behind that exclusion, for whatever
+        # reaches this `execute` anyway (a future caller, a test, a bug in
+        # the exclusion list). `ctx.conversation_id` is `None` only for a
+        # caller with no conversation; every chat turn always supplies one
+        # (`ChatService.send` never builds a `ToolContext` without a real
+        # `conversation.id`).
+        if ctx.conversation_id is None:
+            return ToolResult(
+                content="create_lead needs a conversation and is not available here.",
+                is_error=True,
+            )
+
         # Checked first, and outside the savepoint below: a call rejected
         # here never touches the database, so there is nothing yet for a
         # savepoint to protect. §7.2/§7.3: exceeding the limit must be a

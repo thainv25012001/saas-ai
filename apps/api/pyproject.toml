@@ -55,6 +55,7 @@ dependencies = [
     # the downloadable import sample is written as one
     # (app/products/import_template.py).
     "openpyxl>=3.1",
+    "mcp>=2.2,<3",
 ]
 
 [dependency-groups]

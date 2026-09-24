@@ -560,6 +560,88 @@ reuse `chat/ToolCall` rather than a second renderer. `ResultsTable.test.tsx`
 pins it with a `<script>` payload *and* a `**bold**` payload in every one of
 those fields, asserting no `script` and no `strong` element exists.
 
+## A one-time secret reveal (Phase 7 Task 5)
+
+`McpAccessCard`
+([`components/agents/McpAccessCard.tsx`](../apps/web/src/components/agents/McpAccessCard.tsx))
+is the first place this app ever shows a plaintext secret, and the only
+place it shows one *at all* — `createApiKey`'s `token` is never returned by
+any other query. Two rules follow from that:
+
+- **The token lives in exactly one `useState`, inside the card, and nowhere
+  else.** The page owns the query and both mutations, same as every other
+  card here (`AgentToolsCard` is the reference), but `onCreate` *returns*
+  the created `{name, token}` to the card instead of the page holding it in
+  its own state — so there is only ever one place in the component tree with
+  a reference to it, and dismissing the reveal (`handleDismiss`) is the only
+  code path that can ever clear it. A page-level `useState` would work too,
+  but would leave the token alive across whatever else the page re-renders
+  for, for no reason.
+- **Dismissing is the only way it goes away — never a timeout.** A timed
+  auto-hide would either fire while someone is still mid-copy or leave it on
+  screen longer than the "shown once" framing promises; a manual
+  acknowledgement ("Saved it — dismiss") is honest about what "once" means
+  and doesn't need a timer to clean up.
+
+Two copy-ready snippets sit next to the token, built by
+[`lib/mcp.ts`](../apps/web/src/lib/mcp.ts) — a `claude mcp add` command and
+the equivalent `mcpServers` JSON block — both keyed on the *key's own name*,
+slugified to `[a-z0-9-]` (`slugifyMcpName`) because it becomes a bare shell
+argument in one snippet and a JSON object key in the other; unslugged
+punctuation in a key name someone typed for humans would otherwise land
+somewhere it can break both. The command snippet does not stop at slugging
+the name: `url` and the whole `Authorization: Bearer <token>` header value
+are each wrapped in POSIX single quotes by a small `shellQuote` helper (the
+standard `'` → `'\''` escape), so the command is one correctly quoted
+argument regardless of what characters a configured url or a token ever
+contains — not merely safe today because a token's alphabet and a
+deployment's url happen to be tame. `mcpJsonConfig` builds its value with
+`JSON.stringify`, never string interpolation, so a token or url containing a
+quote still produces valid JSON. `lib/mcp.ts` also carries the app's first
+`copyToClipboard`: `navigator.clipboard` does not exist over plain HTTP or in
+some embedded webviews, and `writeText` can itself reject, so every copy
+button is prepared to say "copy it by hand" instead of silently doing
+nothing.
+
+The key's own `name` is customer-supplied text, so it is rendered as a plain
+text child in the key list exactly like every other untrusted field this
+document already tracks (`Untrusted text, beyond citations`, above) — it is
+never used to build markup, only as data into `slugifyMcpName` and
+`JSON.stringify`.
+
+The card follows `AgentToolsCard`'s enable/disable-button precedent for
+another control-less state: a member sees the endpoint, the exposed tools
+and the key list, but the create form and every row's Revoke button are
+gone entirely rather than present-and-disabled, driven by `user.role` from
+`lib/auth.tsx` (`owner`/`admin` only, the same values `ApiKeyService` checks
+server-side). If a client ever manages to call `createApiKey`/`revokeApiKey`
+without this role — a stale session, a direct API call — the resulting
+`PermissionDeniedError` still surfaces through the ordinary `createError`/
+`revokeError` prop and `firstGraphQLError`, the same path any other
+mutation's failure takes: the UI hides the control, but the server's answer
+is never assumed.
+
+Toggling a tool on the Tools card changes what this card should show next:
+`AgentDetailPage`'s `onToggleTool` refetches `agentMcpInfo` network-only
+right alongside its existing `refetchTools` call, rather than the MCP card
+polling or the two cards sharing a cache key — one page, one place that
+knows a toggle just happened, telling both queries to catch up.
+
+The JSON snippet is labelled "`.mcp.json` (Claude Code, Cursor and other
+HTTP-capable clients)", not "for Claude Desktop": its `{"type": "http", url,
+headers}` shape is the `.mcp.json` format, and Claude Desktop's config file
+does not take a remote HTTP server with headers. A label that names a client
+the snippet does not work in is a support ticket waiting to happen.
+
+When the agent's *saved* status is DISABLED, the card opens with a `warn`
+Alert — "This agent is disabled, so its keys are refused." — because `/mcp`
+answers every one of its keys 401 until it is re-enabled, and a key list
+that looks healthy would otherwise leave the failure unexplained. It keys
+off the saved `agent.status`, not the settings form's unsaved selection. The
+endpoint is built by `mcpEndpointUrl`, which strips a trailing slash from
+`NEXT_PUBLIC_API_URL` so a configured `https://api.example.com/` never shows
+`//mcp`.
+
 ## Adding a component
 
 1. Does a primitive already do it? Extend that one instead — a second thing

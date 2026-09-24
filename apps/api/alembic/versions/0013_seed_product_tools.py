@@ -16,7 +16,7 @@ tested, correct tool code that no agent could ever reach, because the
 `tools` rows existed in no migration, no seed and no API. This migration is
 one of the three required places for both new tools (the other two:
 `app/db/builtin_tools.DEFAULT_ENABLED_TOOL_NAMES`, which this migration's
-own backfill statement reads, and `app/chat/service._BUILTIN_TOOL_CLASSES`,
+own backfill statement reads, and `app/tools/runtime.BUILTIN_TOOL_CLASSES`,
 which is Python-only and cannot be expressed in a migration at all -- see
 that module for the third leg). Seeding the `tools` rows without also
 updating `DEFAULT_ENABLED_TOOL_NAMES` would repeat Phase 4's mistake in a

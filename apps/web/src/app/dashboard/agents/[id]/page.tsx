@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useMutation, useQuery } from "urql";
 import { Alert } from "@/components/ui/Alert";
 import { AgentToolsCard } from "@/components/agents/AgentToolsCard";
+import { McpAccessCard } from "@/components/agents/McpAccessCard";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonLink } from "@/components/ui/Button";
 import { Card, CardBody, CardFooter, CardHeader } from "@/components/ui/Card";
@@ -15,19 +16,31 @@ import { PageHeader } from "@/components/ui/PageHeader";
 import { LoadingState } from "@/components/ui/Spinner";
 import {
   AgentDocument,
+  AgentMcpInfoDocument,
   AgentStatus,
   AgentToolsDocument,
+  ApiKeysDocument,
   ConfiguredProvidersDocument,
+  CreateApiKeyDocument,
   DeleteAgentDocument,
   ProviderModelsDocument,
+  RevokeApiKeyDocument,
   SetAgentToolEnabledDocument,
   UpdateAgentConfigDocument,
   UpdateAgentDocument,
 } from "@/graphql/generated";
 import { agentStatusLabel, agentStatusTone } from "@/lib/agent-status";
+import { API_URL } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { mcpEndpointUrl } from "@/lib/mcp";
 import { editableProviders, modelFieldHelp, providerLabel } from "@/lib/providers";
 import { firstGraphQLError } from "@/lib/graphql-errors";
+
+/** Owner and admin are the only roles allowed to create or revoke a key
+ * (docs/PHASE-7.md §6) -- the values the API's `/api/v1/auth/me` actually
+ * sends (`MembershipRole.value`, e.g. "owner"), not the upper-cased strings
+ * GraphQL enums use elsewhere in this file. */
+const KEY_MANAGER_ROLES = new Set(["owner", "admin"]);
 
 const STATUSES: AgentStatus[] = ["DRAFT", "ACTIVE", "DISABLED"];
 
@@ -58,6 +71,27 @@ export default function AgentDetailPage({
   const [, setAgentToolEnabled] = useMutation(SetAgentToolEnabledDocument);
   const [togglingToolId, setTogglingToolId] = useState<string | null>(null);
   const [toolsActionError, setToolsActionError] = useState<string | null>(null);
+
+  // Phase 7 -- MCP (docs/PHASE-7.md §6): the agent's exposed-tools view must
+  // stay correct after a Tools card toggle, so it refetches network-only
+  // right alongside `refetchTools` in `onToggleTool` below rather than
+  // relying on urql's cache to notice a mutation on an unrelated field.
+  const [mcpInfoResult, refetchMcpInfo] = useQuery({
+    query: AgentMcpInfoDocument,
+    variables: { agentId: id },
+    pause: loading || !user,
+  });
+  const [keysResult, refetchKeys] = useQuery({
+    query: ApiKeysDocument,
+    variables: { agentId: id },
+    pause: loading || !user,
+  });
+  const [, createApiKey] = useMutation(CreateApiKeyDocument);
+  const [, revokeApiKey] = useMutation(RevokeApiKeyDocument);
+  const [creatingKey, setCreatingKey] = useState(false);
+  const [createKeyError, setCreateKeyError] = useState<string | null>(null);
+  const [revokingKeyId, setRevokingKeyId] = useState<string | null>(null);
+  const [revokeKeyError, setRevokeKeyError] = useState<string | null>(null);
 
   const agent = data?.agent;
 
@@ -156,9 +190,45 @@ export default function AgentDetailPage({
         setToolsActionError(firstGraphQLError(result.error));
       } else {
         refetchTools({ requestPolicy: "network-only" });
+        // The MCP card's exposed-tools list is granted ∩ MCP-exposed (§5):
+        // turning a tool off here must turn it off there too, on the next
+        // read, not on whatever the cache still has.
+        refetchMcpInfo({ requestPolicy: "network-only" });
       }
     } finally {
       setTogglingToolId(null);
+    }
+  }
+
+  async function onCreateApiKey(name: string) {
+    setCreateKeyError(null);
+    setCreatingKey(true);
+    try {
+      const result = await createApiKey({ agentId: id, name });
+      if (result.error) {
+        setCreateKeyError(firstGraphQLError(result.error));
+        return null;
+      }
+      refetchKeys({ requestPolicy: "network-only" });
+      const created = result.data?.createApiKey;
+      return created ? { name: created.apiKey.name, token: created.token } : null;
+    } finally {
+      setCreatingKey(false);
+    }
+  }
+
+  async function onRevokeApiKey(keyId: string) {
+    setRevokeKeyError(null);
+    setRevokingKeyId(keyId);
+    try {
+      const result = await revokeApiKey({ id: keyId });
+      if (result.error) {
+        setRevokeKeyError(firstGraphQLError(result.error));
+      } else {
+        refetchKeys({ requestPolicy: "network-only" });
+      }
+    } finally {
+      setRevokingKeyId(null);
     }
   }
 
@@ -406,6 +476,22 @@ export default function AgentDetailPage({
           onToggle={onToggleTool}
         />
       </div>
+
+      <McpAccessCard
+        endpointUrl={mcpEndpointUrl(API_URL)}
+        exposedToolNames={mcpInfoResult.data?.agentMcpInfo.exposedToolNames ?? []}
+        toolsFetching={mcpInfoResult.fetching}
+        agentDisabled={agent.status === "DISABLED"}
+        keys={keysResult.data?.apiKeys ?? []}
+        keysFetching={keysResult.fetching}
+        canManageKeys={!!user && KEY_MANAGER_ROLES.has(user.role)}
+        creating={creatingKey}
+        createError={createKeyError}
+        revokingId={revokingKeyId}
+        revokeError={revokeKeyError}
+        onCreate={onCreateApiKey}
+        onRevoke={onRevokeApiKey}
+      />
 
       <Card tone="danger">
         <CardHeader

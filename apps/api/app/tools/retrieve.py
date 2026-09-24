@@ -97,8 +97,8 @@ class RetrieveKnowledgeTool(AgentTool):
         )
 
         # `self.session` is `ChatService.session` -- shared across every
-        # tool call this whole turn makes (see `app/chat/service.py`'s
-        # `_LockedSessionTool`, which serializes concurrent access to it
+        # tool call this whole turn makes (see `app/tools/runtime.py`'s
+        # `LockedSessionTool`, which serializes concurrent access to it
         # rather than giving each call its own session, precisely so a
         # write earlier in this same turn stays visible to a later call).
         # Postgres aborts the whole surrounding transaction on any

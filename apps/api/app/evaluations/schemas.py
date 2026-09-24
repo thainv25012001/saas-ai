@@ -15,7 +15,7 @@ from app.tools.retrieve import RetrieveKnowledgeTool
 
 # The single source of truth for "which tool name can a case expect the
 # model to call" -- each class's own `name`, the same attribute
-# `app/chat/service.py::_BUILTIN_TOOL_CLASSES` constructs from and
+# `app/tools/runtime.py::BUILTIN_TOOL_CLASSES` constructs from and
 # `ToolRegistry` keys on. Deliberately not a fresh literal list of strings,
 # which could drift the moment a fifth builtin tool is added and this file
 # is not updated to match.

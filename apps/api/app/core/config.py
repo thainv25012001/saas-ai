@@ -80,6 +80,14 @@ class Settings(BaseSettings):
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000"]
     )
+    # `Host` header values `/mcp` answers (docs/PHASE-7.md §4): the MCP
+    # transport's DNS-rebinding check rejects anything else with 421. A
+    # `:*` suffix admits any port *and* the bare host (see
+    # `expand_wildcard_port_hosts`). A deployment adds its public host here.
+    # `validate_default` so the default goes through the same expansion.
+    mcp_allowed_hosts: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["localhost:*", "127.0.0.1:*"], validate_default=True
+    )
 
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
@@ -272,13 +280,34 @@ class Settings(BaseSettings):
             )
         return value
 
-    @field_validator("cors_origins", mode="before")
+    @field_validator("cors_origins", "mcp_allowed_hosts", mode="before")
     @classmethod
     def split_comma_separated(cls, value: object) -> object:
-        """CORS_ORIGINS is a comma-separated string in .env, a list in code."""
+        """CORS_ORIGINS and MCP_ALLOWED_HOSTS are comma-separated strings in
+        .env, lists in code."""
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @field_validator("mcp_allowed_hosts", mode="after")
+    @classmethod
+    def expand_wildcard_port_hosts(cls, value: list[str]) -> list[str]:
+        """Every `host:*` entry also admits the bare `host`.
+
+        The SDK's `host:*` matches only a `Host` header that carries an
+        explicit port (`mcp/server/transport_security.py`), but an HTTPS
+        client on the default port sends a bare `api.example.com` -- so
+        `api.example.com:*` alone would answer every real request 421.
+        Deduped, first occurrence kept, the bare host placed right after
+        its wildcard entry.
+        """
+        expanded: list[str] = []
+        for host in value:
+            candidates = [host, host[:-2]] if host.endswith(":*") else [host]
+            for candidate in candidates:
+                if candidate and candidate not in expanded:
+                    expanded.append(candidate)
+        return expanded
 
 
 @lru_cache
