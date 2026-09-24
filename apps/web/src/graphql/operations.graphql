@@ -203,3 +203,26 @@ mutation CancelEvaluationRun($id: UUID!) {
 query ProductPicker($search: String, $limit: Int) {
   products(search: $search, limit: $limit) { id name externalId }
 }
+
+query ApiKeys($agentId: UUID!) {
+  apiKeys(agentId: $agentId) {
+    id name keyPrefix agentId createdByName createdAt lastUsedAt revokedAt
+  }
+}
+
+query AgentMcpInfo($agentId: UUID!) {
+  agentMcpInfo(agentId: $agentId) { exposedToolNames }
+}
+
+mutation CreateApiKey($agentId: UUID!, $name: String!) {
+  createApiKey(agentId: $agentId, name: $name) {
+    token
+    apiKey { id name keyPrefix agentId createdByName createdAt lastUsedAt revokedAt }
+  }
+}
+
+mutation RevokeApiKey($id: UUID!) {
+  revokeApiKey(id: $id) {
+    id name keyPrefix agentId createdByName createdAt lastUsedAt revokedAt
+  }
+}
