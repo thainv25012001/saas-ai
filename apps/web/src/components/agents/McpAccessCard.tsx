@@ -45,6 +45,7 @@ export function McpAccessCard({
   endpointUrl,
   exposedToolNames,
   toolsFetching = false,
+  agentDisabled = false,
   keys,
   keysFetching = false,
   canManageKeys,
@@ -61,6 +62,10 @@ export function McpAccessCard({
    * Tools card toggle triggers, so the list never shows a stale set while a
    * fresher one is on the way. */
   toolsFetching?: boolean;
+  /** The agent's saved status is DISABLED: `/mcp` refuses its keys with 401
+   * until it is re-enabled, so the card says so rather than letting a
+   * working-looking key fail with no explanation. */
+  agentDisabled?: boolean;
   keys: readonly ApiKeyRow[];
   keysFetching?: boolean;
   /** `false` hides the create form and every Revoke button. A member still
@@ -116,9 +121,12 @@ export function McpAccessCard({
     <Card>
       <CardHeader
         title="MCP access"
-        description="Point an MCP client — Claude Desktop, Claude Code, an internal agent — at this product using the same tools and the same tenant rules as the sales assistant itself."
+        description="Point an MCP client — Claude Code, Cursor, an internal agent — at this product using the same tools and the same tenant rules as the sales assistant itself."
       />
       <CardBody className="space-y-5">
+        {agentDisabled ? (
+          <Alert tone="warn">This agent is disabled, so its keys are refused.</Alert>
+        ) : null}
         <div>
           <p className="text-sm font-medium text-ink">Endpoint</p>
           <p className="mt-1 break-all font-mono text-xs text-ink-muted">{endpointUrl}</p>
@@ -187,7 +195,9 @@ export function McpAccessCard({
             </div>
 
             <div>
-              <p className="text-sm font-medium text-ink">JSON config</p>
+              <p className="text-sm font-medium text-ink">
+                .mcp.json (Claude Code, Cursor and other HTTP-capable clients)
+              </p>
               <div className="mt-1 flex items-start gap-2">
                 <pre className="min-w-0 flex-1 overflow-x-auto rounded-control border border-line bg-surface px-2 py-1.5 font-mono text-xs text-ink">
                   {jsonConfig}

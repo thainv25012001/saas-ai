@@ -39,6 +39,37 @@ describe("McpAccessCard", () => {
     expect(screen.getByText("retrieve_knowledge")).toBeInTheDocument();
   });
 
+  it("warns that a disabled agent's keys are refused", () => {
+    render(
+      <McpAccessCard
+        endpointUrl={ENDPOINT}
+        exposedToolNames={[]}
+        keys={[]}
+        agentDisabled
+        canManageKeys
+        onCreate={vi.fn()}
+        onRevoke={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByText("This agent is disabled, so its keys are refused."),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no disabled warning for an agent that is not disabled", () => {
+    render(
+      <McpAccessCard
+        endpointUrl={ENDPOINT}
+        exposedToolNames={[]}
+        keys={[]}
+        canManageKeys
+        onCreate={vi.fn()}
+        onRevoke={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText(/this agent is disabled/i)).not.toBeInTheDocument();
+  });
+
   it("says no tools are exposed rather than rendering an empty list silently", () => {
     render(
       <McpAccessCard
@@ -144,6 +175,12 @@ describe("McpAccessCard", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.getByText(/"mcpServers"/)).toBeInTheDocument();
+    // The `{"type":"http",...}` shape is `.mcp.json`'s, which Claude
+    // Desktop's config file does not accept -- the card must not say it does.
+    expect(
+      screen.getByText(".mcp.json (Claude Code, Cursor and other HTTP-capable clients)"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/claude desktop/i)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Saved it — dismiss" }));
 

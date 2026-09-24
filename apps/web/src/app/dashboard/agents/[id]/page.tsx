@@ -32,6 +32,7 @@ import {
 import { agentStatusLabel, agentStatusTone } from "@/lib/agent-status";
 import { API_URL } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { mcpEndpointUrl } from "@/lib/mcp";
 import { editableProviders, modelFieldHelp, providerLabel } from "@/lib/providers";
 import { firstGraphQLError } from "@/lib/graphql-errors";
 
@@ -477,9 +478,10 @@ export default function AgentDetailPage({
       </div>
 
       <McpAccessCard
-        endpointUrl={`${API_URL}/mcp`}
+        endpointUrl={mcpEndpointUrl(API_URL)}
         exposedToolNames={mcpInfoResult.data?.agentMcpInfo.exposedToolNames ?? []}
         toolsFetching={mcpInfoResult.fetching}
+        agentDisabled={agent.status === "DISABLED"}
         keys={keysResult.data?.apiKeys ?? []}
         keysFetching={keysResult.fetching}
         canManageKeys={!!user && KEY_MANAGER_ROLES.has(user.role)}

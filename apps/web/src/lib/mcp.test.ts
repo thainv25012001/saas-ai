@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { claudeMcpAddCommand, copyToClipboard, mcpJsonConfig, slugifyMcpName } from "./mcp";
+import {
+  claudeMcpAddCommand,
+  copyToClipboard,
+  mcpEndpointUrl,
+  mcpJsonConfig,
+  slugifyMcpName,
+} from "./mcp";
 
 describe("slugifyMcpName", () => {
   it("lowercases and keeps a name already made of a-z0-9- unchanged", () => {
@@ -153,5 +159,16 @@ describe("copyToClipboard", () => {
     vi.stubGlobal("navigator", { clipboard: { writeText } });
 
     await expect(copyToClipboard("hello")).resolves.toBe(false);
+  });
+});
+
+describe("mcpEndpointUrl", () => {
+  it("appends /mcp to the API url", () => {
+    expect(mcpEndpointUrl("https://api.example.com")).toBe("https://api.example.com/mcp");
+  });
+
+  it("strips a trailing slash so the path is never //mcp", () => {
+    expect(mcpEndpointUrl("https://api.example.com/")).toBe("https://api.example.com/mcp");
+    expect(mcpEndpointUrl("https://api.example.com//")).toBe("https://api.example.com/mcp");
   });
 });

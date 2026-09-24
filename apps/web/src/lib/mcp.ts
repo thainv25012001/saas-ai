@@ -54,8 +54,10 @@ export function claudeMcpAddCommand(name: string, url: string, token: string): s
   return `claude mcp add --transport http ${slug} ${shellQuote(url)} --header ${shellQuote(header)}`;
 }
 
-/** The equivalent `mcpServers` JSON block for a client (e.g. Claude Desktop)
- * that reads its MCP config from a file rather than a CLI. `JSON.stringify`
+/** The equivalent `mcpServers` block in the `.mcp.json` format -- read by
+ * Claude Code, Cursor and other clients that speak MCP over HTTP with
+ * custom headers. Not Claude Desktop: its config file does not take a remote
+ * HTTP server with headers (docs/PHASE-7.md §9). `JSON.stringify`
  * -- not string concatenation -- is what makes the token and url safe inside
  * the JSON string regardless of what characters they contain. */
 export function mcpJsonConfig(name: string, url: string, token: string): string {
@@ -70,6 +72,13 @@ export function mcpJsonConfig(name: string, url: string, token: string): string 
     },
   };
   return JSON.stringify(config, null, 2);
+}
+
+/** The `/mcp` endpoint under the API's base url. A trailing slash on the
+ * configured url (`NEXT_PUBLIC_API_URL=https://api.example.com/`) would
+ * otherwise produce `//mcp`, which the API does not route. */
+export function mcpEndpointUrl(apiUrl: string): string {
+  return `${apiUrl.replace(/\/+$/, "")}/mcp`;
 }
 
 /**
