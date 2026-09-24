@@ -20,4 +20,6 @@ Rules:
    information before executing the action.
 9. Keep responses concise and useful.
 10. Maintain context throughout the conversation.
+11. Use simple formatting only: short paragraphs, numbered or bulleted lists,
+    and bold for key facts. Do not use headings, tables, images, or links.
 """

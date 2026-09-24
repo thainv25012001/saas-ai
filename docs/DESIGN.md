@@ -336,6 +336,27 @@ be quoting a document or a visitor's own typed text:
   renders each half as a text child of a `<dt>`/`<dd>` — the component never
   walks an arbitrary object, and a key is never used as anything but text.
 
+**The one exception: the assistant's answer text**
+([`components/chat/AnswerText.tsx`](../apps/web/src/components/chat/AnswerText.tsx)).
+Models write markdown by default, and printing `**` and `1.` verbatim made
+every answer look broken, so the answer — and only the answer — goes
+through `react-markdown` held to a fixed allowlist: `p`, `br`, `strong`,
+`em`, `ol`, `ul`, `li`, `code`, `pre`, `blockquote` and headings (which
+render as a bold line, not a page-sized title). Everything else is
+unwrapped to its text. Three things must stay out:
+
+- **Raw HTML.** `react-markdown` prints it as literal text unless
+  `rehype-raw` is added; never add it.
+- **Images.** Rendering one makes the visitor's browser fetch a URL the model
+  chose — a data-exfiltration channel. A markdown image is dropped entirely.
+- **Links.** A document or a visitor can steer the model into printing a
+  phishing link. The link text stays; the click target does not.
+
+User messages, citations, tool calls, leads and products are unchanged:
+plain JSX text. The default system prompt also asks for this subset
+(`app/prompts/defaults.py`, rule 11), but a tenant's own prompt may not, so
+the renderer — not the prompt — is what holds the line.
+
 The test shape this earns is the same one `ChatMessage.test.tsx` already
 used for citations: render a `<script>` payload in the untrusted field and
 assert `container.querySelector("script")` is `null` while
