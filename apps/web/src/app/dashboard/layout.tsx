@@ -7,14 +7,27 @@ import { TopBar } from "@/components/shell/TopBar";
 import { currentSectionLabel } from "@/components/shell/nav";
 import { LoadingState } from "@/components/ui/Spinner";
 import { cn } from "@/components/ui/cn";
-import { useAuth } from "@/lib/auth";
+import { AuthProvider, useAuth } from "@/lib/auth";
+import { UrqlProvider } from "@/lib/urql";
 
 /** Routes that fill the frame and manage their own internal scrolling, rather
  * than sitting in the centred content well. The playground's transcript is
  * the scroll container, which is what lets it drop the viewport arithmetic. */
 const FULL_BLEED_ROUTES = new Set(["/dashboard/playground"]);
 
+/** The providers live here and in `(auth)/layout.tsx`, not in the root
+ * layout, so the public embed page never mounts them (see `app/layout.tsx`). */
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <AuthProvider>
+      <UrqlProvider>
+        <DashboardShell>{children}</DashboardShell>
+      </UrqlProvider>
+    </AuthProvider>
+  );
+}
+
+function DashboardShell({ children }: { children: React.ReactNode }) {
   const { user, loading, logout } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
