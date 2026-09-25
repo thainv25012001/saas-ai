@@ -65,6 +65,7 @@ describe("frameAncestorsHeader", () => {
 describe("fetchFrameOrigins", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   function okResponse(origins: unknown): Response {
@@ -194,5 +195,27 @@ describe("fetchFrameOrigins", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     await fetchFrameOrigins("http://api", "pk_evict_first", () => 0);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends the frame-policy secret header when WIDGET_FRAME_POLICY_SECRET is set", async () => {
+    vi.stubEnv("WIDGET_FRAME_POLICY_SECRET", "s3cret");
+    const fetchMock = vi.fn().mockResolvedValue(okResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchFrameOrigins("http://api", "pk_secret_set", () => 0);
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(new Headers(init.headers).get("X-Widget-Frame-Secret")).toBe("s3cret");
+  });
+
+  it("sends no secret header when WIDGET_FRAME_POLICY_SECRET is unset", async () => {
+    vi.stubEnv("WIDGET_FRAME_POLICY_SECRET", "");
+    const fetchMock = vi.fn().mockResolvedValue(okResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchFrameOrigins("http://api", "pk_secret_unset", () => 0);
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(new Headers(init.headers).has("X-Widget-Frame-Secret")).toBe(false);
   });
 });

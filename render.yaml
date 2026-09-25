@@ -37,6 +37,11 @@ services:
       # logs `mcp_allowed_hosts_loopback_only`. See docs/DEPLOYMENT.md.
       - key: MCP_ALLOWED_HOSTS
         sync: false
+      # Same value as the Vercel project's WIDGET_FRAME_POLICY_SECRET: proves
+      # the web middleware's frame-policy lookups are ours, so a flood on a
+      # public key cannot unframe its widget. See docs/DEPLOYMENT.md.
+      - key: WIDGET_FRAME_POLICY_SECRET
+        sync: false
       - key: ENVIRONMENT
         value: production
       - key: LOG_LEVEL

@@ -592,6 +592,145 @@ async def test_a_limited_frame_policy_key_leaves_other_keys_alone(
     assert other.json() == {"allowed_origins": ["https://shop.example.com"]}
 
 
+@pytest.fixture
+def frame_secret(monkeypatch):
+    """Configure `WIDGET_FRAME_POLICY_SECRET` for one test."""
+    from app.core.config import get_settings
+
+    def _set(value: str | None) -> None:
+        settings = get_settings().model_copy(update={"widget_frame_policy_secret": value})
+        monkeypatch.setattr(widget_api, "get_settings", lambda: settings)
+
+    return _set
+
+
+async def test_frame_policy_with_the_configured_secret_is_never_limited(
+    api_client, tenant_a, monkeypatch, frame_secret
+):
+    # The key is public: without this, ~2 requests/s from anyone would keep
+    # its budget spent and cold middleware instances would unframe it.
+    monkeypatch.setattr(widget_api, "FRAME_POLICY_LIMIT", 1)
+    frame_secret("s3cret-value")
+    _agent_id, public_key = await _seed_widget(tenant_a)
+    headers = {"X-Widget-Frame-Secret": "s3cret-value"}
+
+    for _ in range(4):
+        response = await api_client.get(f"{BASE}/{public_key}/frame-policy", headers=headers)
+        assert response.status_code == 200
+        assert response.json() == {"allowed_origins": ["https://shop.example.com"]}
+
+
+@pytest.mark.parametrize("header", [None, "wrong-value", ""])
+async def test_frame_policy_with_a_wrong_or_missing_secret_is_limited(
+    api_client, tenant_a, monkeypatch, frame_secret, header
+):
+    monkeypatch.setattr(widget_api, "FRAME_POLICY_LIMIT", 1)
+    frame_secret("s3cret-value")
+    _agent_id, public_key = await _seed_widget(tenant_a)
+    headers = {} if header is None else {"X-Widget-Frame-Secret": header}
+
+    url = f"{BASE}/{public_key}/frame-policy"
+    assert (await api_client.get(url, headers=headers)).status_code == 200
+    assert (await api_client.get(url, headers=headers)).status_code == 429
+
+
+async def test_frame_policy_ignores_the_secret_header_when_no_secret_is_configured(
+    api_client, tenant_a, monkeypatch, frame_secret
+):
+    monkeypatch.setattr(widget_api, "FRAME_POLICY_LIMIT", 1)
+    frame_secret(None)
+    _agent_id, public_key = await _seed_widget(tenant_a)
+    headers = {"X-Widget-Frame-Secret": "anything"}
+
+    url = f"{BASE}/{public_key}/frame-policy"
+    assert (await api_client.get(url, headers=headers)).status_code == 200
+    assert (await api_client.get(url, headers=headers)).status_code == 429
+
+
+async def test_frame_policy_answers_a_malformed_key_before_the_limiter(api_client, monkeypatch):
+    """A garbage key never touches Redis or the database."""
+
+    async def _boom(*_args, **_kwargs):
+        raise AssertionError("the limiter must not be reached")
+
+    monkeypatch.setattr(widget_api, "enforce_rate_limit", _boom)
+    monkeypatch.setattr(widget_api, "resolve_public_key", _boom)
+
+    response = await api_client.get(f"{BASE}/not-a-key/frame-policy")
+    assert response.status_code == 200
+    assert response.json() == {"allowed_origins": []}
+
+
+# ---------------------------------------------------------------------------
+# launcher config
+# ---------------------------------------------------------------------------
+
+UNAVAILABLE_CONFIG = {"available": False, "brand_color": None, "position": None, "title": None}
+
+
+async def test_config_describes_an_available_widget(api_client, tenant_a):
+    _agent_id, public_key = await _seed_widget(tenant_a)
+
+    response = await api_client.get(f"{BASE}/{public_key}/config")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "available": True,
+        "brand_color": "#123abc",
+        "position": "left",
+        "title": "Chat with us",
+    }
+    assert response.headers["cache-control"] == "public, max-age=60"
+    assert response.headers["access-control-allow-origin"] == "*"
+
+
+async def test_config_is_all_nulls_for_anything_unavailable(api_client, tenant_a):
+    _d, draft_key = await _seed_widget(tenant_a, status="draft", name="Draft")
+    _o, off_key = await _seed_widget(tenant_a, enabled=False, name="Off")
+
+    for key in (draft_key, off_key, "pk_unknownunknownunknown00"):
+        response = await api_client.get(f"{BASE}/{key}/config")
+        assert response.status_code == 200, key
+        assert response.json() == UNAVAILABLE_CONFIG
+        assert response.headers["access-control-allow-origin"] == "*"
+
+
+async def test_config_answers_a_malformed_key_before_the_limiter(api_client, monkeypatch):
+    async def _boom(*_args, **_kwargs):
+        raise AssertionError("the limiter must not be reached")
+
+    monkeypatch.setattr(widget_api, "enforce_rate_limit", _boom)
+    monkeypatch.setattr(widget_api, "resolve_public_key", _boom)
+
+    response = await api_client.get(f"{BASE}/not-a-key/config")
+    assert response.status_code == 200
+    assert response.json() == UNAVAILABLE_CONFIG
+
+
+async def test_config_is_rate_limited_per_key(api_client, tenant_a, monkeypatch):
+    monkeypatch.setattr(widget_api, "CONFIG_LIMIT", 1)
+    _a, public_key = await _seed_widget(tenant_a, name="A")
+    _b, other_key = await _seed_widget(tenant_a, name="B")
+
+    assert (await api_client.get(f"{BASE}/{public_key}/config")).status_code == 200
+    assert (await api_client.get(f"{BASE}/{public_key}/config")).status_code == 429
+    assert (await api_client.get(f"{BASE}/{other_key}/config")).status_code == 200
+
+
+async def test_config_cors_header_survives_the_global_cors_middleware(api_client, tenant_a):
+    """The global CORSMiddleware (credentials on, an allow-list) must neither
+    strip nor rewrite the wildcard for a page on any site."""
+    _agent_id, public_key = await _seed_widget(tenant_a)
+
+    response = await api_client.get(
+        f"{BASE}/{public_key}/config", headers={"Origin": "https://random.example"}
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "*"
+    assert response.json()["available"] is True
+
+
 # ---------------------------------------------------------------------------
 # message validation
 # ---------------------------------------------------------------------------

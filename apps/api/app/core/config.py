@@ -78,6 +78,12 @@ class Settings(BaseSettings):
     # it is what lets a returning visitor resume their conversation; safe to
     # be long, because every call re-checks the widget is still available.
     widget_token_days: int = 30
+    # Shared with the web app (same value on both services). The web
+    # middleware sends it as `X-Widget-Frame-Secret` when it asks
+    # `/api/v1/widget/{key}/frame-policy`, and a matching header skips that
+    # route's per-key limit -- otherwise anyone could spend a public key's
+    # budget and unframe its widget. Unset: the limit always applies.
+    widget_frame_policy_secret: str | None = None
 
     environment: str = "local"
     log_level: str = "INFO"

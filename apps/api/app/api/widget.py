@@ -20,11 +20,12 @@ Three rules every route here keeps:
   inside rate-limit keys, which expire.
 """
 
+import hmac
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -34,6 +35,7 @@ from app.api.chat import get_chat_provider
 from app.api.streaming import SSE_HEADERS, stream_body
 from app.chat.service import ChatService
 from app.conversations.service import ConversationService
+from app.core.config import get_settings
 from app.core.errors import (
     AuthenticationError,
     NotFoundError,
@@ -48,7 +50,12 @@ from app.db.models import Conversation, ConversationChannel, ConversationStatus,
 from app.db.models.widget import WidgetPosition
 from app.llm.base import LLMProvider
 from app.widget.events import project_public_event
-from app.widget.service import PublicWidget, load_available, resolve_public_key
+from app.widget.service import (
+    PublicWidget,
+    load_available,
+    looks_like_public_key,
+    resolve_public_key,
+)
 from app.widget.tokens import VisitorClaims, create_visitor_token, decode_visitor_token
 
 router = APIRouter(prefix="/api/v1/widget", tags=["widget"])
@@ -65,6 +72,11 @@ MESSAGE_WINDOW_SECONDS = 60
 DAILY_CAP_WINDOW_SECONDS = 86_400
 FRAME_POLICY_LIMIT = 120
 FRAME_POLICY_WINDOW_SECONDS = 60
+CONFIG_LIMIT = 120
+CONFIG_WINDOW_SECONDS = 60
+
+#: The header our web middleware authenticates itself with on frame-policy.
+FRAME_SECRET_HEADER = "X-Widget-Frame-Secret"
 
 MAX_MESSAGE_LENGTH = 2_000
 
@@ -113,6 +125,22 @@ class WidgetChatRequest(BaseModel):
 
 class FramePolicyOut(BaseModel):
     allowed_origins: list[str]
+
+
+class LauncherConfigOut(BaseModel):
+    """What the loader script needs before it draws anything (spec §4):
+    whether to draw at all, and in which colour, on which side. All nulls
+    when unavailable -- the same answer for every kind of unavailable."""
+
+    available: bool
+    brand_color: str | None
+    position: WidgetPosition | None
+    title: str | None
+
+
+_UNAVAILABLE_LAUNCHER = LauncherConfigOut(
+    available=False, brand_color=None, position=None, title=None
+)
 
 
 def _tenant(organization_id: uuid.UUID) -> TenantContext:
@@ -186,29 +214,76 @@ def _reusable_visitor_id(request: Request, widget: PublicWidget) -> str | None:
     return claims.visitor_id
 
 
+def _is_trusted_frame_caller(request: Request) -> bool:
+    """Our own web middleware, proven by the shared secret. Only when a
+    secret is configured *and* the header matches it (constant-time)."""
+    secret = get_settings().widget_frame_policy_secret
+    supplied = request.headers.get(FRAME_SECRET_HEADER)
+    if not secret or supplied is None:
+        return False
+    return hmac.compare_digest(supplied.encode(), secret.encode())
+
+
+async def _available_by_key(public_key: str) -> PublicWidget | None:
+    resolved = await resolve_public_key(public_key)
+    if resolved is None:
+        return None
+    organization_id, agent_id = resolved
+    async with tenant_session(_tenant(organization_id)) as session:
+        return await load_available(session, organization_id, agent_id)
+
+
 @router.get("/{public_key}/frame-policy")
-async def frame_policy(public_key: str) -> FramePolicyOut:
+async def frame_policy(public_key: str, request: Request) -> FramePolicyOut:
     """Always 200: `[]` for anything unavailable, so this reveals no more than
     the embed page itself would.
 
-    Limited per *key*, not per IP: the only caller is our own web server's
-    middleware, so a per-IP budget would be one budget shared by every agent,
-    and a flood of made-up keys would exhaust it and unframe every real
-    widget. Per key, a flood only ever limits the key it names. (The key sits
-    only inside the Redis key, which `enforce_rate_limit` never logs beyond
-    its leading scope.)"""
-    await enforce_rate_limit(
-        f"widget:frame:key:{public_key}",
-        limit=FRAME_POLICY_LIMIT,
-        window_seconds=FRAME_POLICY_WINDOW_SECONDS,
-    )
-    resolved = await resolve_public_key(public_key)
-    if resolved is None:
+    A malformed key is answered before anything else, so garbage never
+    touches Redis or the database. Our web middleware, proven by
+    `WIDGET_FRAME_POLICY_SECRET`, is never limited: the key is public, and
+    anyone could otherwise keep its budget spent and have cold middleware
+    instances serve `frame-ancestors 'self'`. Everyone else is limited per
+    *key*, not per IP, so a flood only ever limits the key it names. (The
+    key sits only inside the Redis key, which `enforce_rate_limit` never logs
+    beyond its leading scope.)"""
+    if not looks_like_public_key(public_key):
         return FramePolicyOut(allowed_origins=[])
-    organization_id, agent_id = resolved
-    async with tenant_session(_tenant(organization_id)) as session:
-        widget = await load_available(session, organization_id, agent_id)
+    if not _is_trusted_frame_caller(request):
+        await enforce_rate_limit(
+            f"widget:frame:key:{public_key}",
+            limit=FRAME_POLICY_LIMIT,
+            window_seconds=FRAME_POLICY_WINDOW_SECONDS,
+        )
+    widget = await _available_by_key(public_key)
     return FramePolicyOut(allowed_origins=widget.settings.allowed_origins if widget else [])
+
+
+@router.get("/{public_key}/config")
+async def launcher_config(public_key: str, response: Response) -> LauncherConfigOut:
+    """The loader's pre-draw check, called from any customer's page.
+
+    Always 200 with all nulls for anything unavailable. Readable from any
+    origin (`Access-Control-Allow-Origin: *`, never credentials: nothing here
+    is private) and cacheable for a minute, so an owner's change -- or the
+    off switch -- reaches pages within about that long."""
+    response.headers["Cache-Control"] = "public, max-age=60"
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    if not looks_like_public_key(public_key):
+        return _UNAVAILABLE_LAUNCHER
+    await enforce_rate_limit(
+        f"widget:config:key:{public_key}",
+        limit=CONFIG_LIMIT,
+        window_seconds=CONFIG_WINDOW_SECONDS,
+    )
+    widget = await _available_by_key(public_key)
+    if widget is None:
+        return _UNAVAILABLE_LAUNCHER
+    return LauncherConfigOut(
+        available=True,
+        brand_color=widget.settings.brand_color,
+        position=widget.settings.position,
+        title=widget.settings.title,
+    )
 
 
 @router.post("/{public_key}/session")

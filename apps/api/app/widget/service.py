@@ -211,6 +211,12 @@ class WidgetSettingsService:
         return result.scalar_one_or_none()
 
 
+def looks_like_public_key(public_key: str) -> bool:
+    """The shape check alone, for a route that must turn a garbage key away
+    before it spends a rate-limit counter or a database round trip."""
+    return _PUBLIC_KEY_RE.match(public_key) is not None
+
+
 async def resolve_public_key(public_key: str) -> tuple[uuid.UUID, uuid.UUID] | None:
     """The one lookup that runs before any organization is known -- what a
     widget loader's `data-key` resolves to. `_PUBLIC_KEY_RE` rejects an
@@ -225,7 +231,7 @@ async def resolve_public_key(public_key: str) -> tuple[uuid.UUID, uuid.UUID] | N
     `TenantContext` exists at all: nothing here reads or writes any
     tenant-owned table directly.
     """
-    if not _PUBLIC_KEY_RE.match(public_key):
+    if not looks_like_public_key(public_key):
         return None
     async with untenanted_session() as session:
         result = await session.execute(

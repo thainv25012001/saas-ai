@@ -31,6 +31,16 @@ const CACHE_MAX_ENTRIES = 500;
  * like any other failure (the last known answer, else `'self'` only). */
 const FETCH_TIMEOUT_MS = 3_000;
 
+/** Proves to the API that this request is our own middleware, which skips
+ * the route's per-key limit (a public key's budget is otherwise anyone's to
+ * spend). Server-only: never a `NEXT_PUBLIC_` variable. */
+export const FRAME_SECRET_HEADER = "X-Widget-Frame-Secret";
+
+function frameSecretHeaders(): Record<string, string> {
+  const secret = process.env.WIDGET_FRAME_POLICY_SECRET;
+  return secret?.trim() ? { [FRAME_SECRET_HEADER]: secret } : {};
+}
+
 type CacheEntry = { origins: string[]; storedAt: number };
 
 const cache = new Map<string, CacheEntry>();
@@ -71,6 +81,7 @@ export async function fetchFrameOrigins(
     const url = `${apiBase.replace(/\/+$/, "")}/api/v1/widget/${encodeURIComponent(publicKey)}/frame-policy`;
     const response = await fetch(url, {
       cache: "no-store",
+      headers: frameSecretHeaders(),
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (!response.ok) return fallback;
