@@ -37,6 +37,17 @@ services:
       # logs `mcp_allowed_hosts_loopback_only`. See docs/DEPLOYMENT.md.
       - key: MCP_ALLOWED_HOSTS
         sync: false
+      # Same value as the Vercel project's WIDGET_FRAME_POLICY_SECRET: proves
+      # the web middleware's frame-policy lookups are ours, so a flood on a
+      # public key cannot unframe its widget. See docs/DEPLOYMENT.md.
+      - key: WIDGET_FRAME_POLICY_SECRET
+        sync: false
+      # Trust X-Forwarded-For from any peer, so the per-IP rate limits see the
+      # visitor's address rather than Render's proxy's. Safe only because
+      # the container is reachable solely through Render's proxy; anywhere
+      # else, set it to the proxy's own address. See docs/DEPLOYMENT.md.
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"
       - key: ENVIRONMENT
         value: production
       - key: LOG_LEVEL

@@ -9,6 +9,7 @@ from app.auth.service import AuthService
 from app.core.config import get_settings
 from app.core.errors import AuthenticationError
 from app.core.rate_limit import enforce_rate_limit
+from app.core.request import client_ip
 from app.core.security import decode_token, refresh_token_ttl_seconds
 from app.core.tenancy import TenantContext, untenanted_session
 from app.db.models import Membership, Organization, User
@@ -36,26 +37,9 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
     )
 
 
-def _client_key(request: Request) -> str:
-    # request.client.host is the DIRECT peer's address. Phase 1 runs with no
-    # proxy in front of this service, so that peer is the real client and
-    # this is correct as-is. It stops being correct the moment a load
-    # balancer or ingress sits in front: every client would then collapse
-    # into the proxy's one IP (5 registrations/hour globally; one attacker
-    # starving /login for everyone). Trusting X-Forwarded-For naively is NOT
-    # the fix - it lets an attacker mint a fresh rate-limit key on every
-    # request by forging the header. Before deploying behind a proxy,
-    # configure Starlette/uvicorn's ProxyHeadersMiddleware with an explicit
-    # trusted-hosts list (or run uvicorn with --proxy-headers
-    # --forwarded-allow-ips=<the proxy's real address>) so only a header set
-    # by that trusted hop is honored. Until then, this limiter is only
-    # correct for direct connections.
-    return request.client.host if request.client else "unknown"
-
-
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register(payload: RegisterRequest, request: Request, response: Response) -> TokenResponse:
-    await enforce_rate_limit(f"register:{_client_key(request)}", limit=5, window_seconds=3600)
+    await enforce_rate_limit(f"register:{client_ip(request)}", limit=5, window_seconds=3600)
     async with untenanted_session() as session:
         service = AuthService(session)
         user, _organization, membership = await service.register(payload)
@@ -70,7 +54,7 @@ async def register(payload: RegisterRequest, request: Request, response: Respons
 
 @router.post("/login")
 async def login(payload: LoginRequest, request: Request, response: Response) -> TokenResponse:
-    await enforce_rate_limit(f"login:{_client_key(request)}", limit=10, window_seconds=60)
+    await enforce_rate_limit(f"login:{client_ip(request)}", limit=10, window_seconds=60)
     async with untenanted_session() as session:
         service = AuthService(session)
         user, membership = await service.authenticate(payload.email, payload.password)

@@ -6,11 +6,13 @@ import { LeadsTable, type LeadRow } from "./LeadsTable";
 function lead(overrides: Partial<LeadRow> = {}): LeadRow {
   return {
     id: "l1",
+    agentId: "agent-1",
     name: "Jamie Rivera",
     email: "jamie@example.com",
     phone: null,
     interest: "the pro plan",
     status: "NEW",
+    source: null,
     createdAt: "2026-01-01T00:00:00Z",
     conversation: { id: "c1", title: "Pricing questions", preview: null },
     ...overrides,
@@ -59,6 +61,30 @@ describe("LeadsTable", () => {
     const won = within(wonContainer).getByText("Won");
     const lost = within(lostContainer).getByText("Lost");
     expect(won.className).not.toBe(lost.className);
+  });
+
+  it("links the conversation cell to the conversations page for the lead's agent", () => {
+    render(<LeadsTable leads={[lead({ agentId: "agent-9", conversation: { id: "c9", title: "Hi", preview: null } })]} />);
+    const link = screen.getByRole("link", { name: "Hi" });
+    expect(link).toHaveAttribute("href", "/dashboard/conversations?agent=agent-9&conversation=c9");
+  });
+
+  it("shows no link for a deleted conversation", () => {
+    render(<LeadsTable leads={[lead({ conversation: null })]} />);
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    expect(screen.getByText("Deleted conversation")).toBeInTheDocument();
+  });
+
+  it("shows the lead's source as a badge when it is set", () => {
+    render(<LeadsTable leads={[lead({ source: "widget" })]} />);
+    expect(screen.getByText("Widget")).toBeInTheDocument();
+  });
+
+  it("shows no source badge when the source is null", () => {
+    render(<LeadsTable leads={[lead({ source: null })]} />);
+    expect(screen.queryByText("Widget")).not.toBeInTheDocument();
+    expect(screen.queryByText("Playground")).not.toBeInTheDocument();
+    expect(screen.queryByText("Api")).not.toBeInTheDocument();
   });
 
   it("renders an untrusted name and interest as literal text, never as markup", () => {

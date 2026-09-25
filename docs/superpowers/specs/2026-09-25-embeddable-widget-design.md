@@ -128,7 +128,8 @@ refused wherever an access token is expected and vice versa.
 
 | Endpoint | Auth | Does |
 |---|---|---|
-| `GET /api/v1/widget/{public_key}/frame-policy` | none | Returns `{allowed_origins: [...]}` when available, else `{allowed_origins: []}`. Always 200, so it reveals nothing more than the embed page itself would. Used by the web middleware (§6). Rate-limited per IP (120/min). |
+| `GET /api/v1/widget/{public_key}/frame-policy` | none (optional `X-Widget-Frame-Secret`) | Returns `{allowed_origins: [...]}` when available, else `{allowed_origins: []}`. Always 200, so it reveals nothing more than the embed page itself would. Used by the web middleware (§6). A malformed key is answered `[]` before anything else (no Redis, no DB). Rate-limited per public key (120/min) — the intended caller is our web server, so a per-IP limit would be one budget for every agent — **except** when `WIDGET_FRAME_POLICY_SECRET` is configured and the header matches it (`hmac.compare_digest`): our own middleware is never limited, so nobody can spend a public key's budget and unframe its widget. *(Final-review ruling; supersedes the plain per-key limit.)* |
+| `GET /api/v1/widget/{public_key}/config` | none | The loader's pre-draw check: `{available, brand_color, position, title}`, all nulls when unavailable. Always 200. Malformed key answered before any limiter; otherwise rate-limited per key (120/min). `Cache-Control: public, max-age=60`, `Access-Control-Allow-Origin: *` (never credentials). Reached from host pages through the web origin, which rewrites the same path to the API (§6). *(Final-review ruling.)* |
 | `POST /api/v1/widget/{public_key}/session` | optional widget bearer | If the bearer is a valid widget token for this agent, keep its `vid`; otherwise mint a new one. Returns `{token, expires_at, config}` where `config = {agent_name, title, greeting, fallback_message, brand_color, position}`. |
 | `GET /api/v1/widget/conversation` | widget bearer | The visitor's most recent `open` widget conversation for the token's agent, with its last 50 user/assistant messages (text only), or `null`. |
 | `POST /api/v1/widget/chat/stream` | widget bearer | Body `{message (1–2000 chars), conversation_id?}`. Re-checks availability, enforces §5, then runs `ChatService.send(channel=WIDGET, visitor_id=vid)` through the same streaming body as the dashboard route, with §4.1's projection. |
@@ -167,11 +168,17 @@ All use `enforce_rate_limit` (Redis fixed window, fails open and logs, as today)
 | `widget:msg:visitor:{vid}` | 10 / minute | chat stream |
 | `widget:msg:ip:{ip}` | 30 / minute | chat stream |
 | `widget:msg:agent-day:{agent_id}:{yyyymmdd}` | `daily_message_cap` / 86 400 s | chat stream |
-| `widget:frame:ip:{ip}` | 120 / minute | frame-policy |
+| `widget:frame:key:{public_key}` | 120 / minute | frame-policy (per key, not per IP: the intended caller is our own web server, so a per-IP budget would be shared by every agent and a flood of made-up keys could unframe them all). Skipped for a request carrying the configured `WIDGET_FRAME_POLICY_SECRET`, since the key is public and anyone could otherwise keep it spent. |
+| `widget:config:key:{public_key}` | 120 / minute | the loader's config check (responses are cacheable for 60 s, so real pages rarely reach the API) |
 
-The IP is `request.client.host`, exactly as the auth routes use it (no forwarded-header
-trust; behind a proxy this becomes the proxy's address — the same known limitation as
-login, documented in `docs/DEPLOYMENT.md`). Over the daily cap the stream answers
+A malformed public key never reaches a limiter: frame-policy and config answer it
+(`[]` / all nulls) before touching Redis or the database.
+
+The IP is `app/core/request.py::client_ip` (`request.client.host`), exactly as the auth
+routes use it. Behind a proxy that would be the proxy's address, so the API image runs
+uvicorn with `--proxy-headers --forwarded-allow-ips="${FORWARDED_ALLOW_IPS:-127.0.0.1}"`:
+loopback by default, and `'*'` on Render (`render.yaml`), whose proxy is the only way in
+(`docs/DEPLOYMENT.md`). *(Final-review ruling; supersedes "no forwarded-header trust".)* Over the daily cap the stream answers
 `429 {code: "widget_daily_cap"}` and the widget shows "This assistant is not available
 right now."
 
@@ -191,13 +198,22 @@ or message text. Widget session rejections log only the key's first 8 characters
 
 1. Finds its own `<script>` (`document.currentScript`), reads `data-key`, and derives the app
    origin from the script's `src`.
-2. Creates a host element with a closed Shadow DOM holding the launcher button (brand color
-   and position arrive in the `ready` message; a neutral default renders until then).
+2. Fetches `APP_ORIGIN/api/v1/widget/{key}/config` (no credentials; the web app rewrites that
+   path to the API, `src/lib/auth-proxy.ts`'s `widgetConfigRewrites`). When the answer is
+   unavailable, or the fetch fails in any way, it draws **nothing** and logs one
+   `console.info`. Otherwise it creates a host element with a closed Shadow DOM holding the
+   launcher, drawn from the start in the owner's `brand_color` (icon black or white by WCAG
+   contrast, the same formula as `src/lib/contrast.ts`), on the owner's side, labelled with the
+   title. A later `ready` message from the frame can still update all three. *(Final-review
+   ruling; supersedes the neutral default launcher that ignored the off switch.)*
 3. On first open, creates the iframe `APP_ORIGIN/embed/{key}` inside the shadow root
-   (400 × 640 px, full-screen under 480 px wide), and toggles it afterwards.
+   (400 × 640 px, full-screen under 480 px wide), and toggles it afterwards. While open, the
+   launcher is an "×" that closes the panel; under 480 px it moves to the top corner above the
+   full-screen frame (higher z-index), so a frame that never loads, hangs or is CSP-blocked can
+   still be closed.
 4. Listens for `message` events **only** when `event.origin === APP_ORIGIN` and
    `event.source === iframe.contentWindow`. Messages: `ready {brand_color, position, title}`,
-   `close`, `unread {count}`. It posts nothing but `{type: "open"}` to the iframe, targeted
+   `close` (an `unread {count}` message was planned and not delivered, `docs/PHASE-8.md` §7). It posts nothing but `{type: "open"}` to the iframe, targeted
    at `APP_ORIGIN`.
 5. Does nothing (and logs one console warning) if `data-key` is missing.
 
@@ -214,13 +230,20 @@ minimal layout (no `AuthProvider`, no urql). It:
   renderer), a tool indicator from `tool_call_start` names, and source titles under an
   answer;
 - offers "New conversation" (drops the conversation id; the visitor id stays);
-- shows "This assistant is not available right now." on a 404 from `session`.
+- shows "This assistant is not available right now." on a 404 from `session`, and when
+  `session` or `conversation` does not answer within 10 s (`AbortSignal.timeout`);
+- shows its header, with the close button, while loading and when unavailable, not only
+  once ready;
+- on a stream `error`, appends the fallback after any partial answer rather than replacing
+  it; a `not_found` on a turn that sent a `conversation_id` (the resumed conversation is
+  gone) retries that message once as a new conversation; anything thrown becomes the
+  fallback, never an unhandled rejection.
 
 It posts `ready` to `window.parent` with target origin `*` (it cannot know the host origin
 and the payload is public config), and `close` likewise.
 
 **Frame policy — `src/middleware.ts`.** The matcher gains `/embed/:path*`. For those paths
-the middleware fetches `GET /api/v1/widget/{key}/frame-policy` (server-side, via the API base URL `auth-proxy.ts` already resolves from `API_INTERNAL_URL`),
+the middleware fetches `GET /api/v1/widget/{key}/frame-policy` (server-side, via the API base URL `auth-proxy.ts` already resolves from `API_INTERNAL_URL`, sending `X-Widget-Frame-Secret` from the server-only `WIDGET_FRAME_POLICY_SECRET` when it is set),
 caching each answer in a module-level map for 30 s (middleware runs on the edge runtime,
 where Next's fetch cache does not apply), and sets:
 
@@ -228,8 +251,10 @@ where Next's fetch cache does not apply), and sets:
 Content-Security-Policy: frame-ancestors 'self' <origins…>
 ```
 
-and removes `X-Frame-Options`. With no origins (or a fetch failure) it sets
-`frame-ancestors 'self'` only — the dashboard preview still works, every other site is
+and removes `X-Frame-Options`. A failed fetch (network, timeout, any non-200 including 429)
+serves the key's last successful answer even past its 30 s TTL — the API's only caller is this
+server, so one blip must not unframe live widgets. With no origins (or a failure and no earlier
+success for that key) it sets `frame-ancestors 'self'` only — the dashboard preview still works, every other site is
 refused. `lib/security-headers.ts` excludes `/embed/*` from the global framing headers and
 keeps them for every other route. The header builder is a pure function with tests.
 

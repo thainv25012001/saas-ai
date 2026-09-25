@@ -1,6 +1,4 @@
 import type { Metadata } from "next";
-import { AuthProvider } from "@/lib/auth";
-import { UrqlProvider } from "@/lib/urql";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -19,9 +17,10 @@ export default function RootLayout({
         className="min-h-screen bg-canvas font-sans text-ink antialiased"
         suppressHydrationWarning
       >
-        <AuthProvider>
-          <UrqlProvider>{children}</UrqlProvider>
-        </AuthProvider>
+        {/* No providers here: the embed page (`/embed/[publicKey]`) runs inside
+            a customer's site and must not start a dashboard session refresh.
+            AuthProvider/UrqlProvider live in the dashboard and (auth) layouts. */}
+        {children}
       </body>
     </html>
   );

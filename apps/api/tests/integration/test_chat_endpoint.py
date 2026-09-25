@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from app.agents.service import AgentService
 from app.api import chat as chat_api
+from app.api import streaming as streaming_api
 from app.core.tenancy import TenantContext, tenant_session
 from app.db.models import MembershipRole
 from app.db.session import engine
@@ -408,13 +409,13 @@ async def test_unexpected_non_app_error_mid_stream_still_ends_in_an_error_event(
     app.dependency_overrides[chat_api.get_chat_provider] = lambda: provider
 
     logged: list[dict[str, object]] = []
-    real_error = chat_api.logger.error
+    real_error = streaming_api.logger.error
 
     def _recording_error(event: str, **kwargs: object) -> None:
         logged.append({"event": event, **kwargs})
         real_error(event, **kwargs)
 
-    with unittest.mock.patch.object(chat_api.logger, "error", side_effect=_recording_error):
+    with unittest.mock.patch.object(streaming_api.logger, "error", side_effect=_recording_error):
         response = await api_client.post(
             CHAT_URL, json={"agent_id": str(agent_id), "message": "hello"}, headers=_auth(token)
         )
@@ -537,7 +538,7 @@ async def test_second_request_with_conversation_id_continues_same_conversation(
 async def test_heartbeat_ping_appears_while_stream_is_open(
     app, api_client, clean_users, monkeypatch
 ):
-    monkeypatch.setattr(chat_api, "HEARTBEAT_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(streaming_api, "HEARTBEAT_INTERVAL_SECONDS", 0.02)
     token = await _register(api_client, "heartbeat@example.com")
     org_id = await _organization_id(api_client, token)
     agent_id = await _make_agent(org_id)
@@ -580,7 +581,8 @@ async def test_stream_body_rolls_back_the_session_on_abrupt_close():
     reads a response to completion and has no way to simulate a client
     hanging up partway through, which is the only way this path triggers.
     """
-    from app.api.chat import ChatMessageStart, _stream_body
+    from app.api.streaming import stream_body
+    from app.chat.service import ChatMessageStart
 
     class _RecordingSessionCM:
         def __init__(self) -> None:
@@ -603,7 +605,7 @@ async def test_stream_body_rolls_back_the_session_on_abrupt_close():
 
     session_cm = _RecordingSessionCM()
     first_event = ChatMessageStart(conversation_id=uuid.uuid4(), message_id=uuid.uuid4())
-    body = _stream_body(_hangs_forever(), first_event, session_cm, None, uuid.uuid4())  # type: ignore[arg-type]
+    body = stream_body(_hangs_forever(), first_event, session_cm, None, uuid.uuid4())  # type: ignore[arg-type]
 
     first_chunk = await body.__anext__()
     assert first_chunk.startswith(b"data: ")
@@ -627,7 +629,8 @@ async def test_session_still_closes_if_the_pump_task_raises_an_unexpected_baseex
     it entirely, leaking the exact connection the pre-stream-error leak test
     above guards against.
     """
-    from app.api.chat import ChatMessageStart, _stream_body
+    from app.api.streaming import stream_body
+    from app.chat.service import ChatMessageStart
 
     class _RecordingSessionCM:
         def __init__(self) -> None:
@@ -656,7 +659,7 @@ async def test_session_still_closes_if_the_pump_task_raises_an_unexpected_baseex
 
     session_cm = _RecordingSessionCM()
     first_event = ChatMessageStart(conversation_id=uuid.uuid4(), message_id=uuid.uuid4())
-    body = _stream_body(
+    body = stream_body(
         _raises_unexpected_baseexception(), first_event, session_cm, None, uuid.uuid4()
     )  # type: ignore[arg-type]
 
@@ -686,7 +689,8 @@ async def test_disconnect_after_completed_turn_logs_discarded_usage(monkeypatch)
     """
     from decimal import Decimal
 
-    from app.api.chat import ChatMessageEnd, ChatMessageStart, _stream_body
+    from app.api.streaming import stream_body
+    from app.chat.service import ChatMessageEnd, ChatMessageStart
 
     class _NoOpSessionCM:
         async def __aenter__(self) -> "_NoOpSessionCM":
@@ -712,13 +716,13 @@ async def test_disconnect_after_completed_turn_logs_discarded_usage(monkeypatch)
 
     logged: list[dict[str, object]] = []
     monkeypatch.setattr(
-        chat_api.logger,
+        streaming_api.logger,
         "warning",
         lambda event, **kwargs: logged.append({"event": event, **kwargs}),
     )
 
     first_event = ChatMessageStart(conversation_id=uuid.uuid4(), message_id=uuid.uuid4())
-    body = _stream_body(_completes_then_hangs(), first_event, _NoOpSessionCM(), None, uuid.uuid4())  # type: ignore[arg-type]
+    body = stream_body(_completes_then_hangs(), first_event, _NoOpSessionCM(), None, uuid.uuid4())  # type: ignore[arg-type]
 
     first_chunk = await body.__anext__()
     assert first_chunk.startswith(b"data: ")
@@ -869,7 +873,8 @@ async def test_a_baseexception_in_the_pump_still_terminates_the_stream(monkeypat
     The session-close half of this was already fixed and tested; this is the
     half that hangs.
     """
-    from app.api.chat import ChatMessageStart, _stream_body
+    from app.api.streaming import stream_body
+    from app.chat.service import ChatMessageStart
 
     class _NoOpSessionCM:
         async def __aenter__(self) -> "_NoOpSessionCM":
@@ -887,9 +892,9 @@ async def test_a_baseexception_in_the_pump_still_terminates_the_stream(monkeypat
         raise _SimulatedBug("simulated bug outside _pump's documented contract")
         yield  # pragma: no cover - unreachable; keeps this an async generator
 
-    monkeypatch.setattr(chat_api, "HEARTBEAT_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(streaming_api, "HEARTBEAT_INTERVAL_SECONDS", 0.02)
     first_event = ChatMessageStart(conversation_id=uuid.uuid4(), message_id=uuid.uuid4())
-    body = _stream_body(
+    body = stream_body(
         _raises_unexpected_baseexception(), first_event, _NoOpSessionCM(), None, uuid.uuid4()
     )  # type: ignore[arg-type]
 
@@ -916,7 +921,7 @@ async def test_a_baseexception_in_the_pump_still_terminates_the_stream(monkeypat
     with pytest.raises(_SimulatedBug):
         await asyncio.wait_for(_drain(), timeout=2.0)
 
-    assert chat_api._PING not in chunks  # noqa: SLF001
+    assert streaming_api._PING not in chunks  # noqa: SLF001
 
 
 # ---------------------------------------------------------------------------
@@ -1132,7 +1137,7 @@ class _TitleRecorder:
 @pytest.fixture
 def titles(monkeypatch) -> _TitleRecorder:
     recorder = _TitleRecorder()
-    monkeypatch.setattr(chat_api, "enqueue_title", recorder)
+    monkeypatch.setattr(streaming_api, "enqueue_title", recorder)
     return recorder
 
 

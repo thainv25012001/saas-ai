@@ -71,6 +71,7 @@ async def test_identity_tables_do_not_have_rls(owner_connection, table):
         "eval_runs",
         "eval_results",
         "api_keys",
+        "widget_settings",
     ],
 )
 async def test_tenant_tables_have_rls_enabled_with_a_tenant_isolation_policy(

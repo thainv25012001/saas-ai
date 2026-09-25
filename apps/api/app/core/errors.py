@@ -47,6 +47,17 @@ class RateLimitError(AppError):
     status_code = 429
 
 
+class WidgetDailyCapError(RateLimitError):
+    """An agent's widget reached its `daily_message_cap` for this UTC day.
+
+    A distinct code (still a 429) because the widget shows something
+    different for it -- "not available right now" rather than "slow down" --
+    and because it is the owner's own spend ceiling, not the visitor's pace.
+    """
+
+    code = "widget_daily_cap"
+
+
 class PayloadTooLargeError(AppError):
     code = "payload_too_large"
     status_code = 413

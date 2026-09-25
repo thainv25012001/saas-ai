@@ -13,7 +13,7 @@ from app.conversations.service import ConversationService
 from app.core.config import get_settings
 from app.core.errors import NotFoundError, ValidationError
 from app.core.tenancy import tenant_session
-from app.db.models import MessageRole, UsageEvent, UsageKind
+from app.db.models import ConversationChannel, MessageRole, UsageEvent, UsageKind
 from app.llm.errors import LLMConfigurationError, LLMUnavailableError
 from app.llm.fake_provider import FakeProvider
 from app.llm.pricing import estimate_cost
@@ -541,3 +541,136 @@ async def test_a_midstream_failure_writes_no_usage_event(tenant_a):
     conversation_id = next(e.conversation_id for e in events if isinstance(e, ChatMessageStart))
 
     assert await _usage_events(tenant_a, conversation_id) == []
+
+
+# ---------------------------------------------------------------------------
+# `visitor_id`: widget conversations are scoped to the visitor that created
+# them (spec §3 -- "on an existing conversation, when visitor_id is given
+# and differs from conversation.visitor_id, it raises NotFoundError, the
+# same answer as a cross-tenant id").
+# ---------------------------------------------------------------------------
+
+
+async def test_a_new_conversation_stores_the_visitor_id_and_widget_channel(tenant_a):
+    provider = FakeProvider(script=["hi"])
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+        service = ChatService(session, tenant_a, provider_override=provider)
+        starts = [
+            e
+            async for e in service.send(
+                agent.id, "Hello", channel=ConversationChannel.WIDGET, visitor_id="visitor-1"
+            )
+            if isinstance(e, ChatMessageStart)
+        ]
+        conversation_id = starts[0].conversation_id
+
+    async with tenant_session(tenant_a) as session:
+        conversation = await ConversationService(session, tenant_a).get(conversation_id)
+    assert conversation.visitor_id == "visitor-1"
+    assert conversation.channel is ConversationChannel.WIDGET
+
+
+async def test_continuing_with_the_same_visitor_id_works(tenant_a):
+    provider1 = FakeProvider(script=["first"])
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+        service = ChatService(session, tenant_a, provider_override=provider1)
+        starts = [
+            e
+            async for e in service.send(
+                agent.id, "Hello", channel=ConversationChannel.WIDGET, visitor_id="visitor-1"
+            )
+            if isinstance(e, ChatMessageStart)
+        ]
+        conversation_id = starts[0].conversation_id
+
+    provider2 = FakeProvider(script=["second"])
+    async with tenant_session(tenant_a) as session:
+        service = ChatService(session, tenant_a, provider_override=provider2)
+        events = [
+            event
+            async for event in service.send(
+                agent.id,
+                "Follow up",
+                conversation_id=conversation_id,
+                channel=ConversationChannel.WIDGET,
+                visitor_id="visitor-1",
+            )
+        ]
+
+    assert any(isinstance(e, ChatMessageStart) for e in events)
+    async with tenant_session(tenant_a) as session:
+        history = await ConversationService(session, tenant_a).history(conversation_id)
+    assert [m.content for m in history] == ["Hello", "first", "Follow up", "second"]
+
+
+async def test_a_different_visitor_id_raises_not_found_and_appends_no_message(tenant_a):
+    provider1 = FakeProvider(script=["first"])
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+        service = ChatService(session, tenant_a, provider_override=provider1)
+        starts = [
+            e
+            async for e in service.send(
+                agent.id, "Hello", channel=ConversationChannel.WIDGET, visitor_id="visitor-1"
+            )
+            if isinstance(e, ChatMessageStart)
+        ]
+        conversation_id = starts[0].conversation_id
+
+    async with tenant_session(tenant_a) as session:
+        service = ChatService(
+            session, tenant_a, provider_override=FakeProvider(script=["intruder"])
+        )
+        with pytest.raises(NotFoundError):
+            _ = [
+                event
+                async for event in service.send(
+                    agent.id,
+                    "Nice conversation you have there",
+                    conversation_id=conversation_id,
+                    channel=ConversationChannel.WIDGET,
+                    visitor_id="visitor-2",
+                )
+            ]
+
+    async with tenant_session(tenant_a) as session:
+        history = await ConversationService(session, tenant_a).history(conversation_id)
+    # Exactly the first turn's two messages -- nothing was appended by the
+    # rejected second visitor's attempt.
+    assert [m.content for m in history] == ["Hello", "first"]
+
+
+async def test_visitor_id_none_on_an_existing_visitor_conversation_still_works(tenant_a):
+    """The dashboard path: reading/continuing a widget conversation with no
+    `visitor_id` supplied at all (e.g. a future dashboard "reply as agent"
+    feature) must not be treated as a mismatch -- only a *given*, different
+    `visitor_id` is a mismatch."""
+    provider1 = FakeProvider(script=["first"])
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+        service = ChatService(session, tenant_a, provider_override=provider1)
+        starts = [
+            e
+            async for e in service.send(
+                agent.id, "Hello", channel=ConversationChannel.WIDGET, visitor_id="visitor-1"
+            )
+            if isinstance(e, ChatMessageStart)
+        ]
+        conversation_id = starts[0].conversation_id
+
+    provider2 = FakeProvider(script=["second"])
+    async with tenant_session(tenant_a) as session:
+        service = ChatService(session, tenant_a, provider_override=provider2)
+        events = [
+            event
+            async for event in service.send(
+                agent.id,
+                "Follow up",
+                conversation_id=conversation_id,
+                channel=ConversationChannel.WIDGET,
+            )
+        ]
+
+    assert any(isinstance(e, ChatMessageStart) for e in events)

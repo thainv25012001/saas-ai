@@ -7,6 +7,7 @@ export type IconName =
   | "product"
   | "lead"
   | "prompt"
+  | "conversation"
   | "playground"
   | "evaluation"
   | "chevronRight"
@@ -66,6 +67,13 @@ const GLYPHS: Record<IconName, React.ReactNode> = {
     <>
       <path d="M9 4H7.5A2.5 2.5 0 0 0 5 6.5v3A2.5 2.5 0 0 1 2.5 12A2.5 2.5 0 0 1 5 14.5v3A2.5 2.5 0 0 0 7.5 20H9" />
       <path d="M15 4h1.5A2.5 2.5 0 0 1 19 6.5v3A2.5 2.5 0 0 0 21.5 12A2.5 2.5 0 0 0 19 14.5v3A2.5 2.5 0 0 1 16.5 20H15" />
+    </>
+  ),
+  conversation: (
+    <>
+      <path d="M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H9l-5 4z" />
+      <path d="M8 9h8" />
+      <path d="M8 13h5" />
     </>
   ),
   playground: (

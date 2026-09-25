@@ -4,7 +4,7 @@ query Agents {
 
 query Agent($id: UUID!) {
   agent(id: $id) {
-    id name slug status provider model temperature maxTokens promptId
+    id name slug status provider model temperature maxTokens promptId publicKey
     config { id tone language persona greeting fallbackMessage retrievalTopK maxAgentSteps }
   }
 }
@@ -51,7 +51,7 @@ mutation DeleteDocument($id: UUID!) {
 
 query Conversations($agentId: UUID!, $channel: ConversationChannel, $limit: Int, $offset: Int) {
   conversations(agentId: $agentId, channel: $channel, limit: $limit, offset: $offset) {
-    id title preview
+    id title preview channel lastMessageAt createdAt
   }
 }
 
@@ -68,7 +68,7 @@ query Conversation($id: UUID!) {
 
 query Leads($agentId: UUID!, $limit: Int, $offset: Int) {
   leads(agentId: $agentId, limit: $limit, offset: $offset) {
-    id name email phone interest status createdAt
+    id agentId name email phone interest status source createdAt
     conversation { id title preview }
   }
 }
@@ -257,4 +257,18 @@ mutation ActivatePromptVersion($versionId: UUID!) {
 
 mutation SetAgentPrompt($agentId: UUID!, $promptId: UUID) {
   setAgentPrompt(agentId: $agentId, promptId: $promptId) { id promptId }
+}
+
+# --- Website widget (Phase 8 Task 6) ---------------------------------------
+
+query WidgetSettings($agentId: UUID!) {
+  widgetSettings(agentId: $agentId) {
+    agentId enabled allowedOrigins brandColor position title dailyMessageCap
+  }
+}
+
+mutation UpdateWidgetSettings($agentId: UUID!, $input: UpdateWidgetSettingsInput!) {
+  updateWidgetSettings(agentId: $agentId, input: $input) {
+    agentId enabled allowedOrigins brandColor position title dailyMessageCap
+  }
 }

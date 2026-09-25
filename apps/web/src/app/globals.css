@@ -53,3 +53,11 @@
   --radius-control: 0.5rem; /* inputs, buttons, badges */
   --radius-card: 0.75rem; /*   cards, panels          */
 }
+
+/* The chat widget's embed page (`app/embed/[publicKey]/layout.tsx`) is framed
+ * by a customer's site. A nested layout cannot replace the root <body>, so the
+ * page marks its wrapper and the body behind it goes transparent -- no route
+ * check in the root layout, and nothing painted around the rounded frame. */
+body:has([data-widget-embed]) {
+  background-color: transparent;
+}

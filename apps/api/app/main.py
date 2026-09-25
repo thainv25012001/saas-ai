@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.routing import Route
 
-from app.api import auth, chat, documents, evaluations, health, products
+from app.api import auth, chat, documents, evaluations, health, products, widget
 from app.core.config import get_settings
 from app.core.errors import AppError, format_validation_errors
 from app.core.logging import configure_logging, get_logger, request_id_var
@@ -30,7 +30,27 @@ _HTTP_STATUS_CODES = {404: "not_found", 405: "invalid_input"}
 # is a probe that fails, not one of the tens of thousands that pass.
 _PROBE_PATHS = frozenset({"/health", "/health/ready"})
 
+# A route path parameter the access line keeps to its first 8 characters. The
+# widget's public key is in its URL path; it is not a secret -- it sits in every
+# embedding page's HTML -- but spec §5 keeps logs to that prefix.
+_REDACTED_PATH_PARAM = "public_key"
+_REDACTED_PREFIX = 8
+
 logger = get_logger(__name__)
+
+
+def _loggable_path(request: Request) -> str:
+    """The request path with any `public_key` path parameter truncated.
+
+    Read from the matched route's own parameters (the router writes them onto
+    the shared scope before this runs), so a new widget route is covered
+    without this module knowing the widget's URL layout.
+    """
+    path = request.url.path
+    value = request.path_params.get(_REDACTED_PATH_PARAM)
+    if isinstance(value, str) and len(value) > _REDACTED_PREFIX:
+        path = path.replace(value, f"{value[:_REDACTED_PREFIX]}...", 1)
+    return path
 
 
 def _probe_passed(request: Request, status: int) -> bool:
@@ -107,7 +127,7 @@ def create_app() -> FastAPI:
             logger.info(
                 "request",
                 method=request.method,
-                path=request.url.path,
+                path=_loggable_path(request),
                 status=status,
                 duration_ms=round((time.perf_counter() - started) * 1000, 2),
             )
@@ -171,6 +191,7 @@ def create_app() -> FastAPI:
     app.include_router(documents.router)
     app.include_router(products.router)
     app.include_router(evaluations.router)
+    app.include_router(widget.router)
 
     # An exact route, not a `Mount`: `/mcp/` redirects to `/mcp` rather than
     # being a second endpoint. Bearer-key auth is inside `mcp_asgi`, so it

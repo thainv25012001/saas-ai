@@ -8,6 +8,7 @@ type Agent {
   temperature: Float!
   maxTokens: Int!
   promptId: UUID
+  publicKey: String!
   createdAt: DateTime!
   updatedAt: DateTime!
   config: AgentConfig
@@ -249,6 +250,7 @@ type Lead {
   phone: String
   interest: String
   status: LeadStatus!
+  source: String
   createdAt: DateTime!
   conversation: Conversation
 }
@@ -335,6 +337,7 @@ type Mutation {
   cancelEvaluationRun(id: UUID!): EvaluationRun!
   createApiKey(agentId: UUID!, name: String!): CreatedApiKey!
   revokeApiKey(id: UUID!): ApiKey!
+  updateWidgetSettings(agentId: UUID!, input: UpdateWidgetSettingsInput!): WidgetSettings!
 }
 
 type Organization {
@@ -456,6 +459,7 @@ type Query {
   evaluationRun(id: UUID!): EvaluationRun
   apiKeys(agentId: UUID!): [ApiKey!]!
   agentMcpInfo(agentId: UUID!): McpInfo!
+  widgetSettings(agentId: UUID!): WidgetSettings!
 }
 
 scalar UUID
@@ -483,4 +487,28 @@ input UpdateAgentInput {
 input UpdateEvaluationDatasetInput {
   name: String = null
   description: String = null
+}
+
+input UpdateWidgetSettingsInput {
+  enabled: Boolean!
+  allowedOrigins: [String!]!
+  brandColor: String!
+  position: WidgetPosition!
+  title: String = null
+  dailyMessageCap: Int!
+}
+
+enum WidgetPosition {
+  RIGHT
+  LEFT
+}
+
+type WidgetSettings {
+  agentId: UUID!
+  enabled: Boolean!
+  allowedOrigins: [String!]!
+  brandColor: String!
+  position: WidgetPosition!
+  title: String
+  dailyMessageCap: Int!
 }

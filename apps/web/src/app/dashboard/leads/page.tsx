@@ -43,11 +43,13 @@ export default function LeadsPage() {
     () =>
       (data?.leads ?? []).map((row) => ({
         id: String(row.id),
+        agentId: String(row.agentId),
         name: row.name,
         email: row.email,
         phone: row.phone,
         interest: row.interest,
         status: row.status,
+        source: row.source,
         createdAt: String(row.createdAt),
         conversation: row.conversation
           ? {

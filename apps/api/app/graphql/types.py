@@ -27,6 +27,7 @@ from app.db.models import Prompt as PromptModel
 from app.db.models import PromptVersion as PromptVersionModel
 from app.db.models import Tool as ToolModel
 from app.graphql.context import Context
+from app.widget.service import WidgetView
 
 
 @strawberry.enum
@@ -131,6 +132,11 @@ class Agent:
     temperature: float
     max_tokens: int
     prompt_id: uuid.UUID | None
+    #: The `pk_...` key a widget loader embeds in a page's HTML (spec §2) --
+    #: safe to expose to any member, unlike `ApiKey`, which never carries its
+    #: own plaintext token past `createApiKey`'s response: this key is public
+    #: by design, not a secret credential.
+    public_key: str
     created_at: datetime
     updated_at: datetime
 
@@ -146,6 +152,7 @@ class Agent:
             temperature=model.temperature,
             max_tokens=model.max_tokens,
             prompt_id=model.prompt_id,
+            public_key=model.public_key,
             created_at=model.created_at,
             updated_at=model.updated_at,
         )
@@ -442,6 +449,12 @@ class Lead:
     phone: str | None
     interest: str | None
     status: LeadStatus
+    #: The conversation channel this lead was captured from (`widget`,
+    #: `playground`, `api`), set by `LeadService.create` from the
+    #: conversation's own `channel` -- a plain passthrough of the column, so
+    #: `None` for any lead created before that (docs/superpowers/specs/
+    #: 2026-09-25-embeddable-widget-design.md §7).
+    source: str | None
     created_at: datetime
 
     @classmethod
@@ -455,6 +468,7 @@ class Lead:
             phone=model.phone,
             interest=model.interest,
             status=LeadStatus(model.status.value),
+            source=model.source,
             created_at=model.created_at,
         )
 
@@ -1176,3 +1190,52 @@ class EvaluationCaseInput:
     expected_document_ids: list[uuid.UUID] = strawberry.field(default_factory=list)
     expected_product_ids: list[uuid.UUID] = strawberry.field(default_factory=list)
     tags: list[str] = strawberry.field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 -- the embeddable widget (docs/superpowers/specs/
+# 2026-09-25-embeddable-widget-design.md §7): dashboard-side settings for an
+# agent's widget. `WidgetSettings`/`UpdateWidgetSettingsInput` mirror
+# `WidgetView`/`app.widget.schemas.UpdateWidgetSettingsInput` field for
+# field -- this is a thin wrapper over `WidgetSettingsService`, not a second
+# copy of its validation.
+# ---------------------------------------------------------------------------
+
+
+@strawberry.enum
+class WidgetPosition(enum.Enum):
+    RIGHT = "right"
+    LEFT = "left"
+
+
+@strawberry.type
+class WidgetSettings:
+    agent_id: uuid.UUID
+    enabled: bool
+    allowed_origins: list[str]
+    brand_color: str
+    position: WidgetPosition
+    title: str | None
+    daily_message_cap: int
+
+    @classmethod
+    def from_view(cls, view: WidgetView) -> "WidgetSettings":
+        return cls(
+            agent_id=view.agent_id,
+            enabled=view.enabled,
+            allowed_origins=list(view.allowed_origins),
+            brand_color=view.brand_color,
+            position=WidgetPosition(view.position.value),
+            title=view.title,
+            daily_message_cap=view.daily_message_cap,
+        )
+
+
+@strawberry.input
+class UpdateWidgetSettingsInput:
+    enabled: bool
+    allowed_origins: list[str]
+    brand_color: str
+    position: WidgetPosition
+    title: str | None = None
+    daily_message_cap: int

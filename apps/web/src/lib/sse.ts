@@ -275,17 +275,32 @@ function extractData(frame: string): string | null {
   return dataLines.join("\n");
 }
 
+/** One frame's `data:` payload, parsed and narrowed by `toEvent`; `null` for
+ * bad JSON or a shape `toEvent` does not recognise. */
+function parseFrame<E>(data: string, toEvent: (value: unknown) => E | null): E | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  return parsed === null ? null : toEvent(parsed);
+}
+
 /**
- * Parses a raw byte stream into `SSEEvent`s, buffering across chunk
- * boundaries and only emitting once a complete `\n\n`-terminated frame has
- * arrived. Malformed frames (bad JSON, or JSON that doesn't match a known
- * event shape) are silently skipped rather than throwing, so one
- * unrecognised frame (e.g. a future event type) doesn't take down the whole
- * stream.
+ * Parses a raw byte stream into events, buffering across chunk boundaries
+ * and only emitting once a complete `\n\n`-terminated frame has arrived.
+ * `toEvent` decides what a frame's JSON may become: the playground passes
+ * `toSSEEvent` (via `parseSSEStream`), the widget its own `toWidgetEvent`,
+ * because the widget's projected events would fail the playground's full
+ * shapes. Malformed frames (bad JSON, or JSON `toEvent` rejects) are
+ * silently skipped rather than throwing, so one unrecognised frame (e.g. a
+ * future event type) doesn't take down the whole stream.
  */
-export async function* parseSSEStream(
+export async function* parseSSEFrames<E>(
   chunks: AsyncIterable<Uint8Array>,
-): AsyncGenerator<SSEEvent, void, void> {
+  toEvent: (value: unknown) => E | null,
+): AsyncGenerator<E, void, void> {
   // `{ stream: true }` below keeps partial multi-byte UTF-8 sequences that
   // land on a chunk boundary in the decoder's internal state rather than
   // emitting U+FFFD for them -- this decoder instance must live for the
@@ -303,13 +318,7 @@ export async function* parseSSEStream(
 
       const data = extractData(frame);
       if (data !== null) {
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(data);
-        } catch {
-          parsed = null;
-        }
-        const event = parsed === null ? null : toSSEEvent(parsed);
+        const event = parseFrame(data, toEvent);
         if (event !== null) yield event;
       }
 
@@ -326,16 +335,19 @@ export async function* parseSSEStream(
   buffer += decoder.decode();
   const data = extractData(buffer);
   if (data !== null) {
-    try {
-      const event = toSSEEvent(JSON.parse(data));
-      if (event !== null) yield event;
-    } catch {
-      // Incomplete trailing frame -- nothing to yield.
-    }
+    const event = parseFrame(data, toEvent);
+    if (event !== null) yield event;
   }
 }
 
-async function* readableStreamToIterable(
+/** The playground's stream: `parseSSEFrames` over the full event shapes. */
+export function parseSSEStream(
+  chunks: AsyncIterable<Uint8Array>,
+): AsyncGenerator<SSEEvent, void, void> {
+  return parseSSEFrames(chunks, toSSEEvent);
+}
+
+export async function* readableStreamToIterable(
   stream: ReadableStream<Uint8Array>,
 ): AsyncGenerator<Uint8Array, void, void> {
   const reader = stream.getReader();

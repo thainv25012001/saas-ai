@@ -67,7 +67,11 @@ async def enforce_rate_limit(key: str, *, limit: int, window_seconds: int) -> No
         # Only genuine Redis/connection errors land here; RateLimitError
         # itself is raised below, outside this try block, and must never
         # be caught by it.
-        logger.warning("rate_limit_backend_unavailable", key=redis_key)
+        # Only the key's leading scope ("login", "widget", ...), never the
+        # whole key: its subject is an IP or a widget visitor id, neither of
+        # which may reach a log line (widget spec §5). An outage fails every
+        # key alike, so the full key would add nothing to diagnose it.
+        logger.warning("rate_limit_backend_unavailable", key_scope=key.split(":", 1)[0])
         return
     if raw > limit:
         raise RateLimitError("too many requests, please try again shortly")

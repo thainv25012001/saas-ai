@@ -36,6 +36,26 @@ export function authProxyRewrites(apiUrl: string): RewriteRule[] {
 }
 
 /**
+ * The widget loader's pre-draw check, `GET /api/v1/widget/<key>/config`,
+ * served from this origin too -- `public/widget.js` only knows the origin its
+ * own `<script src>` came from, not the API's. The API answers it with
+ * `Access-Control-Allow-Origin: *` and `Cache-Control: public, max-age=60`,
+ * and an external rewrite passes both through unchanged. Only this one route:
+ * the chat stream and the rest of the widget API are called from the embed
+ * page, which already knows the API URL.
+ */
+export const WIDGET_CONFIG_PATH = "/api/v1/widget/:key/config";
+
+export function widgetConfigRewrites(apiUrl: string): RewriteRule[] {
+  return [
+    {
+      source: WIDGET_CONFIG_PATH,
+      destination: `${apiUrl.replace(/\/+$/, "")}${WIDGET_CONFIG_PATH}`,
+    },
+  ];
+}
+
+/**
  * The origin the *server* dials to reach the API, which is not always the one
  * the browser uses.
  *

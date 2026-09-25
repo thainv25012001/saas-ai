@@ -3,6 +3,7 @@ import {
   AUTH_PATH_PREFIX,
   authProxyRewrites,
   proxyTargetUrl,
+  widgetConfigRewrites,
 } from "./auth-proxy";
 
 const API = "https://saas-ai-api.onrender.com";
@@ -32,6 +33,25 @@ describe("authProxyRewrites", () => {
     expect(authProxyRewrites(`${API}/`)[0].destination).toBe(
       `${API}${AUTH_PATH_PREFIX}/:path*`,
     );
+  });
+});
+
+describe("widgetConfigRewrites", () => {
+  it("serves the loader's config check from this app's origin", () => {
+    // widget.js only knows the origin it was loaded from, so the launcher's
+    // pre-draw config request has to be answerable there.
+    expect(widgetConfigRewrites(`${API}/`)).toEqual([
+      {
+        source: "/api/v1/widget/:key/config",
+        destination: `${API}/api/v1/widget/:key/config`,
+      },
+    ]);
+  });
+
+  it("proxies the config route only, not the rest of the widget API", () => {
+    const [rule] = widgetConfigRewrites(API);
+    expect(rule.source.endsWith("/config")).toBe(true);
+    expect(rule.source).not.toContain(":path*");
   });
 });
 
