@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import type { LeadStatus } from "@/graphql/generated";
@@ -7,14 +8,29 @@ import { leadStatusLabel, leadStatusTone } from "@/lib/lead-status";
 
 export type LeadRow = {
   id: string;
+  agentId: string;
   name: string | null;
   email: string | null;
   phone: string | null;
   interest: string | null;
   status: LeadStatus;
+  /** The channel the capturing conversation happened on (`widget`,
+   * `playground`, `api`) -- `null` for a lead captured before Phase 8 set
+   * this (Task 4). Shown as a badge only when set, per the brief; a raw
+   * string rather than an enum, so a label the API adds later still renders
+   * instead of falling through a switch with no matching case. */
+  source: string | null;
   createdAt: string;
   conversation: { id: string; title: string | null; preview: string | null } | null;
 };
+
+/** `source` is freeform on the server (Task 4), not a GraphQL enum -- today
+ * it is always one of `widget`/`playground`/`api`, and capitalizing is
+ * enough to read as a label rather than a wire value, without a lookup
+ * table that would need updating for a value the API might add later. */
+function sourceLabel(source: string): string {
+  return source.length === 0 ? source : source[0].toUpperCase() + source.slice(1);
+}
 
 /** `name`/`email`/`phone`/`interest` are all independently nullable on the
  * model -- a chat rarely yields a complete contact card in one turn, so a
@@ -65,6 +81,9 @@ export function LeadsTable({ leads }: { leads: readonly LeadRow[] }) {
               Conversation
             </th>
             <th scope="col" className="px-5 py-2.5 font-medium">
+              Source
+            </th>
+            <th scope="col" className="px-5 py-2.5 font-medium">
               Captured
             </th>
           </tr>
@@ -85,9 +104,19 @@ export function LeadsTable({ leads }: { leads: readonly LeadRow[] }) {
                 <Badge tone={leadStatusTone(lead.status)}>{leadStatusLabel(lead.status)}</Badge>
               </td>
               <td className="max-w-xs px-5 py-3 text-ink-muted">
-                <span className="block truncate">
-                  {lead.conversation ? conversationLabel(lead.conversation) : "Deleted conversation"}
-                </span>
+                {lead.conversation ? (
+                  <Link
+                    href={`/dashboard/conversations?agent=${lead.agentId}&conversation=${lead.conversation.id}`}
+                    className="block truncate underline-offset-2 hover:underline"
+                  >
+                    {conversationLabel(lead.conversation)}
+                  </Link>
+                ) : (
+                  <span className="block truncate">Deleted conversation</span>
+                )}
+              </td>
+              <td className="px-5 py-3">
+                {lead.source !== null ? <Badge tone="neutral">{sourceLabel(lead.source)}</Badge> : null}
               </td>
               <td className="px-5 py-3 text-ink-muted">{formatTimestamp(lead.createdAt)}</td>
             </tr>

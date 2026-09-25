@@ -7,6 +7,7 @@ import { Alert } from "@/components/ui/Alert";
 import { AgentPromptCard } from "@/components/agents/AgentPromptCard";
 import { AgentToolsCard } from "@/components/agents/AgentToolsCard";
 import { McpAccessCard } from "@/components/agents/McpAccessCard";
+import { WidgetCard, type WidgetSettingsInput } from "@/components/agents/WidgetCard";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonLink } from "@/components/ui/Button";
 import { Card, CardBody, CardFooter, CardHeader } from "@/components/ui/Card";
@@ -30,6 +31,8 @@ import {
   SetAgentToolEnabledDocument,
   UpdateAgentConfigDocument,
   UpdateAgentDocument,
+  UpdateWidgetSettingsDocument,
+  WidgetSettingsDocument,
 } from "@/graphql/generated";
 import { agentStatusLabel, agentStatusTone } from "@/lib/agent-status";
 import { API_URL } from "@/lib/api";
@@ -100,6 +103,17 @@ export default function AgentDetailPage({
   const [promptsResult] = usePromptOptionsQuery(loading || !user);
   const [setPromptResult, setAgentPrompt] = useMutation(SetAgentPromptDocument);
   const [promptSaved, setPromptSaved] = useState(false);
+
+  // Phase 8 -- the website widget (docs/superpowers/specs/
+  // 2026-09-25-embeddable-widget-design.md §7).
+  const [widgetSettingsResult, refetchWidgetSettings] = useQuery({
+    query: WidgetSettingsDocument,
+    variables: { agentId: id },
+    pause: loading || !user,
+  });
+  const [, updateWidgetSettings] = useMutation(UpdateWidgetSettingsDocument);
+  const [savingWidgetSettings, setSavingWidgetSettings] = useState(false);
+  const [widgetSaveError, setWidgetSaveError] = useState<string | null>(null);
 
   const agent = data?.agent;
 
@@ -231,6 +245,22 @@ export default function AgentDetailPage({
     }
   }
 
+  async function onSaveWidgetSettings(input: WidgetSettingsInput): Promise<boolean> {
+    setWidgetSaveError(null);
+    setSavingWidgetSettings(true);
+    try {
+      const result = await updateWidgetSettings({ agentId: id, input });
+      if (result.error) {
+        setWidgetSaveError(firstGraphQLError(result.error));
+        return false;
+      }
+      refetchWidgetSettings({ requestPolicy: "network-only" });
+      return true;
+    } finally {
+      setSavingWidgetSettings(false);
+    }
+  }
+
   async function onRevokeApiKey(keyId: string) {
     setRevokeKeyError(null);
     setRevokingKeyId(keyId);
@@ -245,6 +275,13 @@ export default function AgentDetailPage({
       setRevokingKeyId(null);
     }
   }
+
+  // The Tools card's own data is the source of truth (spec §7): re-derived on
+  // every render rather than mirrored into state, so toggling `create_lead`
+  // there and `refetchTools` refreshing this same query is all it takes for
+  // the widget card's warning to catch up -- no extra wiring needed here.
+  const leadToolEnabled =
+    toolsResult.data?.agentTools.find((tool) => tool.name === "create_lead")?.isEnabled ?? false;
 
   const providers = providersResult.data?.configuredProviders ?? [];
   const agentError = firstGraphQLError(updateAgentResult.error);
@@ -521,6 +558,24 @@ export default function AgentDetailPage({
         onCreate={onCreateApiKey}
         onRevoke={onRevokeApiKey}
       />
+
+      {/* Anchored: the Conversations page's empty state for a widget-less
+        * agent links straight here (`#widget-card`) rather than just to the
+        * agent page. */}
+      <div id="widget-card">
+        <WidgetCard
+          agentId={id}
+          publicKey={agent.publicKey}
+          agentStatus={agent.status}
+          leadToolEnabled={leadToolEnabled}
+          canEdit={!!user && KEY_MANAGER_ROLES.has(user.role)}
+          settings={widgetSettingsResult.data?.widgetSettings}
+          fetching={widgetSettingsResult.fetching}
+          saving={savingWidgetSettings}
+          saveError={widgetSaveError}
+          onSave={onSaveWidgetSettings}
+        />
+      </div>
 
       <Card tone="danger">
         <CardHeader

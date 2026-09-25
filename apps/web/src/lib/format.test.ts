@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatLatency, formatPrice, formatUsd } from "./format";
+import { formatLatency, formatPrice, formatRelativeTime, formatUsd } from "./format";
 
 describe("formatPrice", () => {
   it("returns null for no price, so the caller chooses the empty-cell wording", () => {
@@ -37,5 +37,33 @@ describe("formatLatency", () => {
     expect(formatLatency(840)).toBe("840 ms");
     expect(formatLatency(2140)).toBe("2.1 s");
     expect(formatLatency(null)).toBe("—");
+  });
+});
+
+describe("formatRelativeTime", () => {
+  const now = new Date("2026-02-01T12:00:00Z").getTime();
+
+  it("says just now for something seconds old", () => {
+    expect(formatRelativeTime("2026-02-01T11:59:58Z", now)).toBe("now");
+  });
+
+  it("uses minutes for something under an hour old", () => {
+    expect(formatRelativeTime("2026-02-01T11:55:00Z", now)).toBe("5 minutes ago");
+  });
+
+  it("uses hours for something under a day old", () => {
+    expect(formatRelativeTime("2026-02-01T09:00:00Z", now)).toBe("3 hours ago");
+  });
+
+  it("uses days for something under a month old", () => {
+    expect(formatRelativeTime("2026-01-30T12:00:00Z", now)).toBe("2 days ago");
+  });
+
+  it("handles the future the same way, in words", () => {
+    expect(formatRelativeTime("2026-02-01T12:05:00Z", now)).toBe("in 5 minutes");
+  });
+
+  it("falls back to the raw value for an unparseable timestamp", () => {
+    expect(formatRelativeTime("not-a-date", now)).toBe("not-a-date");
   });
 });

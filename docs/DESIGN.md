@@ -670,6 +670,168 @@ example; `app/dashboard/prompts/[id]/page.tsx` composes it.
   instead of rendering a select that would show "Built-in default" for an
   agent that is linked.
 
+## The embeddable widget (Phase 8)
+
+The widget is the one surface in this app that is not the dashboard: a page
+rendered inside someone else's site, and its documented exception to
+"Browser storage" above.
+
+**The exception to the one browser-storage rule.** `Browser storage` says
+`localStorage` holds UI preferences only, never a credential. The embed page
+(`src/components/widget/WidgetChat.tsx`) breaks that rule on purpose: it
+keeps the visitor's widget bearer token at `localStorage["widget:{publicKey}"]`
+(`src/lib/widget-api.ts`'s `readStoredToken`/`storeToken`), so reloading the
+host page resumes the same conversation instead of starting a new one. This
+is a deliberate, narrow exception, not a precedent for any other token in
+this app:
+
+- it is a low-value, anonymous, 30-day token scoped to one agent's widget,
+  not a dashboard session;
+- losing it (private window, blocked storage, a different device) only loses
+  *resume* — the widget still works, it just starts a fresh conversation;
+- both accesses are still wrapped in `try`/`catch`, per the same rule
+  `use-remembered-flag.ts` already follows, because storage can throw as well
+  as return nothing.
+
+**The embed page has no providers.** `src/app/embed/[publicKey]/layout.tsx`
+mounts neither `AuthProvider` nor `UrqlProvider` — both moved out of the root
+layout and into `app/dashboard/layout.tsx` specifically so the embed route
+would not carry dashboard auth machinery it never uses. `WidgetChat` talks to
+the API directly through `src/lib/widget-api.ts`, never through urql.
+
+**Brand colour is data, not a token.** The one exception to "nothing outside
+`globals.css` names a colour": a business's own `brand_color` is customer
+data, set once per widget and read in exactly one place. `WidgetChat` sets
+`--widget-brand` as an inline style on its own root, only when the value is a
+6-digit hex (never interpolated into a class name), and every consumer reads
+it through the fixed class `bg-[var(--widget-brand,var(--color-primary))]` —
+the header, user bubbles and the Send button. Text on it is the existing
+`text-primary-ink` token. `WidgetCard`'s own brand-colour field (below) is the
+other end of this: an `<input type="color">` and a plain-text hex `Input`
+kept in sync in one piece of state, validated server-side, not this document.
+
+**A brand-painted button copies `Button`, not `cn`s onto it.** `cn()` only
+concatenates classes, so a second `bg-*` after `Button`'s own would resolve
+to whichever Tailwind emits later — silently wrong depending on build order.
+`WidgetChat`'s `SEND_BUTTON` copies `Button`'s primary shape (padding, radius,
+focus ring) and substitutes the brand background instead of composing with
+`Button` at all.
+
+**Widget bubbles are not `ChatMessage`.** The playground's `ChatMessage`
+carries meta the widget must never show a visitor (model, cost, tool
+arguments/results — see Review Focus #3 in the widget's own spec). The embed
+page draws its own, smaller bubbles: user text `ml-auto max-w-[85%]
+rounded-card` on the brand colour; assistant text `rounded-card border-line
+bg-surface`, still through `AnswerText` (the same untrusted-markdown renderer
+below); a tool-status line (`text-xs text-ink-subtle`, `role="status"`) while
+a call is in flight; and a plain-text "Sources: …" line, never the
+playground's numbered `Citations` block. Icon-only header buttons ("New
+conversation", "Close chat") on the coloured header bar use `aria-label` +
+`title` and `focusRing` with `offset-1` and `hover:bg-surface/15`, the same
+contrast-safe hover treatment as everywhere else an icon button sits on a
+coloured surface.
+
+**The embed body is transparent.** A nested layout cannot add a class to
+`<body>`, so `globals.css` carries one rule scoped to the route:
+`body:has([data-widget-embed]) { background-color: transparent; }` — the
+root layout stays unaware the embed route exists, and nothing runs
+client-side to achieve it.
+
+### The widget card (`components/agents/WidgetCard.tsx`, agent page)
+
+Unlike every other card on the agent page, `WidgetCard` is **not**
+presentational the way `McpAccessCard`/`AgentToolsCard` are: the page hands it
+`agentId`, the loaded `settings` and the mutation's fetching/error state, and
+the card owns its own form fields (seeded from `settings` in an effect, the
+same pattern the agent page's own identity/model forms already use — never
+as initial state, so a slow query does not leave the fields empty forever).
+The reason is the shape of the data: five independent settings saved
+together behind one button is a form, not a list with row actions, and
+`McpAccessCard`'s "page owns every query" split has nothing to hand back for
+a form field's own edit-in-progress state.
+
+- **The enable toggle is a native checkbox**, not the `AgentToolsCard`-style
+  Enable/Disable button: that precedent is for a control that fires
+  immediately and stands alone; here it is one field among six, saved
+  together, which is exactly the shape "Checkboxes" under Evaluations above
+  already covers (`accent-primary`, `focusRing` offset-1, inside a `<label>`).
+- **The preview keys off the *saved* `enabled`, never the unsaved checkbox** —
+  the same "saved state, not the form's draft" rule `McpAccessCard`'s
+  DISABLED-agent alert already follows. Ticking the box does not reveal a
+  preview of a widget that is not live yet; only a successful save does, and
+  the preview `<iframe>`'s `key` is bumped on that same success so it reloads
+  from scratch rather than continuing a stale session.
+- **The snippet and its Copy button** reuse `lib/mcp.ts`'s `copyToClipboard`
+  and the "copy it by hand" fallback exactly as `McpAccessCard` does; the
+  snippet text itself comes from the new pure `widgetSnippet`
+  (`src/lib/widget-snippet.ts`), HTML-escaped and with a trailing slash on the
+  origin trimmed, so a pasted `NEXT_PUBLIC_APP_URL`-style value can never
+  break the tag.
+- **Four warnings, one of them permanent.** Agent-not-active, enabled-with-
+  no-domains and `create_lead`-granted are each a `warn` `Alert`, computed
+  from the current form state (so they react as the owner types, not only
+  after a save). The fourth — that the allowed-domains list stops other
+  websites, not direct API use (spec §2) — is plain help text under the
+  textarea, always visible, not a dismissible alert: it is a permanent fact
+  about the feature, not a transient condition.
+- **Read-only for a member** follows `McpAccessCard`'s role-gating precedent
+  exactly: every field disabled, the Save button gone entirely (not
+  present-and-disabled), driven by the same `owner`/`admin` check
+  `KEY_MANAGER_ROLES` already expresses on that card.
+
+### The conversations page (`app/dashboard/conversations`)
+
+A two-pane layout — a list `Card` beside a transcript `Card`
+(`lg:grid-cols-[22rem_1fr]`) — new to this app, for a page whose job really is
+"pick one thing on the left, read it on the right" without the playground's
+composer or full-bleed toolbar.
+
+- **Read-only reuses `ChatMessage` and `conversation-transcript.ts` as-is.**
+  A stored conversation's messages already carry everything `ChatMessage`
+  renders (model, tokens, cost, citations, tool calls); the page needed no
+  new renderer and no changes to `toTranscript`, only a list with no composer
+  underneath it.
+- **Relative time is a small `Intl.RelativeTimeFormat` helper**
+  (`formatRelativeTime` in `lib/format.ts`), beside `formatTimestamp` rather
+  than replacing it: the conversations list wants "3 hours ago" for a recent
+  row, the rest of the app still wants an absolute timestamp. Anything under
+  30 seconds either way reads as "now" rather than counting seconds, the same
+  judgement call `formatLatency` already makes about not showing a number
+  nobody needs.
+- **Load more, not full pagination.** Unlike the Products list's
+  Previous/Next (a catalogue the owner pages back and forth through), a
+  conversation list is read newest-first and only ever grows forward, so
+  appending a page to what is already on screen is the right shape; whether
+  another page exists is read off getting back a full page (`limit` rows),
+  the same "ask for one more than a page" idea Products uses, applied to "a
+  full page probably means there's another".
+- **The empty state for the widget channel links to the widget card**, not
+  just to the agent page: `#widget-card` is a plain anchor id on the div
+  wrapping `WidgetCard` on the agent page, so "no widget conversations yet"
+  can point straight at the control that would produce one, the same
+  "explain and point at the fix" shape `EmptyState` is for everywhere else.
+- **`?agent=` and `?conversation=` seed the page once, not continuously.**
+  `?agent=` follows the Leads/Playground precedent of "the query value if it
+  names something real, else the first item, and never fight a later manual
+  switch". `?conversation=` is different: it is applied exactly once, via a
+  ref rather than a `selectedId === null` check, because switching agent or
+  channel by hand also clears `selectedId` to `null` and must not resurrect a
+  stale conversation id from the URL when it does.
+
+### Leads: source and a link back to the conversation
+
+`LeadsTable` gained two things once a lead carries `agentId` and `source`
+(Task 4's schema): the conversation cell is a `Link` to
+`/dashboard/conversations?agent=…&conversation=…` (plain text, "Deleted
+conversation", when the lead's conversation is gone), and a `source` column
+that renders a neutral `Badge` only when `source` is not `null` — a lead
+captured before Phase 8 has none, and a blank cell is the honest answer for
+that, not a placeholder dash. `source` is a freeform string on the server,
+not an enum, so the label is a plain capitalize (`sourceLabel`) rather than a
+lookup table that would need updating for a channel value the API adds
+later — the "unknown id still renders" rule from Dropdowns, applied to a
+badge instead of a `<select>` option.
+
 ## Adding a component
 
 1. Does a primitive already do it? Extend that one instead — a second thing
