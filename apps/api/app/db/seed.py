@@ -22,6 +22,7 @@ from app.core.security import hash_password
 from app.core.tenancy import TenantContext, tenant_session, untenanted_session
 from app.db.models import (
     Agent,
+    AgentStatus,
     Membership,
     MembershipRole,
     Organization,
@@ -199,6 +200,17 @@ async def seed() -> None:
         agent = await _get_or_create_agent(session, tenant)
         if agent.prompt_id != prompt.id:
             agent.prompt_id = prompt.id
+        # A freshly created agent starts `draft` (`AgentService.create_agent`),
+        # and the public widget requires `active` -- `load_available`
+        # (app/widget/service.py) treats a draft agent identically to an
+        # unknown key, spec §4. Without this, `enabled=True` below is a widget
+        # that still 404s for every visitor, which defeats the whole point of
+        # a demo seed. Direct assignment, same idiom as `agent.prompt_id`
+        # above -- this is the seed's own ORM object in the seed's own
+        # transaction, not a caller-supplied update needing
+        # `AgentService.update_agent`'s validation.
+        if agent.status is not AgentStatus.ACTIVE:
+            agent.status = AgentStatus.ACTIVE
         public_key = agent.public_key
 
         # Ruling R4 (ledger): `WidgetSettingsService.update` requires an

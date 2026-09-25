@@ -311,7 +311,11 @@ frame-policy origins only when available; RLS on `widget_settings`; `0016` up/do
 
 Unit: origin normalization table; `project_public_event` per event; token encode/decode and
 `typ` refusal; `tests/integration/test_seed.py` (Task 7) — the seed enables the demo
-widget for `http://localhost:5500` and re-running it does not drift from those values.
+widget for `http://localhost:5500`, activates the demo agent (a freshly created agent
+starts `draft`, and `load_available` refuses a draft agent identically to an unknown key —
+enabling `widget_settings` alone is not enough for the demo to actually work), asserts
+`load_available` returns a `PublicWidget` end to end, and re-running it does not drift from
+those values.
 
 Web: the frame-ancestors header builder; the snippet builder; the loader's message filter;
 `WidgetChat`/embed-page behaviour; the Conversations page's once-only `?conversation=`

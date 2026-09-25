@@ -18,7 +18,7 @@ from app.db.models import MembershipRole
 from app.db.models.widget import WidgetPosition
 from app.db.seed import DEMO_AGENT_SLUG, DEMO_ORG_SLUG, DEMO_WIDGET_ORIGIN, seed
 from app.widget.schemas import UpdateWidgetSettingsInput
-from app.widget.service import WidgetSettingsService
+from app.widget.service import WidgetSettingsService, load_available
 
 pytestmark = pytest.mark.anyio
 
@@ -70,6 +70,43 @@ async def test_seed_enables_the_demo_widget_for_localhost_5500(
 
     assert view.enabled is True
     assert view.allowed_origins == [DEMO_WIDGET_ORIGIN]
+
+
+async def test_seed_activates_the_demo_agent_so_the_widget_is_publicly_available(
+    owner_connection: AsyncConnection,
+) -> None:
+    """The real end-to-end property (Task 7 review finding): enabling
+    `widget_settings` alone is not enough. `load_available`
+    (`app/widget/service.py`, spec §4) treats a `draft` agent identically to
+    an unknown key -- a freshly created agent starts `draft`
+    (`AgentService.create_agent`) -- so without also activating it, the seed
+    still leaves a widget that 404s for every visitor, defeating the point
+    of `infrastructure/widget-demo`."""
+    await seed()
+
+    org_id, agent_id = await _demo_ids(owner_connection)
+
+    status_row = (
+        (
+            await owner_connection.execute(
+                text("SELECT status FROM agents WHERE id = :id"), {"id": agent_id}
+            )
+        )
+        .mappings()
+        .first()
+    )
+    assert status_row is not None
+    assert status_row["status"] == "active"
+
+    tenant = TenantContext(
+        organization_id=org_id, user_id=None, role=MembershipRole.OWNER, request_id="test"
+    )
+    async with tenant_session(tenant) as session:
+        widget = await load_available(session, org_id, agent_id)
+
+    assert widget is not None
+    assert widget.settings.enabled is True
+    assert widget.settings.allowed_origins == [DEMO_WIDGET_ORIGIN]
 
 
 async def test_seed_is_idempotent_and_does_not_clobber_a_manual_change(
