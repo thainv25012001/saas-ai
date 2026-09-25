@@ -43,8 +43,12 @@ describe("currentSectionLabel", () => {
 describe("NAV_GROUPS", () => {
   it("gives every not-yet-built section the phase it arrives in", () => {
     const soon = NAV_GROUPS.flatMap((group) => group.items).filter((item) => item.state === "soon");
-    expect(soon.length).toBeGreaterThan(0);
     expect(soon.every((item) => Boolean(item.phase))).toBe(true);
+  });
+
+  it("has Prompts live", () => {
+    const prompts = NAV_GROUPS.flatMap((group) => group.items).find((item) => item.href === "/dashboard/prompts");
+    expect(prompts?.state).toBe("live");
   });
 
   it("lists Evaluations as a live section of the Run group", () => {

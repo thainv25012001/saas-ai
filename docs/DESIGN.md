@@ -642,6 +642,34 @@ endpoint is built by `mcpEndpointUrl`, which strips a trailing slash from
 `NEXT_PUBLIC_API_URL` so a configured `https://api.example.com/` never shows
 `//mcp`.
 
+## Version history (Prompts)
+
+[`components/prompts/`](../apps/web/src/components/prompts/) is the worked
+example; `app/dashboard/prompts/[id]/page.tsx` composes it.
+
+- **A list beside a reader.** `VersionList` is a column of `aria-pressed`
+  buttons, newest first, the active one badged `success`; `VersionView` shows
+  the selected version read-only in a `font-mono` block. Selecting never
+  edits — editing is a separate card below.
+- **A change that goes live is confirmed in place.** Activation asks in the
+  card's own footer (Confirm / Cancel), not in a modal, and the question names
+  its effect — which agents it goes live for, from `activationImpact` in
+  `lib/prompts.ts`. A confirmation belongs to the version it was asked about,
+  so selecting another version drops it.
+- **Say rollback when it is one.** Activating a version older than the active
+  one is labelled `Roll back to vN` (`activationLabel`); a newer one
+  `Activate vN`.
+- **Drafts are the default.** `NewVersionForm` saves an inactive version and
+  starts from whichever version is selected. It is remounted by `key` per base
+  version, since its state is seeded once, and Save is disabled while the text
+  is blank or identical to its base, so no duplicate version is created.
+- **A select's "none" can be a real choice.** The agent page's Prompt card
+  offers "Built-in default" as an ordinary option with a sentinel value, not the
+  disabled empty placeholder the Dropdowns rules reserve for an unset field.
+  When the prompt list fails to load, the card says so and disables Save
+  instead of rendering a select that would show "Built-in default" for an
+  agent that is linked.
+
 ## Adding a component
 
 1. Does a primitive already do it? Extend that one instead — a second thing

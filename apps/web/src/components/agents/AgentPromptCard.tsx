@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardFooter, CardHeader } from "@/components/ui/Card";
 import { Field } from "@/components/ui/Field";
 import { Select } from "@/components/ui/Input";
+import { LoadingState } from "@/components/ui/Spinner";
 
 export type PromptOption = { id: string; name: string; activeVersion: number | null };
 
@@ -45,7 +46,7 @@ export function AgentPromptCard({
 
   let control: React.ReactNode;
   if (fetching && prompts.length === 0) {
-    control = <p className="text-sm text-ink-muted">Loading prompts…</p>;
+    control = <LoadingState label="Loading prompts…" />;
   } else if (failed) {
     control = <p className="text-sm text-ink-muted">Could not load prompts. The agent keeps its current prompt.</p>;
   } else {
