@@ -47,6 +47,15 @@ describe("WidgetCard", () => {
     vi.unstubAllGlobals();
   });
 
+  it("previews readable text on the brand colour as the owner types", () => {
+    render(<WidgetCard {...baseProps()} />);
+    const sample = screen.getByTestId("brand-text-sample");
+    expect(sample.style.color).toMatch(/^(#ffffff|rgb\(255, 255, 255\))$/);
+
+    fireEvent.change(screen.getByLabelText(/brand colou?r/i), { target: { value: "#fef08a" } });
+    expect(sample.style.color).toMatch(/^(#000000|rgb\(0, 0, 0\))$/);
+  });
+
   it("loads settings into the fields", () => {
     render(<WidgetCard {...baseProps()} />);
     expect(screen.getByLabelText(/enable the widget/i)).toBeChecked();

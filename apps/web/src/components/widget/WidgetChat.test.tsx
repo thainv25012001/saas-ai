@@ -239,6 +239,29 @@ describe("WidgetChat", () => {
     expect(container.innerHTML).not.toContain("bg-[#0f766e]");
   });
 
+  it("puts black text on a pale brand colour and white on a dark one", async () => {
+    startSession.mockResolvedValue({
+      ...SESSION,
+      config: { ...SESSION.config, brandColor: "#fef08a" },
+    });
+    const { container, unmount } = renderChat();
+    await screen.findByText("Hi! How can I help?");
+
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.style.getPropertyValue("--widget-brand-ink")).toBe("#000000");
+    // Header, user bubbles and Send all read it through one fixed class.
+    const inkClass = "text-[var(--widget-brand-ink,var(--color-primary-ink))]";
+    expect(screen.getByRole("banner").className).toContain(inkClass);
+    expect(screen.getByRole("button", { name: "Send" }).className).toContain(inkClass);
+    unmount();
+
+    startSession.mockResolvedValue(SESSION);
+    const dark = renderChat();
+    await screen.findByText("Hi! How can I help?");
+    const darkRoot = dark.container.firstElementChild as HTMLElement;
+    expect(darkRoot.style.getPropertyValue("--widget-brand-ink")).toBe("#ffffff");
+  });
+
   it("posts close to the parent from the close button", async () => {
     renderChat();
     await screen.findByText("Hi! How can I help?");

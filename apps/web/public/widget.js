@@ -71,6 +71,19 @@
     "left:auto;z-index:2;width:36px;height:36px;box-shadow:0 2px 8px rgba(15,23,42,.3)}" +
     ":host([data-open]) .launcher svg{width:20px;height:20px}}";
 
+  // Black or white, whichever has the higher WCAG contrast on `hex` -- the
+  // same formula as src/lib/contrast.ts's readableTextOn (this file has no
+  // imports; keep the two in step).
+  function readableTextOn(hex) {
+    var lum = 0;
+    var weights = [0.2126, 0.7152, 0.0722];
+    for (var i = 0; i < 3; i += 1) {
+      var c = parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16) / 255;
+      lum += weights[i] * (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+    }
+    return (lum + 0.05) / 0.05 > 1.05 / (lum + 0.05) ? "#000000" : "#ffffff";
+  }
+
   function unavailable() {
     console.info("AI Sales Agent widget: this assistant is not available right now.");
   }
@@ -144,6 +157,7 @@
     function applyLook(color, position, title) {
       if (typeof color === "string" && HEX_COLOR.test(color)) {
         launcher.style.backgroundColor = color;
+        launcher.style.color = readableTextOn(color);
       }
       if (position === "left" || position === "right") {
         host.setAttribute("data-position", position);

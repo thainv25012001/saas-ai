@@ -5,6 +5,7 @@ import { AnswerText } from "@/components/chat/AnswerText";
 import { cn, focusRing } from "@/components/ui/cn";
 import { Icon } from "@/components/ui/icons";
 import { Textarea } from "@/components/ui/Input";
+import { readableTextOn } from "@/lib/contrast";
 import { LoadingState } from "@/components/ui/Spinner";
 import {
   WidgetTimeoutError,
@@ -43,6 +44,8 @@ const UNAVAILABLE_CODES = new Set(["widget_daily_cap", "not_found"]);
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
 
 const BRAND_BG = "bg-[var(--widget-brand,var(--color-primary))]";
+/** Black or white, whichever reads on the brand colour (`readableTextOn`). */
+const BRAND_INK = "text-[var(--widget-brand-ink,var(--color-primary-ink))]";
 
 type Bubble = {
   id: string;
@@ -89,8 +92,9 @@ function MessageBubble({ bubble }: { bubble: Bubble }) {
     return (
       <div
         className={cn(
-          "ml-auto max-w-[85%] whitespace-pre-wrap break-words rounded-card px-3 py-2 text-sm text-primary-ink",
+          "ml-auto max-w-[85%] whitespace-pre-wrap break-words rounded-card px-3 py-2 text-sm",
           BRAND_BG,
+          BRAND_INK,
         )}
       >
         {bubble.text}
@@ -126,9 +130,10 @@ const HEADER_BUTTON = cn(
  * whichever Tailwind happens to emit later. */
 const SEND_BUTTON = cn(
   "inline-flex items-center justify-center rounded-control px-3 py-1.5 text-sm font-medium",
-  "text-primary-ink transition-opacity hover:opacity-90",
+  "transition-opacity hover:opacity-90",
   "disabled:cursor-not-allowed disabled:opacity-50",
   BRAND_BG,
+  BRAND_INK,
   focusRing,
   "focus-visible:ring-offset-2",
 );
@@ -141,7 +146,7 @@ function Header({
   onNewConversation?: () => void;
 }) {
   return (
-    <header className={cn("flex items-center gap-1 px-4 py-3 text-primary-ink", BRAND_BG)}>
+    <header className={cn("flex items-center gap-1 px-4 py-3", BRAND_BG, BRAND_INK)}>
       <h1 className="min-w-0 flex-1 truncate text-sm font-semibold">{title}</h1>
       {onNewConversation ? (
         <button
@@ -365,7 +370,9 @@ export function WidgetChat({ apiUrl, publicKey }: { apiUrl: string; publicKey: s
   }
 
   const brand = session && HEX_COLOR.test(session.config.brandColor) ? session.config.brandColor : null;
-  const rootStyle = brand ? ({ "--widget-brand": brand } as React.CSSProperties) : undefined;
+  const rootStyle = brand
+    ? ({ "--widget-brand": brand, "--widget-brand-ink": readableTextOn(brand) } as React.CSSProperties)
+    : undefined;
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-surface text-ink" style={rootStyle}>

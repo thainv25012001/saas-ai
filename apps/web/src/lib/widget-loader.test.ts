@@ -270,6 +270,20 @@ describe("widget.js", () => {
     expect(iframe()).toBeNull();
   });
 
+  it("gives a pale brand colour a black icon, and a dark one a white icon", async () => {
+    fetchMock.mockImplementation(async () =>
+      configResponse({ available: true, brand_color: "#fef08a", position: "right", title: null }),
+    );
+    await runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
+    expect(launcher().style.color).toMatch(/^(#000000|rgb\(0, 0, 0\))$/);
+
+    // A dark colour from the frame's ready message flips it back.
+    launcher().click();
+    const frame = iframe() as HTMLIFrameElement;
+    post({ type: "ready", brand_color: "#0f766e" }, { source: frame.contentWindow });
+    expect(launcher().style.color).toMatch(/^(#ffffff|rgb\(255, 255, 255\))$/);
+  });
+
   it("ignores a non-hex colour from the config", async () => {
     fetchMock.mockImplementation(async () =>
       configResponse({ available: true, brand_color: "red;background:url(x)", position: "top", title: null }),

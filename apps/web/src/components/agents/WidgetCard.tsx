@@ -9,6 +9,7 @@ import { focusRing } from "@/components/ui/cn";
 import { Input, Select, Textarea } from "@/components/ui/Input";
 import { LoadingState } from "@/components/ui/Spinner";
 import type { AgentStatus, WidgetPosition } from "@/graphql/generated";
+import { readableTextOn } from "@/lib/contrast";
 import { copyToClipboard } from "@/lib/mcp";
 import { parseOriginLines, widgetSnippet } from "@/lib/widget-snippet";
 
@@ -95,6 +96,9 @@ export function WidgetCard({
   const [enabled, setEnabled] = useState(DEFAULT_SETTINGS.enabled);
   const [originsText, setOriginsText] = useState("");
   const [brandColor, setBrandColor] = useState(DEFAULT_SETTINGS.brandColor);
+  // What the swatch and the text sample show: the typed value once it is a
+  // valid hex, the default until then.
+  const swatchColor = /^#[0-9a-fA-F]{6}$/.test(brandColor) ? brandColor : "#2563eb";
   const [position, setPosition] = useState<WidgetPosition>(DEFAULT_SETTINGS.position);
   const [title, setTitle] = useState("");
   const [dailyMessageCap, setDailyMessageCap] = useState(DEFAULT_SETTINGS.dailyMessageCap);
@@ -215,7 +219,7 @@ export function WidgetCard({
                   <input
                     type="color"
                     aria-label="Colour swatch"
-                    value={/^#[0-9a-fA-F]{6}$/.test(brandColor) ? brandColor : "#2563eb"}
+                    value={swatchColor}
                     disabled={!canEdit}
                     onChange={(e) => setBrandColor(e.target.value)}
                     className="h-9 w-9 shrink-0 cursor-pointer rounded-control border border-line-strong disabled:cursor-not-allowed disabled:opacity-50"
@@ -227,6 +231,17 @@ export function WidgetCard({
                     onChange={(e) => setBrandColor(e.target.value)}
                     placeholder="#2563eb"
                   />
+                  {/* The text colour the widget will use on this brand
+                      colour -- black on a pale one, white on a dark one. */}
+                  <span
+                    data-testid="brand-text-sample"
+                    aria-hidden="true"
+                    title="Text on this colour"
+                    className="inline-flex h-9 w-12 shrink-0 items-center justify-center rounded-control border border-line text-sm font-semibold"
+                    style={{ backgroundColor: swatchColor, color: readableTextOn(swatchColor) }}
+                  >
+                    Aa
+                  </span>
                 </div>
               )}
             </Field>
