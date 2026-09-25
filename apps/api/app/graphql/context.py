@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from strawberry.dataloader import DataLoader
 from strawberry.fastapi import BaseContext
 
+from app.agents.service import AgentService
 from app.auth.dependencies import tenant_from_bearer
 from app.core.errors import AuthenticationError
 from app.core.tenancy import TenantContext, tenant_session
@@ -91,6 +92,10 @@ class Context(BaseContext):
         self.prompt_versions_loader: DataLoader[uuid.UUID, list[PromptVersion]] | None = (
             DataLoader(load_fn=self._load_prompt_versions) if session is not None else None
         )
+        # `prompts { agents }` -- which agents run each prompt -- in one query.
+        self.prompt_agents_loader: DataLoader[uuid.UUID, list[Agent]] | None = (
+            DataLoader(load_fn=self._load_prompt_agents) if session is not None else None
+        )
         # Phase 7 -- MCP (docs/PHASE-7.md §6): `apiKeys { createdByName }`
         # batched into one query, joined through this organization's own
         # memberships rather than an unscoped `users` read.
@@ -107,6 +112,15 @@ class Context(BaseContext):
         assert self.session is not None
         assert self.tenant is not None
         by_prompt = await PromptService(self.session, self.tenant).versions_by_prompt(prompt_ids)
+        return [by_prompt[prompt_id] for prompt_id in prompt_ids]
+
+    async def _load_prompt_agents(self, prompt_ids: Sequence[uuid.UUID]) -> list[list[Agent]]:
+        """The agents linked to each requested prompt, by name, in one query --
+        delegated to `AgentService.agents_by_prompt`, which carries the
+        explicit `organization_id` predicate."""
+        assert self.session is not None
+        assert self.tenant is not None
+        by_prompt = await AgentService(self.session, self.tenant).agents_by_prompt(prompt_ids)
         return [by_prompt[prompt_id] for prompt_id in prompt_ids]
 
     async def _load_api_key_creator_names(self, user_ids: Sequence[uuid.UUID]) -> list[str | None]:

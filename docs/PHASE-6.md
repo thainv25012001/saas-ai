@@ -317,17 +317,17 @@ Everything else — dataset and case CRUD, listing runs and results, cancelling 
 
 ## 9. Not delivered
 
-**First follow-up: no API or UI links an agent to a prompt.** `CreateAgentInput` and
-`UpdateAgentInput` have no `promptId`, and the dashboard's Prompts page is a placeholder. So
-prompt-version pinning — and the "draft a version, evaluate it, activate it if it scores
-better" flow of §5 — is reachable only for agents whose `prompt_id` was set by a seed or
-directly in the database. Every other agent runs on the default system prompt and a run of
-it records no version. Wiring `promptId` through the agent inputs and building the Prompts
-page is the first thing to do next.
+**First follow-up — since delivered: linking an agent to a prompt.** When this phase
+shipped, no API or UI linked an agent to a prompt, so prompt-version pinning — and the "draft
+a version, evaluate it, activate it if it scores better" flow of §5 — was reachable only for
+seeded agents. It now is from the dashboard: the `setAgentPrompt` mutation and the agent
+page's Prompt card link (or unlink) an agent, and the Prompts section creates prompts, saves
+drafts, activates them and rolls back. See
+[`superpowers/specs/2026-09-25-prompts-dashboard-design.md`](superpowers/specs/2026-09-25-prompts-dashboard-design.md).
 
 | Not delivered | Why, and where it goes |
 |---|---|
-| Linking an agent to a prompt | See the paragraph above — the first follow-up. |
+| Linking an agent to a prompt | Delivered since — see the paragraph above. |
 | Multi-turn cases | Every case is one message in a fresh conversation. Follow-up behaviour ("and in red?") is not measured. Needs a case to be a script of turns. |
 | Repeated runs, variance, significance | One run is one sample. A 3-point difference between two runs may be noise. |
 | Scoring real production conversations | Only authored cases are scored. Scoring live traffic needs sampling and privacy decisions that come with the widget (Phase 8). |

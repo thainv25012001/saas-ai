@@ -4,7 +4,7 @@ query Agents {
 
 query Agent($id: UUID!) {
   agent(id: $id) {
-    id name slug status provider model temperature maxTokens
+    id name slug status provider model temperature maxTokens promptId
     config { id tone language persona greeting fallbackMessage retrievalTopK maxAgentSteps }
   }
 }
@@ -225,4 +225,36 @@ mutation RevokeApiKey($id: UUID!) {
   revokeApiKey(id: $id) {
     id name keyPrefix agentId createdByName createdAt lastUsedAt revokedAt
   }
+}
+
+query Prompts {
+  prompts { id name key description versions { id version isActive } agents { id } }
+}
+
+query Prompt($id: UUID!) {
+  prompt(id: $id) {
+    id name key description
+    versions { id version systemPrompt isActive notes createdAt }
+    agents { id name status }
+  }
+}
+
+query DefaultSystemPrompt {
+  defaultSystemPrompt
+}
+
+mutation CreatePrompt($input: CreatePromptInput!) {
+  createPrompt(input: $input) { id }
+}
+
+mutation CreatePromptVersion($promptId: UUID!, $input: CreatePromptVersionInput!) {
+  createPromptVersion(promptId: $promptId, input: $input) { id version isActive }
+}
+
+mutation ActivatePromptVersion($versionId: UUID!) {
+  activatePromptVersion(versionId: $versionId) { id isActive }
+}
+
+mutation SetAgentPrompt($agentId: UUID!, $promptId: UUID) {
+  setAgentPrompt(agentId: $agentId, promptId: $promptId) { id promptId }
 }

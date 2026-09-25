@@ -211,6 +211,15 @@ class Prompt:
         models = await info.context.prompt_versions_loader.load(self.id)
         return [PromptVersion.from_model(m) for m in models]
 
+    @strawberry.field
+    async def agents(self, info: strawberry.Info[Context, None]) -> list[Agent]:
+        """The agents linked to this prompt, by name. Each runs the prompt's
+        active version. Same unauthenticated guard as `versions`."""
+        if info.context.prompt_agents_loader is None:
+            raise AuthenticationError("authentication required")
+        models = await info.context.prompt_agents_loader.load(self.id)
+        return [Agent.from_model(m) for m in models]
+
 
 @strawberry.enum
 class DocumentStatus(enum.Enum):
