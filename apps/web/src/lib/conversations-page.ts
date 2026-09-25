@@ -27,6 +27,15 @@ export function channelFilterLabel(filter: ChannelFilter): string {
   }
 }
 
+/** A conversation row's own channel as a reader sees it (the "All" filter
+ * shows it beside each row). A channel added on the API before this file
+ * learns it is shown as its raw value, never dropped. */
+export function channelLabel(channel: string): string {
+  return channel === "WIDGET" || channel === "PLAYGROUND" || channel === "API"
+    ? channelFilterLabel(channel)
+    : channel;
+}
+
 /** What the `conversations` query's `channel` variable should be for a given
  * filter. `ALL` has no wire value of its own on `ConversationChannel` --
  * "every channel" is expressed by omitting the argument, which the query

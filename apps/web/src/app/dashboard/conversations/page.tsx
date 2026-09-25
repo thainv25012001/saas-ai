@@ -17,6 +17,7 @@ import { useAuth } from "@/lib/auth";
 import {
   CHANNEL_FILTERS,
   channelFilterLabel,
+  channelLabel,
   channelQueryValue,
   parseChannelFilter,
   pickDefaultAgentId,
@@ -233,7 +234,7 @@ function ConversationsContent() {
                         </span>
                         <span className="mt-0.5 block text-xs text-ink-subtle">
                           {formatRelativeTime(row.lastMessageAt ?? row.createdAt)}
-                          {channel === "ALL" ? ` · ${row.channel}` : ""}
+                          {channel === "ALL" ? ` · ${channelLabel(row.channel)}` : ""}
                         </span>
                       </button>
                     </li>

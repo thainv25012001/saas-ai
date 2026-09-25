@@ -1,3 +1,4 @@
+import { getPathMatch } from "next/dist/shared/lib/router/utils/path-match";
 import { describe, expect, it } from "vitest";
 import { securityHeaderRules } from "./security-headers";
 
@@ -18,10 +19,11 @@ function headers() {
   return headersFor(APP_SOURCE);
 }
 
-/** Mirrors how Next matches a rule's `source` for a path with no params. */
+/** Next's own matcher for a `headers()` rule, with the options its router
+ * uses (`server/lib/router-utils/filesystem.js`'s `buildCustomRoute`), so a
+ * pattern Next reads differently from a plain RegExp fails here. */
 function matches(source: string, path: string): boolean {
-  if (source === EMBED_SOURCE) return path.startsWith("/embed/") || path === "/embed";
-  return new RegExp(`^${source}$`).test(path);
+  return getPathMatch(source, { strict: true, removeUnnamedParams: true })(path) !== false;
 }
 
 describe("securityHeaderRules", () => {
@@ -34,6 +36,25 @@ describe("securityHeaderRules", () => {
       expect(matches(APP_SOURCE, path)).toBe(true);
     }
     expect(matches(APP_SOURCE, "/embed/pk_abc")).toBe(false);
+  });
+
+  it("sends each path exactly the rule it should, as Next matches it", () => {
+    const cases: [string, boolean, boolean][] = [
+      // path, gets the app rule, gets the embed rule
+      ["/", true, false],
+      ["/dashboard/x", true, false],
+      ["/login", true, false],
+      ["/widget.js", true, false],
+      // `:path*` matches zero segments, so a bare /embed (no page there)
+      // gets both rules -- only ever stricter, never unframed.
+      ["/embed", true, true],
+      ["/embedded", true, false],
+      ["/embed/pk_x", false, true],
+    ];
+    for (const [path, app, embed] of cases) {
+      expect([path, matches(APP_SOURCE, path)]).toEqual([path, app]);
+      expect([path, matches(EMBED_SOURCE, path)]).toEqual([path, embed]);
+    }
   });
 
   it("keeps /dashboard unframeable", () => {

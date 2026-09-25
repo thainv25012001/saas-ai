@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   channelFilterLabel,
+  channelLabel,
   channelQueryValue,
   parseChannelFilter,
   pickDefaultAgentId,
@@ -33,6 +34,18 @@ describe("channelQueryValue", () => {
 
   it("omits the argument entirely for All", () => {
     expect(channelQueryValue("ALL")).toBeUndefined();
+  });
+});
+
+describe("channelLabel", () => {
+  it("reads a row's wire channel as a word, for the All filter's rows", () => {
+    expect(channelLabel("WIDGET")).toBe("Widget");
+    expect(channelLabel("PLAYGROUND")).toBe("Playground");
+    expect(channelLabel("API")).toBe("API");
+  });
+
+  it("shows an unknown channel as-is rather than hiding it", () => {
+    expect(channelLabel("SMS")).toBe("SMS");
   });
 });
 
