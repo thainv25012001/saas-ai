@@ -1,5 +1,6 @@
 import secrets
 import uuid
+from collections.abc import Sequence
 from typing import Any
 
 from slugify import slugify
@@ -17,6 +18,7 @@ from app.core.ids import uuid7
 from app.core.tenancy import TenantContext
 from app.db.builtin_tools import DEFAULT_ENABLED_TOOL_NAMES, first_row_per_name
 from app.db.models import Agent, AgentConfig, AgentStatus, AgentToolLink, Tool, ToolType
+from app.prompts.service import PromptService
 
 _DEFAULT_FALLBACK = (
     "I don't have that information. Would you like me to connect you with someone who does?"
@@ -170,6 +172,47 @@ class AgentService:
         # while we can still safely await.
         await self.session.refresh(agent)
         return agent
+
+    async def set_prompt(self, agent_id: uuid.UUID, prompt_id: uuid.UUID | None) -> Agent:
+        """Link the agent to one of this organization's prompts, or unlink it
+        with `None` (the agent then answers on the built-in default).
+
+        The prompt is resolved through `PromptService.get_prompt` before it is
+        written, and that lookup is load-bearing: `agents.prompt_id` is a plain
+        foreign key, and Postgres checks a foreign key without RLS, so the
+        constraint alone would accept another organization's prompt id. A
+        foreign id is `NotFoundError`, as an unknown one is."""
+        agent = await self.get_agent(agent_id)
+        if prompt_id is not None:
+            await PromptService(self.session, self.tenant).get_prompt(prompt_id)
+        agent.prompt_id = prompt_id
+        await self.session.flush()
+        # Same `updated_at` reload as `update_agent`.
+        await self.session.refresh(agent)
+        return agent
+
+    async def agents_by_prompt(
+        self, prompt_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, list[Agent]]:
+        """Agents linked to each of several prompts, by name, keyed by prompt
+        id with every requested id present. The batched form behind
+        `Prompt.agents`' dataloader; like `PromptService.versions_by_prompt`
+        it does not raise for an unknown or foreign id."""
+        by_prompt: dict[uuid.UUID, list[Agent]] = {pid: [] for pid in prompt_ids}
+        if not prompt_ids:
+            return by_prompt
+        result = await self.session.execute(
+            select(Agent)
+            .where(
+                Agent.prompt_id.in_(list(prompt_ids)),
+                Agent.organization_id == self.tenant.organization_id,
+            )
+            .order_by(Agent.name)
+        )
+        for agent in result.scalars().all():
+            assert agent.prompt_id is not None
+            by_prompt[agent.prompt_id].append(agent)
+        return by_prompt
 
     async def update_config(self, agent_id: uuid.UUID, data: UpdateAgentConfigInput) -> AgentConfig:
         config = await self.get_config(agent_id)
