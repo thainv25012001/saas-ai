@@ -1,9 +1,11 @@
+import re
 import uuid
 from datetime import datetime
 from typing import Any
 
 from sqlalchemy import DateTime, ForeignKey, func
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.core.ids import uuid7
@@ -72,6 +74,42 @@ def enable_rls(op: Any, table: str) -> None:
         f"USING (organization_id = {guarded}) "
         f"WITH CHECK (organization_id = {guarded})"
     )
+
+
+#: A role name this module will interpolate into DDL. Postgres allows more
+#: (anything, quoted), but no real deployment needs more than this, and the
+#: name comes from an environment variable, so it is checked, not trusted.
+_ROLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_$]{0,62}")
+
+
+def role_from_database_url(url: str) -> str:
+    """The role a database URL connects as, double-quoted for use in SQL.
+
+    Quoted rather than bare so a mixed-case name is granted to exactly the
+    role that logs in, instead of being folded to lower case.
+    """
+    name = make_url(url).username
+    if not name or not _ROLE_NAME.fullmatch(name):
+        raise RuntimeError(
+            "DATABASE_URL must name the runtime role as its user "
+            "(letters, digits, '_' or '$'); migrations grant it access by that name."
+        )
+    return f'"{name}"'
+
+
+def runtime_role() -> str:
+    """The role the application connects as (`DATABASE_URL`'s user), for the
+    migrations that `GRANT` to it.
+
+    Read from the environment rather than written as `app_user`: the name is a
+    deployment choice (a managed Postgres may already have a different one),
+    and a migration that grants to a role that does not exist fails outright.
+    Locally and in CI this is still `app_user`, from `infrastructure/postgres/
+    init.sql`.
+    """
+    from app.core.config import get_settings  # noqa: PLC0415 - config is only needed by migrations
+
+    return role_from_database_url(get_settings().database_url)
 
 
 def disable_rls(op: Any, table: str) -> None:

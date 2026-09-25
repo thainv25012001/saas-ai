@@ -12,7 +12,8 @@ function owned by the migrating role (the table's owner, and so not itself
 subject to the table's un-FORCEd policy -- see `app.db.base.enable_rls`'s
 docstring for why table ownership already means that): it takes one exact
 hash and returns three ids, nothing else. `EXECUTE` is revoked from
-`PUBLIC` and granted only to `app_user`, and `search_path` is pinned so it
+`PUBLIC` and granted only to the runtime role (`DATABASE_URL`'s user --
+`app_user` locally; see `app.db.base.runtime_role`), and `search_path` is pinned so it
 cannot be redirected by a session-level `search_path` change.
 
 `scopes text[]` from ARCHITECTURE.md §3.1 is deliberately not here
@@ -26,7 +27,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
-from app.db.base import disable_rls, enable_rls
+from app.db.base import disable_rls, enable_rls, runtime_role
 
 revision = "0015_api_keys"
 down_revision = "0014_evaluations"
@@ -95,7 +96,7 @@ def upgrade() -> None:
 
     op.execute(_RESOLVE_API_KEY_FUNCTION)
     op.execute("REVOKE ALL ON FUNCTION resolve_api_key(bytea) FROM PUBLIC")
-    op.execute("GRANT EXECUTE ON FUNCTION resolve_api_key(bytea) TO app_user")
+    op.execute(f"GRANT EXECUTE ON FUNCTION resolve_api_key(bytea) TO {runtime_role()}")
 
 
 def downgrade() -> None:
