@@ -81,6 +81,10 @@ runtime role, read from `DATABASE_URL`'s user (`app.db.base.runtime_role`) — s
 be given the same `DATABASE_URL` the API uses, and that role must already exist when migrations run.
 `app_user` is only the name this guide and local development use. Renaming the role later leaves it
 without that grant; re-run the `GRANT EXECUTE ON FUNCTION resolve_api_key(bytea) TO <role>` by hand.
+Migration `0016_widget_settings` (Phase 8, the widget's `resolve_widget` public-key lookup) grants the
+same way, to the same role, for the same reason — a literal `app_user` in the migration would grant a
+role a managed database may not even have. If you rename the role, also re-run
+`GRANT EXECUTE ON FUNCTION resolve_widget(text) TO <role>`.
 
 Paste the connection strings Neon gives you as they are, only swapping in the `app_user` /
 `app_owner` credentials. `Settings` normalizes them on load (`_normalize_database_url` in
@@ -206,6 +210,40 @@ Create an environment named `production` (Settings → Environments) and add:
 
 `deploy.yml` only fires for a `CI` workflow that exists on the default branch, so nothing deploys
 until both workflow files are merged to `main`.
+
+## The embeddable widget (Phase 8)
+
+Three things a reverse proxy or CDN in front of either app must get right, beyond what
+already applies to the rest of the API:
+
+- **The embed route must not be framed-blocked by a proxy adding its own
+  `X-Frame-Options` or `Content-Security-Policy: frame-ancestors`.** `apps/web/src/
+  middleware.ts` sets `frame-ancestors` for `/embed/*` from the agent's own allowed
+  origins and deliberately removes `X-Frame-Options` there — a CDN or edge proxy that adds
+  either header of its own on top overrides or duplicates what the app already computed
+  correctly, and a widget that should be framable becomes refused everywhere. Vercel's edge
+  network does not do this by default; check first if you put anything else in front of it.
+- **`/api/v1/widget/*` needs the same SSE proxy settings as `/api/v1/chat/stream`.** The
+  widget's own `chat/stream` route streams `text/event-stream` exactly like the playground's
+  (see "Before you deploy" below) — the same `proxy_buffering off;`/`gzip off;` (nginx) or
+  equivalent, and the same longer-than-15-second idle timeout, apply to it too. A proxy that
+  buffers this route does not fail loudly; it just turns every widget reply into one long
+  pause followed by a complete answer.
+- **The widget's own rate limits key on `request.client.host`, the same caveat as
+  login** (see "Before you deploy" below): behind a proxy that is not configured with
+  `ProxyHeadersMiddleware`/`--forwarded-allow-ips`, every visitor collapses into the proxy's
+  one address, so the per-IP limits in `docs/PHASE-8.md` §5 (30 messages/minute, 20 new
+  sessions/hour) become one shared budget for every visitor of every embedded widget on the
+  platform, not a per-visitor one. The per-visitor-token limit (10/minute) and the per-agent
+  daily cap are unaffected — neither depends on the client IP.
+
+**uvicorn's own access log is off** (`--no-access-log`, already in `apps/api/Dockerfile`'s
+`CMD` and `docker-compose.yml`'s `api` command — nothing to change for a Render deploy,
+since `render.yaml` has no start command of its own and runs the Dockerfile's `CMD`
+unmodified). Left on, it would print a second, unredacted access line per request — the
+client IP and the full request path, a widget public key included — duplicating what
+`app/main.py`'s own request-logging middleware already logs with the IP omitted and any
+widget key truncated to 8 characters (spec §5: no IP in any log line).
 
 ## Seeding production
 

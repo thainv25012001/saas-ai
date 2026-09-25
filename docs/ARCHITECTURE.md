@@ -1,13 +1,15 @@
 # AI Sales Agent — Architecture Proposal
 
-> Status: **approved, and partly built.** Phases 1 to 7 are implemented in this
-> repository — see §9 for Phase 1 as delivered, §9.6 for Phase 3, §9.7 for Phase 5,
-> §9.8 for Phase 6 and §9.9 for Phase 7, and [`docs/PHASE-2.md`](PHASE-2.md) to
-> [`docs/PHASE-7.md`](PHASE-7.md) for the design notes of each. Where a phase document
-> departs from this one (marked ★ there), the phase document describes what was built.
-> §8 Direction 2 (exposing our tools as an MCP server) was delivered in Phase 7;
-> §8 Direction 1 (consuming remote MCP servers) and the SaaS features (billing, widget)
-> remain a proposal.
+> Status: **approved, and partly built.** Phases 1 to 8's first slice are implemented in
+> this repository — see §9 for Phase 1 as delivered, §9.6 for Phase 3, §9.7 for Phase 5,
+> §9.8 for Phase 6, §9.9 for Phase 7, §9.10 for Phase 8's embeddable widget, and
+> [`docs/PHASE-2.md`](PHASE-2.md) to [`docs/PHASE-8.md`](PHASE-8.md) for the design notes
+> of each. Where a phase document departs from this one (marked ★ there), the phase
+> document describes what was built.
+> §8 Direction 2 (exposing our tools as an MCP server) was delivered in Phase 7; §8
+> Direction 1 (consuming remote MCP servers) remains a proposal. The embeddable widget,
+> Phase 8's first slice, is delivered — see [`docs/PHASE-8.md`](PHASE-8.md); billing,
+> plans and analytics, the rest of Phase 8, remain a proposal.
 > Scope: items 1–10 of the "First Task" in `init.md`.
 
 ---
@@ -121,6 +123,14 @@ through it. The split:
 - **REST (`/api/v1/auth/*`, `/api/v1/documents/upload`)** — auth (needs httpOnly cookie
   mechanics GraphQL makes awkward) and multipart upload (GraphQL multipart is a
   non-standard extension not worth the dependency).
+- **REST (`/api/v1/widget/*`, Phase 8)** — the public, unauthenticated surface an
+  anonymous site visitor talks to: session/token, resuming a conversation, and its own
+  `chat/stream`. It carries a widget bearer token, never a dashboard JWT, and reuses the
+  dashboard's SSE machinery through a shared `stream_body` with a restricted event
+  projection (visitors see no tool arguments, results or cost). The web app's own
+  `/embed/[publicKey]` page — a Next.js route with no `AuthProvider`/urql, framed by the
+  business's own site inside an iframe the loader script (`apps/web/public/widget.js`)
+  draws — is what actually calls it. See [`docs/PHASE-8.md`](PHASE-8.md) §3-§5.
 
 SSE event envelope:
 
@@ -213,7 +223,7 @@ memberships
   role enum(owner, admin, member), created_at
   UNIQUE (organization_id, user_id)
 
-api_keys                                -- MCP access (Phase 7); widget embedding later
+api_keys                                -- MCP access (Phase 7)
   id, organization_id, agent_id → agents, name, key_prefix, key_hash,
   created_by → users, last_used_at, revoked_at, created_at, updated_at
 ```
@@ -233,7 +243,7 @@ dealerships needs one login. Org context comes from the membership selected at l
 agents
   id, organization_id, name, slug, status enum(draft, active, disabled),
   provider, model, temperature, max_tokens, prompt_id → prompts (nullable),
-  public_key (unique)              -- widget embed key, Phase 7
+  public_key (unique)              -- widget embed key (Phase 7 anticipated it; Phase 8 uses it)
   created_at, updated_at
   UNIQUE (organization_id, slug)
 
@@ -434,6 +444,28 @@ judge's — is recorded against the run's agent with no conversation.
 Not billing — just the substrate billing would later read. Writing it now costs one table.
 Retrofitting cost attribution across an existing message history costs a migration and a
 backfill that can never be accurate.
+
+### 3.9 Widget (Phase 8)
+
+```text
+widget_settings                         -- one row per agent; a missing row means
+  id, organization_id, agent_id → agents,  -- "defaults, disabled" (§9.10)
+    UNIQUE, ON DELETE CASCADE,
+  enabled bool default false,
+  allowed_origins text[] default '{}',  -- normalized bare origins, ≤ 20 (§9.10)
+  brand_color varchar(7) default '#2563eb',
+  position enum(right, left) default right,
+  title varchar(60) nullable,           -- falls back to the agent's name
+  daily_message_cap int default 500 check (1..100000),
+  created_at, updated_at
+```
+
+RLS-scoped like every tenant table, with the same one sanctioned pre-tenant exception as
+`api_keys` (§2.3): `resolve_widget(public_key)`, a `SECURITY DEFINER` function reading
+only `agents.public_key` and returning `(organization_id, agent_id)`, `EXECUTE` granted to
+the runtime role and revoked from `PUBLIC`. Nothing else — status, config and settings are
+read afterwards inside an ordinary `tenant_session`, same discipline as `resolve_api_key`.
+See [`docs/PHASE-8.md`](PHASE-8.md) §2-§3.
 
 ---
 
@@ -979,6 +1011,29 @@ the repository.
 | Limits / logs | 120 `tools/call` per key per minute (a `Rate limit exceeded; retry later.` error result); listing is free. `mcp_tool_call` logs ids, tool name, `is_error`, `duration_ms` — never arguments or results; `tool_call_invalid_args` never logs pydantic's `input`; `mcp_auth_rejected` logs a reason and the token prefix only. |
 | GraphQL | `apiKeys(agentId)`, `agentMcpInfo(agentId)` (the exposed tool names), `createApiKey(agentId, name) → {apiKey, token}`, `revokeApiKey(id)`. |
 | Frontend | The agent page's **MCP access** card: endpoint, exposed tools, key list with Revoke, a create form, and a one-time token reveal with a shell-quoted `claude mcp add --transport http …` command and a `.mcp.json` block (Claude Code, Cursor and other HTTP-capable clients). A disabled agent shows a warning that its keys are refused. Members see the card without the create/revoke controls. |
+
+### 9.10 Phase 8 (embeddable widget) in detail, as delivered
+
+The design argument is in [`docs/superpowers/specs/2026-09-25-embeddable-widget-design.md`](superpowers/specs/2026-09-25-embeddable-widget-design.md);
+[`docs/PHASE-8.md`](PHASE-8.md) records what was built and where it departs from that spec,
+including §9's "not delivered" table and, plainly, that **the allowed-domain list stops
+browsers on other sites, not a script or `curl` calling the public API directly with a
+`pk_…` key it read out of the page's own HTML** (spec §2, §10) — the daily cap and the
+other rate limits in §5 are the actual abuse controls. This is what exists in the
+repository.
+
+| Area | Deliverable |
+|---|---|
+| Schema | `widget_settings` (`0016_widget_settings`, §3.9), RLS-enabled, one row per agent, upserted on first save rather than backfilled. `resolve_widget(text)` is `SECURITY DEFINER`, copying `resolve_api_key`'s shape — the one sanctioned pre-tenant lookup added by this phase. |
+| Identity | An anonymous visitor is a random `vid` inside an HS256 **widget** token (`typ: "widget"`, `WIDGET_TOKEN_DAYS` default 30) — refused wherever a dashboard access token is expected, and vice versa, purely by `typ`. Every bearer-authenticated widget request re-resolves the widget's availability, so disabling it or the agent takes effect on the visitor's very next message, not when the token expires. |
+| Endpoints | `app/api/widget.py`, prefix `/api/v1/widget`, importing nothing from `app.auth`: `GET /{public_key}/frame-policy` (always 200; §5), `POST /{public_key}/session` (mint or refresh), `GET /conversation` (resume, last 50 text messages), `POST /chat/stream` (the same `stream_body` the dashboard route uses, §2.2). Unknown key, draft/disabled agent and a disabled widget all answer the identical 404 `widget not found`. |
+| Projection | `app/widget/events.py::project_public_event` strips a widget visitor's SSE stream to what it should see: tool names only (no arguments or results), deduplicated citation titles (no product ids), and a fixed public error — never a cost, a model name or a tool's raw output. |
+| Limits | Every §5 limit (session mint, per-visitor and per-IP message rate, the per-agent daily cap, frame-policy) through the existing Redis `enforce_rate_limit`. PHASE-8.md §5 records where this phase's own review changed the spec: frame-policy is limited per public key rather than per IP (the API's only caller is this app's own middleware, so a per-IP budget would be one shared budget for every agent). |
+| Web | `apps/web/public/widget.js` — a hand-written, dependency-free loader drawing a launcher and, on open, an iframe onto `/embed/[publicKey]` inside a closed shadow root. That page has its own minimal layout (no `AuthProvider`/urql) and stores its resume token in `localStorage`, the one documented exception to this app's usual "no client state persists in browser storage" rule (`docs/DESIGN.md`) — because it is genuinely per-visitor, per-site state a lost token only costs a fresh conversation, not lost dashboard data. `src/middleware.ts` sets `frame-ancestors` from the API's frame-policy response, 30-second cached with stale-on-error, and removes `X-Frame-Options` for `/embed/*` only. |
+| Dashboard | A **Website widget** card on the agent page (enable, allowed-domains editor, brand color, position, title, daily cap, the copy-ready `<script>` snippet, a live `/embed/[key]` preview) and a **Conversations** page (agent + channel filter, defaulting to `widget`, read-only transcript) linked from each lead. Editing the card requires owner/admin, same as API keys. |
+
+PHASE-8.md §9 lists what is not delivered — first among it, the spec's `unread {count}`
+loader message, which nothing in the embed page produces yet.
 
 ---
 

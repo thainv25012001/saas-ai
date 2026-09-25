@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<!--
+  A plain fake storefront, unrelated to this repo's own design system, used
+  only to prove the embeddable widget works from a real third-party origin
+  (spec §8 "Manual" testing, docs/superpowers/specs/2026-09-25-embeddable-widget-design.md).
+
+  Serve it with `make widget-demo` (or, without make,
+  `cd infrastructure/widget-demo && python -m http.server 5500`) and open
+  http://localhost:5500/?key=<public_key> -- the seed
+  (`app/db/seed.py`) prints that exact URL, using the demo agent's own key,
+  and already lists http://localhost:5500 as an allowed origin for it.
+
+  The public key is never trusted as markup: it goes onto the injected
+  <script> tag through setAttribute, never through innerHTML.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Demo Motors</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      color: #1a1a1a;
+      background: #f6f5f3;
+    }
+    header {
+      background: #0f172a;
+      color: #fff;
+      padding: 1.25rem 2rem;
+    }
+    header h1 { margin: 0; font-size: 1.25rem; }
+    main { max-width: 960px; margin: 0 auto; padding: 2rem; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 1.5rem;
+      margin-top: 1.5rem;
+    }
+    .card {
+      background: #fff;
+      border: 1px solid #e5e3df;
+      border-radius: 8px;
+      padding: 1rem;
+    }
+    .card h3 { margin: 0 0 0.25rem; font-size: 1rem; }
+    .card p { margin: 0; color: #555; font-size: 0.9rem; }
+    .price { font-weight: 600; margin-top: 0.5rem; }
+    #widget-note {
+      background: #fff3cd;
+      border: 1px solid #ffe69c;
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      font-size: 0.9rem;
+    }
+    code { background: #eee; padding: 0.1rem 0.3rem; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <header><h1>Demo Motors</h1></header>
+  <main>
+    <p id="widget-note" hidden></p>
+    <h2>This week's picks</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Aster Sedan LE</h3>
+        <p>Fuel-efficient family sedan, seats 5.</p>
+        <p class="price">$24,500</p>
+      </div>
+      <div class="card">
+        <h3>Aster Sedan SE</h3>
+        <p>Sport trim, adaptive suspension.</p>
+        <p class="price">$27,900</p>
+      </div>
+      <div class="card">
+        <h3>Aster Wagon Hybrid</h3>
+        <p>7 seats, hybrid drivetrain, 44 mpg.</p>
+        <p class="price">$32,300</p>
+      </div>
+    </div>
+  </main>
+  <script>
+    (function () {
+      "use strict";
+
+      var WIDGET_APP_ORIGIN = "http://localhost:3000";
+
+      var key = new URLSearchParams(window.location.search).get("key");
+      var note = document.getElementById("widget-note");
+
+      if (!key) {
+        note.textContent =
+          "No ?key= in the URL, so the chat widget was not loaded. " +
+          "Run the seed (uv run python -m app.db.seed) and open the URL it " +
+          "prints, or copy a public key from an agent's Website widget card " +
+          "and open this page as ?key=<public_key>.";
+        note.hidden = false;
+        return;
+      }
+
+      // DOM APIs only -- never innerHTML with a value that came from the
+      // page's own query string, even one as low-stakes as a public key.
+      var script = document.createElement("script");
+      script.setAttribute("src", WIDGET_APP_ORIGIN + "/widget.js");
+      script.setAttribute("data-key", key);
+      script.async = true;
+      document.body.appendChild(script);
+    })();
+  </script>
+</body>
+</html>

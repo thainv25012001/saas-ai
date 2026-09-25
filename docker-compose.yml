@@ -117,9 +117,14 @@ services:
       - /app/.venv
       # Shared with `worker` -- see the note on its own `uploads` mount.
       - uploads:/data/uploads
+    # --no-access-log: uvicorn's own access log line prints the client IP and
+    # the full request path (a widget public key included) -- app/main.py's
+    # request middleware already logs every request, with a widget key
+    # truncated to 8 characters, so uvicorn's line would be a second,
+    # unredacted copy of the same request. See docs/DEPLOYMENT.md.
     command: >
       sh -c "uv run alembic upgrade head &&
-             uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+             uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --no-access-log"
     healthcheck:
       # No curl in python:3.12-slim; urllib is already there. Not "healthy"
       # until this succeeds, which only happens once migrations have

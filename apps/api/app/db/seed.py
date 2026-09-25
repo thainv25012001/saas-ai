@@ -28,10 +28,13 @@ from app.db.models import (
     Prompt,
     User,
 )
+from app.db.models.widget import WidgetPosition
 from app.llm.registry import DEFAULT_MODELS
 from app.prompts.defaults import DEFAULT_SALES_SYSTEM_PROMPT
 from app.prompts.schemas import CreatePromptInput
 from app.prompts.service import PromptService
+from app.widget.schemas import UpdateWidgetSettingsInput
+from app.widget.service import WidgetSettingsService
 
 DEMO_EMAIL = "demo@example.com"
 DEMO_PASSWORD = "demo-password-123"
@@ -40,6 +43,12 @@ DEMO_ORG_SLUG = "demo-motors"
 DEMO_PROMPT_KEY = "sales_system"
 DEMO_AGENT_NAME = "Demo Sales Agent"
 DEMO_AGENT_SLUG = "demo-sales-agent"
+# The static demo page (`infrastructure/widget-demo`, `make widget-demo`) is
+# served on its own port so it is a distinct origin from the dashboard --
+# exactly what a real business's own site would be. `normalize_origins`
+# accepts `http://localhost:*` only when ENVIRONMENT=local (spec §3), which
+# this seed already requires (`_refuse_outside_local`).
+DEMO_WIDGET_ORIGIN = "http://localhost:5500"
 
 
 def _refuse_outside_local() -> None:
@@ -190,8 +199,29 @@ async def seed() -> None:
         agent = await _get_or_create_agent(session, tenant)
         if agent.prompt_id != prompt.id:
             agent.prompt_id = prompt.id
+        public_key = agent.public_key
+
+        # Ruling R4 (ledger): `WidgetSettingsService.update` requires an
+        # owner/admin `TenantContext` -- exactly the one built above for the
+        # seeded owner, so no second session or role is needed. Idempotent
+        # like every other step here: an upsert, safe to re-run.
+        await WidgetSettingsService(session, tenant).update(
+            agent.id,
+            UpdateWidgetSettingsInput(
+                enabled=True,
+                allowed_origins=[DEMO_WIDGET_ORIGIN],
+                brand_color="#2563eb",
+                position=WidgetPosition.RIGHT,
+                title=None,
+                daily_message_cap=500,
+            ),
+        )
 
     print(f"seed: {DEMO_EMAIL} / {DEMO_PASSWORD} ready in {DEMO_ORG_NAME}")  # noqa: T201
+    print(  # noqa: T201
+        f"seed: widget demo -- run `make widget-demo`, then open "
+        f"http://localhost:5500/?key={public_key}"
+    )
 
 
 if __name__ == "__main__":

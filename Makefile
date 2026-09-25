@@ -44,6 +44,11 @@ schema:
 seed:
 	cd apps/api && uv run python -m app.db.seed
 
+.PHONY: widget-demo
+
+widget-demo:
+	cd infrastructure/widget-demo && python -m http.server 5500
+
 .PHONY: web web-codegen web-typecheck web-lint
 
 web:
