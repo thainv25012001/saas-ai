@@ -4,6 +4,7 @@ import { use, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery } from "urql";
 import { Alert } from "@/components/ui/Alert";
+import { AgentPromptCard } from "@/components/agents/AgentPromptCard";
 import { AgentToolsCard } from "@/components/agents/AgentToolsCard";
 import { McpAccessCard } from "@/components/agents/McpAccessCard";
 import { Badge } from "@/components/ui/Badge";
@@ -23,8 +24,10 @@ import {
   ConfiguredProvidersDocument,
   CreateApiKeyDocument,
   DeleteAgentDocument,
+  PromptsDocument,
   ProviderModelsDocument,
   RevokeApiKeyDocument,
+  SetAgentPromptDocument,
   SetAgentToolEnabledDocument,
   UpdateAgentConfigDocument,
   UpdateAgentDocument,
@@ -33,6 +36,7 @@ import { agentStatusLabel, agentStatusTone } from "@/lib/agent-status";
 import { API_URL } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { mcpEndpointUrl } from "@/lib/mcp";
+import { activeVersionOf } from "@/lib/prompts";
 import { editableProviders, modelFieldHelp, providerLabel } from "@/lib/providers";
 import { firstGraphQLError } from "@/lib/graphql-errors";
 
@@ -92,6 +96,10 @@ export default function AgentDetailPage({
   const [createKeyError, setCreateKeyError] = useState<string | null>(null);
   const [revokingKeyId, setRevokingKeyId] = useState<string | null>(null);
   const [revokeKeyError, setRevokeKeyError] = useState<string | null>(null);
+
+  const [promptsResult] = useQuery({ query: PromptsDocument, pause: loading || !user });
+  const [setPromptResult, setAgentPrompt] = useMutation(SetAgentPromptDocument);
+  const [promptSaved, setPromptSaved] = useState(false);
 
   const agent = data?.agent;
 
@@ -156,6 +164,12 @@ export default function AgentDetailPage({
       refetchAgent({ requestPolicy: "network-only" });
       setTimeout(() => setAgentSaved(false), 2000);
     }
+  }
+
+  async function onSavePrompt(promptId: string | null) {
+    setPromptSaved(false);
+    const result = await setAgentPrompt({ agentId: id, promptId });
+    if (!result.error) setPromptSaved(true);
   }
 
   async function onSubmitConfig(event: React.FormEvent) {
@@ -467,6 +481,21 @@ export default function AgentDetailPage({
           </CardFooter>
         </Card>
       </form>
+
+      <AgentPromptCard
+        prompts={(promptsResult.data?.prompts ?? []).map((prompt) => ({
+          id: prompt.id,
+          name: prompt.name,
+          activeVersion: activeVersionOf(prompt.versions)?.version ?? null,
+        }))}
+        fetching={promptsResult.fetching}
+        failed={promptsResult.error !== undefined}
+        currentPromptId={agent.promptId ?? null}
+        saving={setPromptResult.fetching}
+        error={firstGraphQLError(setPromptResult.error)}
+        saved={promptSaved}
+        onSave={onSavePrompt}
+      />
 
       <div className="space-y-2">
         {toolsActionError ? <Alert tone="danger">{toolsActionError}</Alert> : null}
