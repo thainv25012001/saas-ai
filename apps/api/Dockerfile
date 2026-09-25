@@ -26,4 +26,9 @@ EXPOSE 8000
 # request and truncates a widget key to its first 8 characters. Spec §5 says
 # no IP in logs; uvicorn's line would otherwise be a second, unredacted copy
 # of what the middleware already logs correctly. See docs/DEPLOYMENT.md.
-CMD ["sh", "-c", "uv run --no-sync uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --no-access-log"]
+# --proxy-headers/--forwarded-allow-ips: the per-IP rate limits key on the
+# client address (app/core/request.py), which behind a proxy is the proxy's
+# unless X-Forwarded-For is honoured -- but only from a trusted hop, or anyone
+# could forge a fresh key per request. Loopback by default; render.yaml sets
+# FORWARDED_ALLOW_IPS='*' because Render's proxy is the only way in.
+CMD ["sh", "-c", "uv run --no-sync uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --no-access-log --proxy-headers --forwarded-allow-ips=\"${FORWARDED_ALLOW_IPS:-127.0.0.1}\""]

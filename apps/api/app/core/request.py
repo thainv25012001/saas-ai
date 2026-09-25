@@ -10,17 +10,14 @@ def client_ip(request: Request) -> str:
     It lives only inside rate-limit keys, which expire; it is never stored or
     logged (docs/superpowers/specs/2026-09-25-embeddable-widget-design.md §5).
     """
-    # request.client.host is the DIRECT peer's address. Phase 1 runs with no
-    # proxy in front of this service, so that peer is the real client and
-    # this is correct as-is. It stops being correct the moment a load
-    # balancer or ingress sits in front: every client would then collapse
-    # into the proxy's one IP (5 registrations/hour globally; one attacker
-    # starving /login for everyone). Trusting X-Forwarded-For naively is NOT
-    # the fix - it lets an attacker mint a fresh rate-limit key on every
-    # request by forging the header. Before deploying behind a proxy,
-    # configure Starlette/uvicorn's ProxyHeadersMiddleware with an explicit
-    # trusted-hosts list (or run uvicorn with --proxy-headers
-    # --forwarded-allow-ips=<the proxy's real address>) so only a header set
-    # by that trusted hop is honored. Until then, this limiter is only
-    # correct for direct connections.
+    # request.client.host is the direct peer's address -- unless uvicorn runs
+    # with --proxy-headers and the peer is in --forwarded-allow-ips, in which
+    # case uvicorn has already replaced it with the X-Forwarded-For client.
+    # `apps/api/Dockerfile` does exactly that, trusting loopback by default
+    # and whatever FORWARDED_ALLOW_IPS names otherwise (render.yaml: '*', as
+    # Render's proxy is the only way in). Trusting X-Forwarded-For from any
+    # peer that can reach the container directly would let an attacker mint
+    # a fresh rate-limit key per request by forging the header, so a deploy
+    # without a proxy in front must leave it at the default. See
+    # docs/DEPLOYMENT.md.
     return request.client.host if request.client else "unknown"
