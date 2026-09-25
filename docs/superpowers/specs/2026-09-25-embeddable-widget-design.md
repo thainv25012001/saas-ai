@@ -129,7 +129,7 @@ refused wherever an access token is expected and vice versa.
 | Endpoint | Auth | Does |
 |---|---|---|
 | `GET /api/v1/widget/{public_key}/frame-policy` | none | Returns `{allowed_origins: [...]}` when available, else `{allowed_origins: []}`. Always 200, so it reveals nothing more than the embed page itself would. Used by the web middleware (§6). Rate-limited per IP (120/min). |
-| `POST /api/v1/widget/{public_key}/session` | optional widget bearer | If the bearer is a valid widget token for this agent, keep its `vid`; otherwise mint a new one. Returns `{token, expires_at, config}` where `config = {agent_name, title, greeting, brand_color, position}`. |
+| `POST /api/v1/widget/{public_key}/session` | optional widget bearer | If the bearer is a valid widget token for this agent, keep its `vid`; otherwise mint a new one. Returns `{token, expires_at, config}` where `config = {agent_name, title, greeting, fallback_message, brand_color, position}`. |
 | `GET /api/v1/widget/conversation` | widget bearer | The visitor's most recent `open` widget conversation for the token's agent, with its last 50 user/assistant messages (text only), or `null`. |
 | `POST /api/v1/widget/chat/stream` | widget bearer | Body `{message (1–2000 chars), conversation_id?}`. Re-checks availability, enforces §5, then runs `ChatService.send(channel=WIDGET, visitor_id=vid)` through the same streaming body as the dashboard route, with §4.1's projection. |
 
