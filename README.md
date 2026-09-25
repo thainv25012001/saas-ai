@@ -380,7 +380,9 @@ the moment this leaves your laptop:
   every request by forging the header. Before deploying behind a proxy, configure
   Starlette/uvicorn's `ProxyHeadersMiddleware` with an explicit trusted-hosts list (or run
   uvicorn with `--proxy-headers --forwarded-allow-ips=<the proxy's real address>`) so only
-  a header set by that trusted hop is honored.
+  a header set by that trusted hop is honored. The API image now does the latter, reading
+  the trusted list from `FORWARDED_ALLOW_IPS` (loopback by default; `'*'` in `render.yaml`,
+  where Render's proxy is the only way in) — see `docs/DEPLOYMENT.md`.
 
 - **`POST /api/v1/documents` caps request size itself, in two layers, but a
   proxy-level cap is still worth having.** `settings.max_request_bytes` (20 MB

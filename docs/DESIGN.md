@@ -705,10 +705,30 @@ data, set once per widget and read in exactly one place. `WidgetChat` sets
 `--widget-brand` as an inline style on its own root, only when the value is a
 6-digit hex (never interpolated into a class name), and every consumer reads
 it through the fixed class `bg-[var(--widget-brand,var(--color-primary))]` —
-the header, user bubbles and the Send button. Text on it is the existing
-`text-primary-ink` token. `WidgetCard`'s own brand-colour field (below) is the
-other end of this: an `<input type="color">` and a plain-text hex `Input`
-kept in sync in one piece of state, validated server-side, not this document.
+the header, user bubbles and the Send button. **Text on it is derived, not
+fixed:** `readableTextOn(hex)` (`src/lib/contrast.ts`, WCAG relative
+luminance) picks `#000000` or `#ffffff`, whichever contrasts more, and
+`WidgetChat` sets it beside the brand as `--widget-brand-ink`, read through
+the fixed class `text-[var(--widget-brand-ink,var(--color-primary-ink))]` — a
+pale brand gets black text, a dark one white, and with no brand the
+`primary-ink` token still applies. Black and white here are computed from
+the data, the same exception as the brand itself, not new palette colours.
+`WidgetCard`'s own brand-colour field (below) is the other end of this: an
+`<input type="color">`, a plain-text hex `Input` kept in sync in one piece of
+state (validated server-side, not this document), and an "Aa" sample chip
+painted with the colour and its `readableTextOn` text, so the owner sees the
+contrast before saving.
+
+**The launcher (`public/widget.js`) is drawn from the owner's settings, or
+not at all.** It asks the config route before drawing: nothing appears when
+the widget is off or the check fails; otherwise the launcher starts in the
+brand colour (icon colour from the same contrast formula, inlined because the
+loader has no imports) on the owner's side. There is no neutral placeholder
+launcher any more. While the panel is open the launcher shows an "×" and is
+labelled "Close chat"; under 480 px, where the panel is full-screen, that "×"
+sits in the top corner above the frame, so the visitor can always leave even
+if the frame never loads. For the same reason the embed page renders its
+header, with its close button, in the loading and unavailable states too.
 
 **A brand-painted button copies `Button`, not `cn`s onto it.** `cn()` only
 concatenates classes, so a second `bg-*` after `Button`'s own would resolve

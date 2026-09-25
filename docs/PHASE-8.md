@@ -17,8 +17,9 @@ Business's own site
   <script src="APP/widget.js" data-key="pk_…" async></script>
        │
        ▼
-  widget.js  ──draws──▶  launcher + closed shadow root
-       │  on open, creates
+  widget.js  ──GET APP/api/v1/widget/{key}/config──▶ available? colour, side, title
+       │                                              (rewritten to the API; nothing drawn if off)
+       │  draws launcher + closed shadow root; on open, creates
        ▼
   <iframe src="APP/embed/pk_…">           ← our own origin; CORS never changes
        │
@@ -82,8 +83,13 @@ backfilled at agent creation (`app/widget/service.py::_default_view`).
 **Origin normalization** (`app/widget/origins.py`, pure, unit-tested): accepts
 `https://host[:port]` always, and `http://localhost[:port]` / `http://127.0.0.1[:port]`
 only when `ENVIRONMENT=local`. Rejects (never silently strips) a path, query, fragment,
-userinfo, wildcard or non-http(s) scheme, so a stored value is exactly what later becomes a
-`frame-ancestors` source — nothing downstream re-validates it.
+userinfo, wildcard or non-http(s) scheme; a host that is not a DNS name after IDNA encoding
+(`;`, spaces, quotes, `%`, a leading/trailing hyphen, an empty label) or is an IPv6
+literal; and a port that is not a number in 1–65535 (these used to escape as a bare
+`ValueError`, a 500). More than 20 non-blank entries are refused before any is parsed. A
+stored value is therefore exactly what later becomes a `frame-ancestors` source. The web
+header builder (`src/lib/frame-policy.ts`) still re-validates every origin it receives, as
+defence in depth.
 
 **`resolve_widget(p_public_key text)`** — `SECURITY DEFINER`, `search_path = public,
 pg_temp`, `REVOKE ALL FROM PUBLIC`. **Migrations grant `EXECUTE` to whichever role
@@ -92,9 +98,9 @@ pg_temp`, `REVOKE ALL FROM PUBLIC`. **Migrations grant `EXECUTE` to whichever ro
 documents for it: a literal `app_user` in the migration would grant a role that may not
 even exist on a managed database (Neon's roles are named at provisioning time), and a
 migrate job whose `DATABASE_URL` names a different role than the literal would leave the
-function ungrantable to the role that actually needs it — exactly the failure a production
-hotfix (`fix(widget): grant resolve_widget to DATABASE_URL's role, not a literal app_user`)
-fixed for `0016` after `0015` hit it first. `docs/DEPLOYMENT.md`'s existing note on
+function ungrantable to the role that actually needs it. `0016` was corrected on this
+branch, before release (`fix(widget): grant resolve_widget to DATABASE_URL's role, not a
+literal app_user`), after `0015` hit the same problem first. `docs/DEPLOYMENT.md`'s existing note on
 `resolve_api_key` now applies to `resolve_widget` identically.
 
 `ChatService.send` gained `visitor_id: str | None = None`. On an existing conversation, a
@@ -119,7 +125,8 @@ volunteer details to `create_lead`.
 
 | Endpoint | Auth | Does |
 |---|---|---|
-| `GET /{public_key}/frame-policy` | none | `{allowed_origins}` when available, else `[]`. Always 200. Rate-limited **per public key** (§5). |
+| `GET /{public_key}/frame-policy` | none (optional `X-Widget-Frame-Secret`) | `{allowed_origins}` when available, else `[]`. Always 200. A malformed key is answered before any limiter. Rate-limited **per public key** (§5), except for our own middleware proven by `WIDGET_FRAME_POLICY_SECRET`. |
+| `GET /{public_key}/config` | none | The loader's pre-draw check: `{available, brand_color, position, title}`, all nulls when unavailable. Always 200; malformed key answered before any limiter, else 120/min per key. `Cache-Control: public, max-age=60`, `Access-Control-Allow-Origin: *` (no credentials; the global `CORSMiddleware` leaves it alone, pinned by a test with `Origin: https://random.example`). |
 | `POST /{public_key}/session` | optional widget bearer | Keeps the bearer's `vid` if it is valid for this agent, else mints a new one. Returns `{token, expires_at, config}`. |
 | `GET /conversation` | widget bearer | The visitor's most recent `open` widget conversation, last 50 user/assistant text messages, or `null`. |
 | `POST /chat/stream` | widget bearer | `{message (1–2000 chars), conversation_id?}`. Re-checks availability, enforces §5, streams through the same `stream_body` (`app/api/streaming.py`) the dashboard route uses, with §4.1's public event projection. |
@@ -166,7 +173,11 @@ All through the existing Redis `enforce_rate_limit` (fixed window, fails open an
 | `widget:msg:visitor:{vid}` | 10 / minute | chat stream |
 | `widget:msg:ip:{ip}` | 30 / minute | chat stream |
 | `widget:msg:agent-day:{agent_id}:{yyyymmdd}` | `daily_message_cap` / 86 400 s | chat stream |
-| `widget:frame:key:{public_key}` | 120 / minute | frame-policy — **★ per public key, not per IP** |
+| `widget:frame:key:{public_key}` | 120 / minute | frame-policy — **★ per public key, not per IP**; skipped for our own middleware (below) |
+| `widget:config:key:{public_key}` | 120 / minute | the loader's config check (cacheable 60 s) |
+
+Neither frame-policy nor config lets a malformed key reach a limiter: it is answered
+(`[]` / all nulls) before Redis or the database is touched.
 
 **★ Departure from the spec, made and recorded during implementation (ledger, Task 5).**
 The spec's own text names `widget:frame:ip:{ip}`. That is a defect: the only caller of
@@ -181,6 +192,16 @@ middleware also serves the last known origins for a key when the fetch fails (st
 error), so one slow or erroring `frame-policy` call never unframes a widget that was
 working a moment before.
 
+**The frame-policy secret (final-review fix).** A per-key budget still left a targeted
+attack: the key is public, so about two requests a second from anyone keeps one key's
+120/minute spent, and a cold middleware instance (no cached answer) then serves
+`frame-ancestors 'self'` — the widget is unframed on its own site. `WIDGET_FRAME_POLICY_SECRET`
+(same value on the API and the web app) closes it: the middleware sends it as
+`X-Widget-Frame-Secret` (server-side only, never `NEXT_PUBLIC_`), and the API skips the
+limit only when a secret is configured **and** the header matches it
+(`hmac.compare_digest`). A wrong or missing header, or no configured secret, keeps the
+per-key limit exactly as before.
+
 **Also recorded, not fixed (accepted, see the risk each names):**
 
 - **Unknown-key session probes are not rate-limited.** `POST /{public_key}/session` with a
@@ -192,11 +213,14 @@ working a moment before.
   or a provider error after the cap check passes) — the cap counts attempts, not
   successes. Bounded, and the alternative (checking the cap only after a turn succeeds)
   would let an attacker probe availability for free before ever being charged against it.
-- **Rate limits key on `request.client.host`**, exactly as the auth routes do
-  (`app/api/auth.py::_client_key`) — no `X-Forwarded-For` trust. Behind a reverse proxy
-  this becomes the proxy's one address for every visitor, the identical, already-documented
-  caveat `docs/DEPLOYMENT.md` records for login (see that file's "Before you deploy"
-  section, now extended to the widget's own limits).
+- **The client IP is `app/core/request.py::client_ip`** (`request.client.host`), shared
+  with the auth routes. Behind Render's proxy that used to be the proxy's one address for
+  every visitor, collapsing the per-IP limits into one shared budget. Fixed in the final
+  review: the API image runs uvicorn with `--proxy-headers
+  --forwarded-allow-ips="${FORWARDED_ALLOW_IPS:-127.0.0.1}"`, `render.yaml` sets
+  `FORWARDED_ALLOW_IPS='*'` (Render's proxy is the only way in), and docker-compose leaves
+  it unset. `'*'` is only safe where the container is reachable solely through a trusted
+  proxy — `docs/DEPLOYMENT.md` says so.
 
 `create_lead` keeps its existing per-conversation limit (3 / 5 min) and stays off unless
 the agent grants it; the dashboard's widget card warns when it is on ("anonymous visitors
@@ -222,13 +246,34 @@ runs the Dockerfile's `CMD` as-is), so no separate change was needed there;
 ## 6. Web: loader and embed page
 
 **Loader — `apps/web/public/widget.js`.** Hand-written ES2017, no build step, no
-dependencies, ~4.7 KB stripped / ~2.4 KB gzipped (the spec's target was "< 5 KB"; the
-shipped file is 6.0 KB raw, before minification — a follow-up if raw size ever matters more
-than what actually reaches the wire). Draws a launcher and, on first open, an iframe onto
-`APP_ORIGIN/embed/{key}` inside a **closed** shadow root, so host CSS/scripts cannot reach
-in and the widget's cannot reach out. Accepts `message` events only from the iframe's own
-`contentWindow` at `APP_ORIGIN`, and posts only `{type: "open"}` back, targeted at that
-origin.
+dependencies (the spec's target was "< 5 KB"; with the config check, the contrast formula
+and the close control it is now about 10 KB raw, comments included, before minification or
+gzip — a follow-up if raw size ever matters more than what actually reaches the wire).
+Before drawing anything it fetches `APP_ORIGIN/api/v1/widget/{key}/config` — the web app
+rewrites that one path to the API (`src/lib/auth-proxy.ts`'s `widgetConfigRewrites`), since
+the loader only knows the origin of its own `<script src>`. **When the widget is off, the
+agent is not active, the key is unknown, or the check fails in any way, it draws nothing**
+and logs one `console.info`. Otherwise it draws the launcher in the owner's `brand_color`,
+on the owner's side, labelled with the title, from the start (the spec's neutral default
+launcher is superseded — it ignored both the settings and the off switch). On first open it
+adds an iframe onto `APP_ORIGIN/embed/{key}` inside a **closed** shadow root, so host
+CSS/scripts cannot reach in and the widget's cannot reach out. Accepts `message` events only
+from the iframe's own `contentWindow` at `APP_ORIGIN`, and posts only `{type: "open"}` back,
+targeted at that origin.
+
+**The visitor can always close it.** While open, the launcher is an "×" that closes the
+panel. Under 480 px wide the panel is full-screen, so the "×" moves to the top corner with a
+higher z-index than the frame — it keeps working while the frame is loading, when the
+session request hangs, and when the frame is refused by CSP, none of which the frame's own
+close button can survive. The embed page also shows its header (with its close button)
+while loading and when unavailable, and gives up on `session`/`conversation` after 10 s
+(`AbortSignal.timeout`), showing "This assistant is not available right now."
+
+**A failed turn keeps what was said.** On a stream `error` the fallback message is appended
+after any partial answer instead of replacing it; a `not_found` on a turn that sent a
+`conversation_id` (the resumed conversation is gone) clears it and retries that message once
+as a new conversation; and anything thrown out of the stream becomes the fallback, never an
+unhandled rejection.
 
 **Not delivered: the spec's `unread {count}` loader message.** Nothing in the embed page
 produces an unread count yet — there was no use for it (the widget has no closed-tab
@@ -251,14 +296,16 @@ business relies on, and it is exactly the mechanism the spec's Approach A calls 
 modern browsers is what makes "one visitor identity per business site" the right meaning
 at all.
 
-**Not addressed: contrast on a light `brand_color`.** The launcher/button text is white
-regardless of the owner's chosen brand color; a very light color (near-white) can fail
-contrast against white text. No luminance-based text-color switch was added. Left for a
-follow-up rather than guessed at without a design pass.
+**Readable text on any `brand_color`.** `src/lib/contrast.ts::readableTextOn(hex)` picks
+black or white, whichever has the higher WCAG 2 contrast ratio against the colour (relative
+luminance). `WidgetChat` sets it as `--widget-brand-ink` next to `--widget-brand`, read by
+the header, user bubbles and Send button; `WidgetCard` shows a live "Aa" sample on the
+chosen colour; and `widget.js` inlines the same formula for the launcher icon.
 
 **Frame policy — `src/middleware.ts` + `src/lib/frame-policy.ts`.** For `/embed/:path*`
 only, fetches `GET /api/v1/widget/{key}/frame-policy` server-side (through
-`auth-proxy.ts`'s `proxyTargetUrl`), caches each key's answer for 30 seconds in a
+`auth-proxy.ts`'s `proxyTargetUrl`, with `X-Widget-Frame-Secret` when
+`WIDGET_FRAME_POLICY_SECRET` is set — §5), caches each key's answer for 30 seconds in a
 module-level map (the edge runtime has no access to Next's own fetch cache), and sets
 `Content-Security-Policy: frame-ancestors 'self' <origins…>` while removing
 `X-Frame-Options` for that route only. A failed fetch (network, timeout, non-200 including
@@ -279,7 +326,8 @@ own `parseSSEStream` is unchanged in behaviour.
 below the MCP access card: enable toggle, allowed-domains editor (one origin per line,
 server error messages surfaced inline), brand color, left/right, title, daily cap, the
 copy-ready `<script src="{APP_ORIGIN}/widget.js" data-key="{public_key}" async></script>`
-snippet, and a live `/embed/{key}` preview reloaded after save. Warnings: agent not
+snippet, and a live `/embed/{key}` preview reloaded after save. A save error shows in a
+`danger` `Alert` at the top of the card. Warnings: agent not
 `active`; enabled with no domains; `create_lead` granted; and the one-line reminder from §2
 that the domain list stops other websites, not direct API use. Editing requires owner or
 admin, same as API keys; members see the card read-only.
@@ -290,11 +338,12 @@ normalized server-side). `Agent.publicKey` was added to the GraphQL `Agent` type
 existed on the model since Phase 1 but nothing exposed it before this phase.
 
 **Conversations page — `/dashboard/conversations`.** Agent selector, channel filter
-(defaulting to `widget`; also `playground`, `api`, all), a list (title, last message time,
-message count), a read-only transcript reusing `ConversationPanel`'s rendering without the
-composer. Each lead on `/dashboard/leads` links to
-`/dashboard/conversations?conversation={id}` — a once-only guard keeps a later manual
-navigation on the page from re-triggering that jump.
+(defaulting to `widget`; also `playground`, `api`, all — under "All" each row is labelled
+Widget / Playground / API), a list (title or preview, last message time — **no message
+count**, see §9), a read-only transcript reusing `ChatMessage` without a composer. Query
+errors show in a `danger` `Alert` at the top of the pane they belong to. Each lead on
+`/dashboard/leads` links to `/dashboard/conversations?agent={agent_id}&conversation={id}` —
+a once-only guard keeps a later manual navigation on the page from re-triggering that jump.
 
 ---
 
@@ -307,9 +356,17 @@ token on `/chat/stream` or `/graphql` → 401; dashboard token on widget routes 
 cross-visitor conversation isolation (404, not a leak); the projection (a tool-using turn's
 full SSE body has no `result`, `arguments`, or cost); every §5 limit including the daily
 cap's `widget_daily_cap` code; `create_lead` from the widget sets `source='widget'`;
-frame-policy origins only when available; RLS on `widget_settings`; `0016` up/down.
+frame-policy origins only when available; the frame-policy secret (matching header never
+limited; wrong or missing header limited; header ignored with no secret configured; a
+malformed key never reaches the limiter); the config endpoint (available, unavailable,
+malformed key, per-key limit, `Access-Control-Allow-Origin: *` surviving the global CORS
+middleware); `updated_at` moving on a second settings update; RLS on `widget_settings`;
+`0016` up/down.
 
-Unit: origin normalization table; `project_public_event` per event; token encode/decode and
+Unit: origin normalization table (including the final review's non-DNS hosts, IPv6
+literals and bad ports, and the cap checked before parsing); `tests/unit/test_deploy_config.py`
+(the Dockerfile's proxy-header flags, `render.yaml`'s `FORWARDED_ALLOW_IPS`);
+`project_public_event` per event; token encode/decode and
 `typ` refusal; `tests/integration/test_seed.py` (Task 7) — the seed enables the demo
 widget for `http://localhost:5500`, activates the demo agent (a freshly created agent
 starts `draft`, and `load_available` refuses a draft agent identically to an unknown key —
@@ -317,9 +374,13 @@ enabling `widget_settings` alone is not enough for the demo to actually work), a
 `load_available` returns a `PublicWidget` end to end, and re-running it does not drift from
 those values.
 
-Web: the frame-ancestors header builder; the snippet builder; the loader's message filter;
-`WidgetChat`/embed-page behaviour; the Conversations page's once-only `?conversation=`
-guard.
+Web: the frame-ancestors header builder and its secret header; the snippet builder; the
+loader's config check (draws nothing when unavailable or on any failure; colour, side and
+title from the start; black icon on a pale colour), its small-screen close control and
+message filter; `readableTextOn`; `WidgetChat`/embed-page behaviour (header while loading,
+10 s timeouts, partial text kept on error, one `not_found` retry, a thrown stream); the
+security-header rules through Next's own `getPathMatch`; the Conversations page's
+once-only `?conversation=` guard and channel labels.
 
 Manual: `infrastructure/widget-demo/index.html`, a static fake storefront served on its own
 origin (`make widget-demo` → `python -m http.server 5500`), listed as the demo agent's one
@@ -340,9 +401,8 @@ Copied from the spec's own §9, plus what surfaced during implementation.
 | Proactive greetings, triggers, page-context awareness | The widget does not read the host page. |
 | Custom CSS / fonts / avatars | Brand color and position only. |
 | Scoring live widget traffic in evaluations | PHASE-6 §9 defers it to after the widget; still deferred. |
-| Per-IP trust of `X-Forwarded-For` | Same as login; one proxy-header decision for the whole API, later. |
+| A message count on the Conversations list | The spec listed one; the list shows title/preview and last message time only. |
 | The spec's `unread {count}` loader message | §6 — nothing produces an unread count yet; no use for it without a closed-tab notion of "new since you left". |
-| Luminance-based launcher text color | §6 — a light `brand_color` can fail contrast against the fixed white button text; not addressed. |
 | A rate limit on unknown-key session probes | §5 — bounded to one DB lookup per guess today; a dedicated failed-lookup limit is a follow-up. |
 | A rate limit distinguishing a refused turn from a billed one | §5 — the daily cap is consumed before a turn is known to succeed. |
 
