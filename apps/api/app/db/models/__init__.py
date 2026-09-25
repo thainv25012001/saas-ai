@@ -31,6 +31,7 @@ from app.db.models.product_import import ProductImport, ProductImportStatus
 from app.db.models.prompt import Prompt, PromptVersion
 from app.db.models.tool import AgentToolLink, MessageToolCall, Tool, ToolType
 from app.db.models.user import User
+from app.db.models.widget import WidgetPosition, WidgetSettings
 
 # `Message` is the ORM row for the `messages` table. `app.llm.types.Message`
 # is the unrelated LLM wire type (provider-agnostic chat message). A module
@@ -77,4 +78,6 @@ __all__ = [
     "UsageEvent",
     "UsageKind",
     "User",
+    "WidgetPosition",
+    "WidgetSettings",
 ]
