@@ -672,3 +672,58 @@ async def test_another_orgs_prompt_versions_are_not_reachable(client, auth_heade
 
     assert single.json()["errors"][0]["extensions"]["code"] == "not_found"
     assert all(p["id"] != theirs for p in listed.json()["data"]["prompts"])
+
+
+async def test_set_agent_prompt_links_and_unlinks(client, auth_headers):
+    agent = await create_agent(client, auth_headers, "Linker")
+    agent_id = agent.json()["data"]["createAgent"]["id"]
+    prompt_id = await _create_prompt(client, auth_headers, "linked_prompt")
+    mutation = (
+        "mutation S($a: UUID!, $p: UUID) {"
+        " setAgentPrompt(agentId: $a, promptId: $p) { id promptId } }"
+    )
+
+    linked = await graphql(client, mutation, {"a": agent_id, "p": prompt_id}, auth_headers)
+    assert linked.json()["data"]["setAgentPrompt"]["promptId"] == prompt_id
+
+    agents = await graphql(
+        client,
+        "query P($id: UUID!) { prompt(id: $id) { agents { id name } } }",
+        {"id": prompt_id},
+        auth_headers,
+    )
+    assert agents.json()["data"]["prompt"]["agents"] == [{"id": agent_id, "name": "Linker"}]
+
+    unlinked = await graphql(client, mutation, {"a": agent_id, "p": None}, auth_headers)
+    assert unlinked.json()["data"]["setAgentPrompt"]["promptId"] is None
+
+
+async def test_set_agent_prompt_with_an_unknown_prompt_is_not_found(client, auth_headers):
+    agent = await create_agent(client, auth_headers, "Unknown Linker")
+    agent_id = agent.json()["data"]["createAgent"]["id"]
+    response = await graphql(
+        client,
+        "mutation S($a: UUID!, $p: UUID) { setAgentPrompt(agentId: $a, promptId: $p) { id } }",
+        {"a": agent_id, "p": "00000000-0000-7000-8000-000000000000"},
+        auth_headers,
+    )
+    assert response.json()["errors"][0]["extensions"]["code"] == "not_found"
+
+
+async def test_prompts_agents_is_empty_for_an_unused_prompt(client, auth_headers):
+    await _create_prompt(client, auth_headers, "unused_prompt")
+    response = await graphql(client, "{ prompts { key agents { id } } }", headers=auth_headers)
+    rows = {p["key"]: p["agents"] for p in response.json()["data"]["prompts"]}
+    assert rows["unused_prompt"] == []
+
+
+async def test_default_system_prompt_returns_the_unrendered_default(client, auth_headers):
+    response = await graphql(client, "{ defaultSystemPrompt }", headers=auth_headers)
+    text = response.json()["data"]["defaultSystemPrompt"]
+    assert "{{company_name}}" in text
+    assert "{{agent_name}}" in text
+
+
+async def test_default_system_prompt_requires_authentication(client):
+    response = await graphql(client, "{ defaultSystemPrompt }")
+    assert response.json()["errors"][0]["extensions"]["code"] == "unauthenticated"

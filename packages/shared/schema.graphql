@@ -320,6 +320,7 @@ type Mutation {
   updateAgent(id: UUID!, input: UpdateAgentInput!): Agent!
   updateAgentConfig(agentId: UUID!, input: UpdateAgentConfigInput!): AgentConfig!
   deleteAgent(id: UUID!): Boolean!
+  setAgentPrompt(agentId: UUID!, promptId: UUID = null): Agent!
   createPrompt(input: CreatePromptInput!): Prompt!
   createPromptVersion(promptId: UUID!, input: CreatePromptVersionInput!): PromptVersion!
   activatePromptVersion(versionId: UUID!): PromptVersion!
@@ -412,6 +413,7 @@ type Prompt {
   description: String
   createdAt: DateTime!
   versions: [PromptVersion!]!
+  agents: [Agent!]!
 }
 
 type PromptVersion {
@@ -437,6 +439,7 @@ type Query {
   configuredProviders: [ProviderInfo!]!
   prompts: [Prompt!]!
   prompt(id: UUID!): Prompt!
+  defaultSystemPrompt: String!
   documents(status: DocumentStatus = null, limit: Int! = 50, offset: Int! = 0): [Document!]!
   conversations(agentId: UUID!, channel: ConversationChannel = null, limit: Int! = 20, offset: Int! = 0): [Conversation!]!
   conversation(id: UUID!): Conversation

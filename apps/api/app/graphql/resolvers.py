@@ -29,6 +29,7 @@ from app.mcp.server import MCP_EXPOSED_TOOL_NAMES
 from app.products.importer import ProductImportService
 from app.products.service import ProductService
 from app.prompts import schemas as prompt_schemas
+from app.prompts.defaults import DEFAULT_SALES_SYSTEM_PROMPT
 from app.prompts.service import PromptService
 from app.tools.runtime import resolve_enabled_tool_names
 
@@ -235,6 +236,13 @@ class Query:
     @strawberry.field
     async def prompt(self, info: Info, id: uuid.UUID) -> gql.Prompt:
         return gql.Prompt.from_model(await _prompts(info).get_prompt(id))
+
+    @strawberry.field
+    async def default_system_prompt(self, info: Info) -> str:
+        """The built-in text an agent with no prompt answers on, unrendered,
+        so the dashboard can start a new prompt from it."""
+        _require_tenant(info)
+        return DEFAULT_SALES_SYSTEM_PROMPT
 
     @strawberry.field
     async def documents(
@@ -526,6 +534,15 @@ class Mutation:
     async def delete_agent(self, info: Info, id: uuid.UUID) -> bool:
         await _agents(info).delete_agent(id)
         return True
+
+    @strawberry.mutation
+    async def set_agent_prompt(
+        self, info: Info, agent_id: uuid.UUID, prompt_id: uuid.UUID | None = None
+    ) -> gql.Agent:
+        """`promptId: null` unlinks. A dedicated mutation rather than a field
+        on `UpdateAgentInput`, where `null` already means "unchanged"."""
+        agent = await _agents(info).set_prompt(agent_id, prompt_id)
+        return gql.Agent.from_model(agent)
 
     @strawberry.mutation
     async def create_prompt(self, info: Info, input: gql.CreatePromptInput) -> gql.Prompt:
