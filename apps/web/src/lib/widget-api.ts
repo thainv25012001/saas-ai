@@ -49,6 +49,37 @@ export class WidgetUnavailableError extends Error {
   }
 }
 
+/** The API did not answer a session or conversation request in time. The
+ * widget treats it like being unavailable: a hung request must never leave
+ * the visitor looking at a spinner with no way forward. */
+export class WidgetTimeoutError extends Error {
+  constructor(message = "widget request timed out") {
+    super(message);
+    this.name = "WidgetTimeoutError";
+  }
+}
+
+/** How long a session or conversation request may take, body included. */
+export const REQUEST_TIMEOUT_MS = 10_000;
+
+/** `fetch` with `REQUEST_TIMEOUT_MS`, turning the timeout into
+ * `WidgetTimeoutError`. The signal also covers reading the body. */
+async function timedFetch<T>(
+  url: string,
+  init: RequestInit,
+  read: (response: Response) => Promise<T>,
+): Promise<T> {
+  try {
+    const response = await fetch(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    return await read(response);
+  } catch (err) {
+    if (err instanceof DOMException && (err.name === "TimeoutError" || err.name === "AbortError")) {
+      throw new WidgetTimeoutError();
+    }
+    throw err;
+  }
+}
+
 /** A visitor-facing line per tool, shown while it runs. Never the tool's
  * arguments: the projection does not send them. */
 export const TOOL_LABELS: Record<string, string> = {
@@ -152,22 +183,23 @@ export async function startSession(
   publicKey: string,
   token: string | null,
 ): Promise<WidgetSession> {
-  const response = await fetch(`${base(apiUrl)}/${encodeURIComponent(publicKey)}/session`, {
-    method: "POST",
-    credentials: "omit",
-    headers: { ...bearer(token) },
-  });
-  if (response.status === 404) throw new WidgetUnavailableError();
-  if (!response.ok) throw new Error(`widget session failed: ${response.status}`);
-  const body: unknown = await response.json();
-  if (!isRecord(body) || typeof body.token !== "string") {
-    throw new Error("widget session: malformed response");
-  }
-  return {
-    token: body.token,
-    expiresAt: typeof body.expires_at === "string" ? body.expires_at : "",
-    config: toConfig(body.config),
-  };
+  return timedFetch(
+    `${base(apiUrl)}/${encodeURIComponent(publicKey)}/session`,
+    { method: "POST", credentials: "omit", headers: { ...bearer(token) } },
+    async (response) => {
+      if (response.status === 404) throw new WidgetUnavailableError();
+      if (!response.ok) throw new Error(`widget session failed: ${response.status}`);
+      const body: unknown = await response.json();
+      if (!isRecord(body) || typeof body.token !== "string") {
+        throw new Error("widget session: malformed response");
+      }
+      return {
+        token: body.token,
+        expiresAt: typeof body.expires_at === "string" ? body.expires_at : "",
+        config: toConfig(body.config),
+      };
+    },
+  );
 }
 
 /** The visitor's latest open conversation, or `null`. */
@@ -175,22 +207,26 @@ export async function loadConversation(
   apiUrl: string,
   token: string,
 ): Promise<WidgetConversation | null> {
-  const response = await fetch(`${base(apiUrl)}/conversation`, {
-    credentials: "omit",
-    headers: bearer(token),
-  });
-  if (response.status === 404) throw new WidgetUnavailableError();
-  if (!response.ok) throw new Error(`widget conversation failed: ${response.status}`);
-  const body: unknown = await response.json();
-  if (!isRecord(body) || typeof body.conversation_id !== "string") return null;
-  const messages = Array.isArray(body.messages)
-    ? body.messages.flatMap((m): WidgetMessage[] =>
-        isRecord(m) && (m.role === "user" || m.role === "assistant") && typeof m.text === "string"
-          ? [{ role: m.role, text: m.text }]
-          : [],
-      )
-    : [];
-  return { conversationId: body.conversation_id, messages };
+  return timedFetch(
+    `${base(apiUrl)}/conversation`,
+    { credentials: "omit", headers: bearer(token) },
+    async (response) => {
+      if (response.status === 404) throw new WidgetUnavailableError();
+      if (!response.ok) throw new Error(`widget conversation failed: ${response.status}`);
+      const body: unknown = await response.json();
+      if (!isRecord(body) || typeof body.conversation_id !== "string") return null;
+      const messages = Array.isArray(body.messages)
+        ? body.messages.flatMap((m): WidgetMessage[] =>
+            isRecord(m) &&
+            (m.role === "user" || m.role === "assistant") &&
+            typeof m.text === "string"
+              ? [{ role: m.role, text: m.text }]
+              : [],
+          )
+        : [];
+      return { conversationId: body.conversation_id, messages };
+    },
+  );
 }
 
 export type StreamWidgetChatParams = {

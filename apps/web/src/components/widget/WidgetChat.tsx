@@ -7,6 +7,7 @@ import { Icon } from "@/components/ui/icons";
 import { Textarea } from "@/components/ui/Input";
 import { LoadingState } from "@/components/ui/Spinner";
 import {
+  WidgetTimeoutError,
   WidgetUnavailableError,
   loadConversation,
   readStoredToken,
@@ -60,6 +61,14 @@ function titleOf(config: WidgetConfig): string {
 
 function openingBubbles(config: WidgetConfig): Bubble[] {
   return config.greeting ? [{ id: "greeting", role: "assistant", text: config.greeting }] : [];
+}
+
+/** A notice after whatever the assistant had already said, never instead of
+ * it: a partial answer is still worth reading. */
+function withNotice(text: string, notice: string): string {
+  return text.trim() ? `${text}
+
+${notice}` : notice;
 }
 
 function postToParent(message: Record<string, unknown>): void {
@@ -189,7 +198,8 @@ export function WidgetChat({ apiUrl, publicKey }: { apiUrl: string; publicKey: s
       try {
         resumed = await loadConversation(apiUrl, session.token);
       } catch (err) {
-        if (err instanceof WidgetUnavailableError) {
+        // A hung API (timeout) will not chat either, so it reads the same.
+        if (err instanceof WidgetUnavailableError || err instanceof WidgetTimeoutError) {
           if (!cancelled) setPhase({ kind: "unavailable" });
           return;
         }
@@ -270,54 +280,81 @@ export function WidgetChat({ apiUrl, publicKey }: { apiUrl: string; publicKey: s
     const controller = new AbortController();
     abort.current = controller;
     const { fallbackMessage } = session.config;
+    // A resumed conversation can vanish (closed, or deleted) while the
+    // visitor still holds its id; the API then answers `not_found`. That
+    // turn is retried once as a new conversation rather than failed.
+    let retryAsNew = false;
+    let retried = false;
+    // Anything thrown out of the stream (or out of `onEvent`) becomes the
+    // fallback message, never an unhandled rejection.
+    let failed = false;
 
-    function onEvent(event: WidgetEvent) {
-      if (!current()) return;
-      switch (event.type) {
-        case "message_start":
-          conversationId.current = event.conversation_id;
-          break;
-        case "text_delta":
-          update((b) => ({ ...b, text: b.text + event.text, toolLabel: null }));
-          break;
-        case "tool_call_start": {
-          const last = event.calls[event.calls.length - 1];
-          if (last) update((b) => ({ ...b, toolLabel: toolLabel(last.name) }));
-          break;
+    function handlerFor(sentConversationId: string | null) {
+      return function onEvent(event: WidgetEvent) {
+        if (!current()) return;
+        switch (event.type) {
+          case "message_start":
+            conversationId.current = event.conversation_id;
+            break;
+          case "text_delta":
+            update((b) => ({ ...b, text: b.text + event.text, toolLabel: null }));
+            break;
+          case "tool_call_start": {
+            const last = event.calls[event.calls.length - 1];
+            if (last) update((b) => ({ ...b, toolLabel: toolLabel(last.name) }));
+            break;
+          }
+          case "citations":
+            update((b) => ({ ...b, citations: [...(b.citations ?? []), ...event.citations] }));
+            break;
+          case "message_end":
+            update((b) => ({ ...b, streaming: false, toolLabel: null }));
+            break;
+          case "error": {
+            if (event.code === "not_found" && sentConversationId !== null && !retried) {
+              retryAsNew = true;
+              break;
+            }
+            const notice = UNAVAILABLE_CODES.has(event.code) ? UNAVAILABLE_MESSAGE : fallbackMessage;
+            update((b) => ({
+              ...b,
+              text: withNotice(b.text, notice),
+              streaming: false,
+              toolLabel: null,
+            }));
+            break;
+          }
         }
-        case "citations":
-          update((b) => ({ ...b, citations: [...(b.citations ?? []), ...event.citations] }));
-          break;
-        case "message_end":
-          update((b) => ({ ...b, streaming: false, toolLabel: null }));
-          break;
-        case "error":
-          update((b) => ({
-            ...b,
-            text: UNAVAILABLE_CODES.has(event.code) ? UNAVAILABLE_MESSAGE : fallbackMessage,
-            streaming: false,
-            toolLabel: null,
-          }));
-          break;
-      }
+      };
     }
 
-    try {
-      await streamWidgetChat({
+    const attempt = (sentConversationId: string | null) =>
+      streamWidgetChat({
         apiUrl,
         token: session.token,
         message: text,
-        conversationId: conversationId.current,
-        onEvent,
+        conversationId: sentConversationId,
+        onEvent: handlerFor(sentConversationId),
         signal: controller.signal,
       });
+
+    try {
+      await attempt(conversationId.current);
+      if (retryAsNew && current()) {
+        retried = true;
+        conversationId.current = null;
+        update((b) => ({ ...b, text: "", streaming: true, toolLabel: null, citations: undefined }));
+        await attempt(null);
+      }
+    } catch {
+      failed = true;
     } finally {
       if (current()) {
         // A stream that ended without an answer (a dropped connection) still
         // owes the visitor a reply.
         update((b) => ({
           ...b,
-          text: b.text === "" ? fallbackMessage : b.text,
+          text: b.text === "" || failed ? withNotice(b.text, fallbackMessage) : b.text,
           streaming: false,
           toolLabel: null,
         }));
@@ -333,7 +370,12 @@ export function WidgetChat({ apiUrl, publicKey }: { apiUrl: string; publicKey: s
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-surface text-ink" style={rootStyle}>
       {phase.kind === "loading" ? (
-        <LoadingState label="Loading chat…" />
+        <>
+          {/* The close button works before anything has loaded: on a small
+              screen this frame covers the host page. */}
+          <Header title="Chat" />
+          <LoadingState label="Loading chat…" />
+        </>
       ) : phase.kind === "unavailable" ? (
         <>
           <Header title="Chat" />

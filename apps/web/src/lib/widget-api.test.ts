@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   TOOL_LABELS,
+  WidgetTimeoutError,
   WidgetUnavailableError,
   loadConversation,
   readStoredToken,
@@ -159,6 +160,42 @@ describe("startSession", () => {
     const failure = startSession("http://api", "pk_1", null);
     await expect(failure).rejects.toBeInstanceOf(Error);
     await expect(failure).rejects.not.toBeInstanceOf(WidgetUnavailableError);
+  });
+});
+
+describe("request timeouts", () => {
+  function timeoutError(): DOMException {
+    return new DOMException("The operation timed out.", "TimeoutError");
+  }
+
+  it("gives up on a session request after 10 s, as unavailable-by-timeout", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const fetchMock = vi.fn().mockRejectedValue(timeoutError());
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(startSession("http://api", "pk_1", null)).rejects.toBeInstanceOf(
+      WidgetTimeoutError,
+    );
+    expect(timeout).toHaveBeenCalledWith(10_000);
+    expect((fetchMock.mock.calls[0][1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
+    timeout.mockRestore();
+  });
+
+  it("gives up on a conversation request after 10 s", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const fetchMock = vi.fn().mockRejectedValue(timeoutError());
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(loadConversation("http://api", "tok")).rejects.toBeInstanceOf(WidgetTimeoutError);
+    expect(timeout).toHaveBeenCalledWith(10_000);
+    expect((fetchMock.mock.calls[0][1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
+    timeout.mockRestore();
+  });
+
+  it("lets any other network failure through unchanged", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed")));
+    const failure = startSession("http://api", "pk_1", null);
+    await expect(failure).rejects.toBeInstanceOf(TypeError);
   });
 });
 

@@ -285,4 +285,142 @@ describe("WidgetChat", () => {
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
     await waitFor(() => expect(streamWidgetChat).not.toHaveBeenCalled());
   });
+
+  it("shows the header, with a working close button, while loading", async () => {
+    startSession.mockReturnValue(new Promise<WidgetSession>(() => {}));
+    renderChat();
+
+    expect(screen.getByRole("heading", { name: "Chat" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close chat" }));
+    expect(postMessage).toHaveBeenCalledWith({ type: "close" }, "*");
+  });
+
+  it("shows the header, with a working close button, when unavailable", async () => {
+    startSession.mockRejectedValue(new api.WidgetUnavailableError());
+    renderChat();
+
+    await screen.findByText(UNAVAILABLE);
+    fireEvent.click(screen.getByRole("button", { name: "Close chat" }));
+    expect(postMessage).toHaveBeenCalledWith({ type: "close" }, "*");
+  });
+
+  it("says the assistant is unavailable when the session request times out", async () => {
+    startSession.mockRejectedValue(new api.WidgetTimeoutError());
+    renderChat();
+
+    expect(await screen.findByText(UNAVAILABLE)).toBeInTheDocument();
+  });
+
+  it("says the assistant is unavailable when loading the conversation times out", async () => {
+    loadConversation.mockRejectedValue(new api.WidgetTimeoutError());
+    renderChat();
+
+    expect(await screen.findByText(UNAVAILABLE)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Message")).not.toBeInTheDocument();
+  });
+
+  it("shows the fallback, not an unhandled rejection, when the stream throws", async () => {
+    streamWidgetChat.mockRejectedValue(new Error("boom"));
+    renderChat();
+    await screen.findByText("Hi! How can I help?");
+
+    await act(async () => {
+      await send("hello");
+    });
+
+    expect(await screen.findByText("Sorry, something went wrong on our side.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled(); // empty draft
+  });
+
+  it("keeps partial streamed text and appends the fallback after it on an error", async () => {
+    const stream = controllableStream();
+    const { container } = renderChat();
+    await screen.findByText("Hi! How can I help?");
+
+    await send("hello");
+    stream.emit({ type: "text_delta", text: "We sell green" });
+    stream.emit({ type: "error", code: "internal_error", message: "Something went wrong." });
+    await stream.end();
+
+    const log = container.querySelector('[role="log"]')?.textContent ?? "";
+    expect(log).toContain("We sell green");
+    expect(log).toContain("Sorry, something went wrong on our side.");
+    expect(log.indexOf("We sell green")).toBeLessThan(
+      log.indexOf("Sorry, something went wrong on our side."),
+    );
+  });
+
+  it("retries once as a new conversation when a resumed conversation is not found", async () => {
+    loadConversation.mockResolvedValue({
+      conversationId: "c-gone",
+      messages: [{ role: "user", text: "old question" }],
+    });
+    const calls: StreamParams[] = [];
+    streamWidgetChat.mockImplementation(async (p) => {
+      calls.push(p);
+      if (calls.length === 1) {
+        p.onEvent({ type: "error", code: "not_found", message: "conversation not found" });
+        return;
+      }
+      p.onEvent({ type: "message_start", conversation_id: "c-new", message_id: "m1" });
+      p.onEvent({ type: "text_delta", text: "Fresh answer." });
+      p.onEvent({ type: "message_end" });
+    });
+    renderChat();
+    await screen.findByText("old question");
+
+    await act(async () => {
+      await send("still there?");
+    });
+
+    expect(await screen.findByText("Fresh answer.")).toBeInTheDocument();
+    expect(calls.map((c) => c.conversationId)).toEqual(["c-gone", null]);
+    expect(calls[1].message).toBe("still there?");
+    expect(screen.queryByText(UNAVAILABLE)).not.toBeInTheDocument();
+    expect(screen.getAllByText("still there?")).toHaveLength(1);
+
+    // The next turn continues the new conversation.
+    await act(async () => {
+      await send("and now?");
+    });
+    expect(calls[2].conversationId).toBe("c-new");
+  });
+
+  it("does not retry a not_found on a turn that sent no conversation id", async () => {
+    const calls: StreamParams[] = [];
+    streamWidgetChat.mockImplementation(async (p) => {
+      calls.push(p);
+      p.onEvent({ type: "error", code: "not_found", message: "widget not found" });
+    });
+    renderChat();
+    await screen.findByText("Hi! How can I help?");
+
+    await act(async () => {
+      await send("hello");
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(await screen.findByText(UNAVAILABLE)).toBeInTheDocument();
+  });
+
+  it("retries only once: a second not_found says unavailable", async () => {
+    loadConversation.mockResolvedValue({
+      conversationId: "c-gone",
+      messages: [{ role: "user", text: "old question" }],
+    });
+    const calls: StreamParams[] = [];
+    streamWidgetChat.mockImplementation(async (p) => {
+      calls.push(p);
+      p.onEvent({ type: "error", code: "not_found", message: "widget not found" });
+    });
+    renderChat();
+    await screen.findByText("old question");
+
+    await act(async () => {
+      await send("hello");
+    });
+
+    expect(calls.map((c) => c.conversationId)).toEqual(["c-gone", null]);
+    expect(await screen.findByText(UNAVAILABLE)).toBeInTheDocument();
+  });
 });
