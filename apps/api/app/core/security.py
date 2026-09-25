@@ -1,5 +1,6 @@
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import jwt
 from argon2 import PasswordHasher
@@ -42,13 +43,21 @@ def _refresh_token_lifetime() -> timedelta:
     return timedelta(days=get_settings().refresh_token_ttl_days)
 
 
+def encode_with_expiry(claims: dict[str, object], lifetime: timedelta) -> tuple[str, datetime]:
+    """Sign `claims` with `exp`/`iat` added, and return the token together with
+    the exact `exp` it carries -- so a caller that must tell its client when
+    the token expires (the widget's session response) reports the value
+    actually signed, not a second `now()` that may land a second later."""
+    now = datetime.now(UTC)
+    exp = int((now + lifetime).timestamp())
+    payload = {**claims, "exp": exp, "iat": int(now.timestamp())}
+    token = jwt.encode(payload, get_settings().jwt_secret, algorithm=_ALGORITHM)
+    return token, datetime.fromtimestamp(exp, UTC)
+
+
 def _encode(claims: dict[str, object], lifetime: timedelta) -> str:
-    payload = {
-        **claims,
-        "exp": int((datetime.now(UTC) + lifetime).timestamp()),
-        "iat": int(datetime.now(UTC).timestamp()),
-    }
-    return jwt.encode(payload, get_settings().jwt_secret, algorithm=_ALGORITHM)
+    token, _expires_at = encode_with_expiry(claims, lifetime)
+    return token
 
 
 def create_access_token(*, user_id: uuid.UUID, organization_id: uuid.UUID, role: str) -> str:
@@ -74,16 +83,31 @@ def create_refresh_token(*, user_id: uuid.UUID) -> tuple[str, str]:
     return token, jti
 
 
-def decode_token(token: str, *, expected_type: str) -> TokenPayload:
+def decode_claims(token: str, *, expected_type: str) -> dict[str, Any]:
+    """Verify signature, expiry and `typ`, and return the raw claims.
+
+    The sibling of `decode_token` for a token whose claims are not a
+    `TokenPayload` -- the widget's visitor token (`app/widget/tokens.py`)
+    carries `agent`/`vid` and no `sub`/`jti`. Same secret, same algorithm,
+    same `typ` rule, so a token of one type is refused as every other type
+    whichever of the two decoders reads it.
+    """
     try:
-        raw = jwt.decode(token, get_settings().jwt_secret, algorithms=[_ALGORITHM])
-        payload = TokenPayload.model_validate(raw)
-    except (jwt.PyJWTError, ValidationError) as exc:
+        raw: dict[str, Any] = jwt.decode(token, get_settings().jwt_secret, algorithms=[_ALGORITHM])
+    except jwt.PyJWTError as exc:
         raise AuthenticationError("invalid or expired token") from exc
 
-    if payload.typ != expected_type:
+    if raw.get("typ") != expected_type:
         raise AuthenticationError("invalid or expired token")
-    return payload
+    return raw
+
+
+def decode_token(token: str, *, expected_type: str) -> TokenPayload:
+    raw = decode_claims(token, expected_type=expected_type)
+    try:
+        return TokenPayload.model_validate(raw)
+    except ValidationError as exc:
+        raise AuthenticationError("invalid or expired token") from exc
 
 
 def refresh_token_ttl_seconds() -> int:

@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     jwt_secret: str
     access_token_ttl_minutes: int = 15
     refresh_token_ttl_days: int = 30
+    # Lifetime of an anonymous widget visitor's token (spec §4). Long, because
+    # it is what lets a returning visitor resume their conversation; safe to
+    # be long, because every call re-checks the widget is still available.
+    widget_token_days: int = 30
 
     environment: str = "local"
     log_level: str = "INFO"
