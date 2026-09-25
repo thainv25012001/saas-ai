@@ -12,7 +12,8 @@ all -- must happen *before* that. So this migration also creates
 `resolve_widget`, copying `resolve_api_key`'s shape
 (`alembic/versions/0015_api_keys.py`): a `SECURITY DEFINER` function owned by
 the migrating role (and so not itself subject to `agents`' un-FORCEd RLS
-policy), `EXECUTE` revoked from `PUBLIC` and granted only to `app_user`, and
+policy), `EXECUTE` revoked from `PUBLIC` and granted only to the runtime role
+(`app.db.base.runtime_role`), and
 `search_path` pinned so a session-level `search_path` change cannot redirect
 it. It reads only `agents` (never this table) and returns exactly the two
 ids `app.widget.service.resolve_public_key` needs to build a `TenantContext`
@@ -24,7 +25,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
-from app.db.base import disable_rls, enable_rls
+from app.db.base import disable_rls, enable_rls, runtime_role
 
 revision = "0016_widget_settings"
 down_revision = "0015_api_keys"
@@ -94,7 +95,7 @@ def upgrade() -> None:
 
     op.execute(_RESOLVE_WIDGET_FUNCTION)
     op.execute("REVOKE ALL ON FUNCTION resolve_widget(text) FROM PUBLIC")
-    op.execute("GRANT EXECUTE ON FUNCTION resolve_widget(text) TO app_user")
+    op.execute(f"GRANT EXECUTE ON FUNCTION resolve_widget(text) TO {runtime_role()}")
 
 
 def downgrade() -> None:
