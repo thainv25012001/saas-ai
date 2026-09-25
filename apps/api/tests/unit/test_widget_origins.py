@@ -40,6 +40,19 @@ _REJECTED = [
     "ftp://a.com",
     "a.com",
     "",
+    # Final-review findings: hosts that are not DNS names, and ports that
+    # used to escape as a bare ValueError (a 500 for the owner).
+    "https://example.com;foo",
+    "https://a.com https:",
+    "https://a.com'self'",
+    "https://a.com%20b",
+    "https://-",
+    "https://a-.com",
+    "https://a..com",
+    "https://[::1]",
+    "https://[::1]:8443",
+    "https://a.com:99999",
+    "https://a.com:abc",
 ]
 
 
@@ -86,6 +99,20 @@ def test_normalize_origins_raises_past_the_cap():
     assert len(values) == 21
     with pytest.raises(InvalidOriginError):
         normalize_origins(values, allow_localhost_http=False)
+
+
+def test_normalize_origins_checks_the_cap_before_normalizing_any_entry():
+    """An oversized list is refused on its length alone -- the invalid last
+    entry is never reached, so the error is about the cap."""
+    values = [f"https://a{i}.com" for i in range(MAX_ALLOWED_ORIGINS)] + ["not-a-url"]
+    with pytest.raises(InvalidOriginError) as excinfo:
+        normalize_origins(values, allow_localhost_http=False)
+    assert "at most" in str(excinfo.value)
+
+
+def test_normalize_origins_cap_ignores_blank_entries():
+    values = [f"https://a{i}.com" for i in range(MAX_ALLOWED_ORIGINS)] + ["", "  "]
+    assert len(normalize_origins(values, allow_localhost_http=False)) == MAX_ALLOWED_ORIGINS
 
 
 def test_normalize_origins_at_exactly_the_cap_is_fine():

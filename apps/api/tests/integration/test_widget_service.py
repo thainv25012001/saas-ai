@@ -114,6 +114,33 @@ async def test_update_inserts_then_updates_a_single_row(tenant_a, owner_connecti
     assert count == 1
 
 
+async def test_update_bumps_updated_at_on_a_second_update(tenant_a, owner_connection):
+    """The upsert's `ON CONFLICT DO UPDATE` bypasses the ORM's `onupdate`,
+    so it has to set `updated_at` itself."""
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+
+    async def _updated_at():
+        return (
+            await owner_connection.execute(
+                text("SELECT updated_at FROM widget_settings WHERE agent_id = :id"),
+                {"id": agent.id},
+            )
+        ).scalar_one()
+
+    async with tenant_session(tenant_a) as session:
+        await WidgetSettingsService(session, tenant_a).update(agent.id, _valid_input())
+    first = await _updated_at()
+
+    async with tenant_session(tenant_a) as session:
+        await WidgetSettingsService(session, tenant_a).update(
+            agent.id, _valid_input(daily_message_cap=999)
+        )
+    second = await _updated_at()
+
+    assert second > first
+
+
 async def test_update_strips_and_normalizes_title_and_brand_color(tenant_a):
     async with tenant_session(tenant_a) as session:
         agent = await _agent(session, tenant_a)

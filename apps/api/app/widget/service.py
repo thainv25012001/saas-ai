@@ -30,7 +30,7 @@ import re
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -164,6 +164,8 @@ class WidgetSettingsService:
                 "position": statement.excluded.position,
                 "title": statement.excluded.title,
                 "daily_message_cap": statement.excluded.daily_message_cap,
+                # A Core upsert skips the ORM's `onupdate`, so set it here.
+                "updated_at": func.now(),
             },
         ).returning(WidgetSettings.id)
         row_id = (await self.session.execute(upsert_statement)).scalar_one()
