@@ -6,6 +6,7 @@ import { cn, focusRing } from "@/components/ui/cn";
 import { Icon } from "@/components/ui/icons";
 import { Textarea } from "@/components/ui/Input";
 import { readableTextOn } from "@/lib/contrast";
+import { useStickToBottom } from "@/lib/use-stick-to-bottom";
 import { LoadingState } from "@/components/ui/Spinner";
 import {
   WidgetTimeoutError,
@@ -183,7 +184,10 @@ export function WidgetChat({ apiUrl, publicKey }: { apiUrl: string; publicKey: s
   const generation = useRef(0);
   const abort = useRef<AbortController | null>(null);
   const nextId = useRef(0);
-  const logRef = useRef<HTMLDivElement>(null);
+  // Follows new text only while the visitor is at the bottom, so scrolling up
+  // to re-read an answer is not undone by every streamed token.
+  const transcript = useStickToBottom(messages);
+  const stickToBottom = transcript.stick;
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -244,11 +248,6 @@ export function WidgetChat({ apiUrl, publicKey }: { apiUrl: string; publicKey: s
     return () => window.removeEventListener("message", onMessage);
   }, []);
 
-  useEffect(() => {
-    const log = logRef.current;
-    if (log) log.scrollTop = log.scrollHeight;
-  }, [messages]);
-
   useEffect(() => () => abort.current?.abort(), []);
 
   const session = phase.kind === "ready" ? phase.session : null;
@@ -259,13 +258,15 @@ export function WidgetChat({ apiUrl, publicKey }: { apiUrl: string; publicKey: s
     abort.current?.abort();
     abort.current = null;
     conversationId.current = null;
+    stickToBottom();
     setMessages(openingBubbles(session.config));
     setSending(false);
-  }, [session]);
+  }, [session, stickToBottom]);
 
   async function send() {
     const text = draft.trim();
     if (!session || sending || text.length === 0 || text.length > MAX_MESSAGE_LENGTH) return;
+    stickToBottom();
 
     const turn = generation.current;
     const id = nextId.current++;
@@ -392,7 +393,8 @@ export function WidgetChat({ apiUrl, publicKey }: { apiUrl: string; publicKey: s
         <>
           <Header title={titleOf(phase.session.config)} onNewConversation={newConversation} />
           <div
-            ref={logRef}
+            ref={transcript.ref}
+            onScroll={transcript.onScroll}
             role="log"
             aria-live="polite"
             aria-label="Conversation"

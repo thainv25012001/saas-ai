@@ -30,7 +30,6 @@ function settings(overrides: Partial<WidgetSettingsData> = {}): WidgetSettingsDa
 
 function baseProps(overrides: Partial<Parameters<typeof WidgetCard>[0]> = {}) {
   return {
-    agentId: "a1",
     publicKey: PUBLIC_KEY,
     agentStatus: "ACTIVE" as const,
     leadToolEnabled: false,

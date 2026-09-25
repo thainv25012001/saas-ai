@@ -77,6 +77,17 @@ def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _widget_input(*, enabled: bool = True, cap: int = 500) -> UpdateWidgetSettingsInput:
+    return UpdateWidgetSettingsInput(
+        enabled=enabled,
+        allowed_origins=["https://shop.example.com"],
+        brand_color="#123ABC",
+        position=WidgetPosition.LEFT,
+        title="Chat with us",
+        daily_message_cap=cap,
+    )
+
+
 async def _seed_widget(
     tenant: TenantContext,
     *,
@@ -95,15 +106,7 @@ async def _seed_widget(
             UpdateAgentConfigInput(greeting="Hi! Ask me anything.", fallback_message="Sorry!"),
         )
         await WidgetSettingsService(session, tenant).update(
-            agent.id,
-            UpdateWidgetSettingsInput(
-                enabled=enabled,
-                allowed_origins=["https://shop.example.com"],
-                brand_color="#123ABC",
-                position=WidgetPosition.LEFT,
-                title="Chat with us",
-                daily_message_cap=cap,
-            ),
+            agent.id, _widget_input(enabled=enabled, cap=cap)
         )
         return agent.id, agent.public_key
 
@@ -111,15 +114,7 @@ async def _seed_widget(
 async def _set_enabled(tenant: TenantContext, agent_id: uuid.UUID, enabled: bool) -> None:
     async with tenant_session(tenant) as session:
         await WidgetSettingsService(session, tenant).update(
-            agent_id,
-            UpdateWidgetSettingsInput(
-                enabled=enabled,
-                allowed_origins=["https://shop.example.com"],
-                brand_color="#123abc",
-                position=WidgetPosition.LEFT,
-                title="Chat with us",
-                daily_message_cap=500,
-            ),
+            agent_id, _widget_input(enabled=enabled)
         )
 
 

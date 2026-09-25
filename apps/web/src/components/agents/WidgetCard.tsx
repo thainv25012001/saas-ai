@@ -27,14 +27,7 @@ export type WidgetSettingsData = {
  * trimmed-to-`null` title). The server re-normalizes and re-validates the
  * origins regardless (`WidgetSettingsService.update`); this is only about not
  * sending a form's raw, unparsed textarea value. */
-export type WidgetSettingsInput = {
-  enabled: boolean;
-  allowedOrigins: string[];
-  brandColor: string;
-  position: WidgetPosition;
-  title: string | null;
-  dailyMessageCap: number;
-};
+export type WidgetSettingsInput = WidgetSettingsData;
 
 const DEFAULT_SETTINGS: WidgetSettingsData = {
   enabled: false,
@@ -57,7 +50,7 @@ const POSITIONS: { value: WidgetPosition; label: string }[] = [
  * would load.
  *
  * Self-contained rather than presentational like `McpAccessCard`: the page
- * hands it `agentId` and the loaded `settings` (plus the mutation's
+ * hands it the loaded `settings` (plus the mutation's
  * fetching/error state), and this component owns the form fields, the
  * warnings and the preview. `onSave` is called with the normalized input and
  * returns whether it succeeded, so the card -- not the page -- decides to
@@ -74,12 +67,6 @@ export function WidgetCard({
   saveError = null,
   onSave,
 }: {
-  /** Not read here -- the agent page uses it to build query variables and
-   * the mutation, but the card's own markup only ever needs `publicKey`. It
-   * stays in the prop type because it identifies *which* agent's settings
-   * this card renders, which every caller should have to pass explicitly
-   * rather than relying on `publicKey` alone happening to be unique. */
-  agentId: string;
   publicKey: string;
   agentStatus: AgentStatus;
   leadToolEnabled: boolean;

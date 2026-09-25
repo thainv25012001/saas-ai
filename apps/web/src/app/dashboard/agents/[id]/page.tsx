@@ -564,7 +564,6 @@ export default function AgentDetailPage({
         * agent page. */}
       <div id="widget-card">
         <WidgetCard
-          agentId={id}
           publicKey={agent.publicKey}
           agentStatus={agent.status}
           leadToolEnabled={leadToolEnabled}

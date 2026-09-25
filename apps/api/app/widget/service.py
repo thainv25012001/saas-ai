@@ -264,35 +264,31 @@ async def load_available(
     (Review Focus #2) -- this function does not distinguish them even in its
     return type, on purpose.
     """
-    agent_result = await session.execute(
-        select(Agent).where(
+    # One round trip: this runs on every public widget request (session,
+    # conversation, each message, frame-policy, config). Inner joins make a
+    # missing config or settings row the same empty result as an unknown agent.
+    result = await session.execute(
+        select(Agent, AgentConfig, WidgetSettings)
+        .join(
+            AgentConfig,
+            (AgentConfig.agent_id == Agent.id) & (AgentConfig.organization_id == organization_id),
+        )
+        .join(
+            WidgetSettings,
+            (WidgetSettings.agent_id == Agent.id)
+            & (WidgetSettings.organization_id == organization_id),
+        )
+        .where(
             Agent.id == agent_id,
             Agent.organization_id == organization_id,
+            Agent.status == AgentStatus.ACTIVE,
+            WidgetSettings.enabled.is_(True),
         )
     )
-    agent = agent_result.scalar_one_or_none()
-    if agent is None or agent.status is not AgentStatus.ACTIVE:
+    row = result.one_or_none()
+    if row is None:
         return None
-
-    config_result = await session.execute(
-        select(AgentConfig).where(
-            AgentConfig.agent_id == agent_id,
-            AgentConfig.organization_id == organization_id,
-        )
-    )
-    config = config_result.scalar_one_or_none()
-    if config is None:
-        return None
-
-    settings_result = await session.execute(
-        select(WidgetSettings).where(
-            WidgetSettings.agent_id == agent_id,
-            WidgetSettings.organization_id == organization_id,
-        )
-    )
-    settings_row = settings_result.scalar_one_or_none()
-    if settings_row is None or not settings_row.enabled:
-        return None
+    agent, config, settings_row = row
 
     return PublicWidget(
         organization_id=organization_id,

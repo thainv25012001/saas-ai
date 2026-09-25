@@ -1,4 +1,3 @@
-import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -31,16 +30,27 @@ _HTTP_STATUS_CODES = {404: "not_found", 405: "invalid_input"}
 # is a probe that fails, not one of the tens of thousands that pass.
 _PROBE_PATHS = frozenset({"/health", "/health/ready"})
 
-# The widget's public key is in its URL path. It is not a secret -- it sits in
-# every embedding page's HTML -- but spec §5 keeps logs to its first 8
-# characters, so the access line records only that much of it.
-_WIDGET_KEY_IN_PATH = re.compile(r"^(/api/v1/widget/(?!conversation$|chat/)[^/]{0,8})[^/]*")
+# A route path parameter the access line keeps to its first 8 characters. The
+# widget's public key is in its URL path; it is not a secret -- it sits in every
+# embedding page's HTML -- but spec §5 keeps logs to that prefix.
+_REDACTED_PATH_PARAM = "public_key"
+_REDACTED_PREFIX = 8
 
 logger = get_logger(__name__)
 
 
-def _loggable_path(path: str) -> str:
-    return _WIDGET_KEY_IN_PATH.sub(lambda m: f"{m.group(1)}...", path, count=1)
+def _loggable_path(request: Request) -> str:
+    """The request path with any `public_key` path parameter truncated.
+
+    Read from the matched route's own parameters (the router writes them onto
+    the shared scope before this runs), so a new widget route is covered
+    without this module knowing the widget's URL layout.
+    """
+    path = request.url.path
+    value = request.path_params.get(_REDACTED_PATH_PARAM)
+    if isinstance(value, str) and len(value) > _REDACTED_PREFIX:
+        path = path.replace(value, f"{value[:_REDACTED_PREFIX]}...", 1)
+    return path
 
 
 def _probe_passed(request: Request, status: int) -> bool:
@@ -117,7 +127,7 @@ def create_app() -> FastAPI:
             logger.info(
                 "request",
                 method=request.method,
-                path=_loggable_path(request.url.path),
+                path=_loggable_path(request),
                 status=status,
                 duration_ms=round((time.perf_counter() - started) * 1000, 2),
             )
