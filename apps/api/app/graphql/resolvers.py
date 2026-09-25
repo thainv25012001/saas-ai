@@ -17,6 +17,7 @@ from app.db.models import DocumentStatus as DocumentStatusModel
 from app.db.models import Membership, Organization
 from app.db.models import ProductAvailability as ProductAvailabilityModel
 from app.db.models import User as UserModel
+from app.db.models.widget import WidgetPosition as WidgetPositionModel
 from app.documents.service import DocumentService
 from app.evaluations import schemas as eval_schemas
 from app.evaluations.service import EvaluationService
@@ -32,6 +33,8 @@ from app.prompts import schemas as prompt_schemas
 from app.prompts.defaults import DEFAULT_SALES_SYSTEM_PROMPT
 from app.prompts.service import PromptService
 from app.tools.runtime import resolve_enabled_tool_names
+from app.widget import schemas as widget_schemas
+from app.widget.service import WidgetSettingsService
 
 Info = strawberry.Info[Context, None]
 
@@ -132,6 +135,13 @@ def _api_keys(info: Info) -> ApiKeyService:
     assert info.context.tenant is not None
     assert info.context.session is not None
     return ApiKeyService(info.context.session, info.context.tenant)
+
+
+def _widget_settings(info: Info) -> WidgetSettingsService:
+    _require_tenant(info)
+    assert info.context.tenant is not None
+    assert info.context.session is not None
+    return WidgetSettingsService(info.context.session, info.context.tenant)
 
 
 @strawberry.type
@@ -477,6 +487,24 @@ class Query:
         exposed = sorted(name for name in granted if name in MCP_EXPOSED_TOOL_NAMES)
         return gql.McpInfo(exposed_tool_names=exposed)
 
+    # -----------------------------------------------------------------
+    # Phase 8 -- the embeddable widget (docs/superpowers/specs/
+    # 2026-09-25-embeddable-widget-design.md §7).
+    # -----------------------------------------------------------------
+
+    @strawberry.field
+    async def widget_settings(self, info: Info, agent_id: uuid.UUID) -> gql.WidgetSettings:
+        """Non-nullable, raising `not_found` for a cross-tenant `agentId` --
+        matches `agent(id)`'s convention, not `document(id)`'s: a member
+        reading their own dashboard's widget card always names a real
+        `agentId` from a page they are already on, so there is no
+        "indistinguishable from not found" case to reconcile here, unlike
+        `leads`/`conversations`. Any member may read (see
+        `WidgetSettingsService.get`'s own docstring); `updateWidgetSettings`
+        below is the owner/admin-only one."""
+        view = await _widget_settings(info).get(agent_id)
+        return gql.WidgetSettings.from_view(view)
+
 
 @strawberry.type
 class Mutation:
@@ -731,3 +759,36 @@ class Mutation:
         of never silently no-op'ing a write request."""
         api_key = await _api_keys(info).revoke(id)
         return gql.ApiKey.from_model(api_key)
+
+    # -----------------------------------------------------------------
+    # Phase 8 -- the embeddable widget (docs/superpowers/specs/
+    # 2026-09-25-embeddable-widget-design.md §7).
+    # -----------------------------------------------------------------
+
+    @strawberry.mutation
+    async def update_widget_settings(
+        self, info: Info, agent_id: uuid.UUID, input: gql.UpdateWidgetSettingsInput
+    ) -> gql.WidgetSettings:
+        """Upsert -- see `WidgetSettingsService.update`. Inputs go through
+        `_build`, same as `CreateAgentInput`: `app.widget.schemas.
+        UpdateWidgetSettingsInput`'s own field constraints (the hex-color
+        pattern, the daily-cap range) are enforced by pydantic, not by the
+        GraphQL input type's plain scalar fields, so a bad `brandColor` or
+        out-of-range `dailyMessageCap` must be translated into the app's own
+        `ValidationError` the same way a bad `temperature` is there -- a raw
+        pydantic error would otherwise reach the client as an opaque
+        `internal_error`. Owner/admin only (raises `forbidden` for a
+        member); an invalid origin surfaces as `invalid_input` naming the
+        offending value, nothing stored (`WidgetSettingsService.update`
+        itself, not `_build`); a cross-tenant `agentId` is `not_found`."""
+        payload = _build(
+            widget_schemas.UpdateWidgetSettingsInput,
+            enabled=input.enabled,
+            allowed_origins=input.allowed_origins,
+            brand_color=input.brand_color,
+            position=WidgetPositionModel(input.position.value),
+            title=input.title,
+            daily_message_cap=input.daily_message_cap,
+        )
+        view = await _widget_settings(info).update(agent_id, payload)
+        return gql.WidgetSettings.from_view(view)
