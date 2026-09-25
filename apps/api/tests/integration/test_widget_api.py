@@ -567,12 +567,29 @@ async def test_the_new_session_limit_counts_only_minted_tokens(api_client, tenan
     await _session(api_client, public_key, token)
 
 
-async def test_frame_policy_is_rate_limited_per_ip(api_client, tenant_a, monkeypatch):
+async def test_frame_policy_is_rate_limited_per_key(api_client, tenant_a, monkeypatch):
     monkeypatch.setattr(widget_api, "FRAME_POLICY_LIMIT", 1)
     _agent_id, public_key = await _seed_widget(tenant_a)
 
     assert (await api_client.get(f"{BASE}/{public_key}/frame-policy")).status_code == 200
     assert (await api_client.get(f"{BASE}/{public_key}/frame-policy")).status_code == 429
+
+
+async def test_a_limited_frame_policy_key_leaves_other_keys_alone(
+    api_client, tenant_a, monkeypatch
+):
+    # Every request comes from the one web server, so a per-IP limit would
+    # let one key (or a flood of made-up ones) unframe every other widget.
+    monkeypatch.setattr(widget_api, "FRAME_POLICY_LIMIT", 1)
+    _a, flooded_key = await _seed_widget(tenant_a, name="Flooded")
+    _b, other_key = await _seed_widget(tenant_a, name="Other")
+
+    await api_client.get(f"{BASE}/{flooded_key}/frame-policy")
+    assert (await api_client.get(f"{BASE}/{flooded_key}/frame-policy")).status_code == 429
+
+    other = await api_client.get(f"{BASE}/{other_key}/frame-policy")
+    assert other.status_code == 200
+    assert other.json() == {"allowed_origins": ["https://shop.example.com"]}
 
 
 # ---------------------------------------------------------------------------

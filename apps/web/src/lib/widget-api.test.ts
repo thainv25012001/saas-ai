@@ -260,6 +260,24 @@ describe("streamWidgetChat", () => {
     expect(events).toEqual([{ type: "error", code: "widget_daily_cap", message: "not available" }]);
   });
 
+  it("falls back to internal_error for a non-JSON failure, like streamChat", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("<html>Bad gateway</html>", { status: 502 })),
+    );
+    const events: WidgetEvent[] = [];
+    await streamWidgetChat({
+      apiUrl: "http://api",
+      token: "tok",
+      message: "hi",
+      conversationId: null,
+      onEvent: (e) => events.push(e),
+    });
+    expect(events).toEqual([
+      { type: "error", code: "internal_error", message: "Something went wrong. Please try again." },
+    ]);
+  });
+
   it("reports a network failure as network_error", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed")));
     const events: WidgetEvent[] = [];

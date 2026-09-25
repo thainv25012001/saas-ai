@@ -128,7 +128,7 @@ refused wherever an access token is expected and vice versa.
 
 | Endpoint | Auth | Does |
 |---|---|---|
-| `GET /api/v1/widget/{public_key}/frame-policy` | none | Returns `{allowed_origins: [...]}` when available, else `{allowed_origins: []}`. Always 200, so it reveals nothing more than the embed page itself would. Used by the web middleware (§6). Rate-limited per IP (120/min). |
+| `GET /api/v1/widget/{public_key}/frame-policy` | none | Returns `{allowed_origins: [...]}` when available, else `{allowed_origins: []}`. Always 200, so it reveals nothing more than the embed page itself would. Used by the web middleware (§6). Rate-limited per public key (120/min) — the only caller is our web server, so a per-IP limit would be one budget for every agent. |
 | `POST /api/v1/widget/{public_key}/session` | optional widget bearer | If the bearer is a valid widget token for this agent, keep its `vid`; otherwise mint a new one. Returns `{token, expires_at, config}` where `config = {agent_name, title, greeting, fallback_message, brand_color, position}`. |
 | `GET /api/v1/widget/conversation` | widget bearer | The visitor's most recent `open` widget conversation for the token's agent, with its last 50 user/assistant messages (text only), or `null`. |
 | `POST /api/v1/widget/chat/stream` | widget bearer | Body `{message (1–2000 chars), conversation_id?}`. Re-checks availability, enforces §5, then runs `ChatService.send(channel=WIDGET, visitor_id=vid)` through the same streaming body as the dashboard route, with §4.1's projection. |
@@ -167,7 +167,7 @@ All use `enforce_rate_limit` (Redis fixed window, fails open and logs, as today)
 | `widget:msg:visitor:{vid}` | 10 / minute | chat stream |
 | `widget:msg:ip:{ip}` | 30 / minute | chat stream |
 | `widget:msg:agent-day:{agent_id}:{yyyymmdd}` | `daily_message_cap` / 86 400 s | chat stream |
-| `widget:frame:ip:{ip}` | 120 / minute | frame-policy |
+| `widget:frame:key:{public_key}` | 120 / minute | frame-policy (per key, not per IP: the only caller is our own web server, so a per-IP budget would be shared by every agent and a flood of made-up keys could unframe them all) |
 
 The IP is `request.client.host`, exactly as the auth routes use it (no forwarded-header
 trust; behind a proxy this becomes the proxy's address — the same known limitation as
@@ -228,8 +228,10 @@ where Next's fetch cache does not apply), and sets:
 Content-Security-Policy: frame-ancestors 'self' <origins…>
 ```
 
-and removes `X-Frame-Options`. With no origins (or a fetch failure) it sets
-`frame-ancestors 'self'` only — the dashboard preview still works, every other site is
+and removes `X-Frame-Options`. A failed fetch (network, timeout, any non-200 including 429)
+serves the key's last successful answer even past its 30 s TTL — the API's only caller is this
+server, so one blip must not unframe live widgets. With no origins (or a failure and no earlier
+success for that key) it sets `frame-ancestors 'self'` only — the dashboard preview still works, every other site is
 refused. `lib/security-headers.ts` excludes `/embed/*` from the global framing headers and
 keeps them for every other route. The header builder is a pure function with tests.
 

@@ -12,6 +12,7 @@
  */
 
 // Relative, like `sse.ts`, so vitest resolves it without the `@/` mapping.
+import { parseErrorEnvelope } from "./api";
 import { parseSSEFrames, readableStreamToIterable } from "./sse";
 
 export type WidgetConfig = {
@@ -227,14 +228,9 @@ export async function streamWidgetChat(params: StreamWidgetChatParams): Promise<
   }
 
   if (!response.ok) {
-    const body: unknown = await response.json().catch(() => null);
-    const error = isRecord(body) && isRecord(body.error) ? body.error : null;
-    onEvent({
-      type: "error",
-      code: typeof error?.code === "string" ? error.code : "internal_error",
-      message:
-        typeof error?.message === "string" ? error.message : "Something went wrong. Please try again.",
-    });
+    // The same fallback code `streamChat` uses for the same case.
+    const { code, message: errorMessage } = await parseErrorEnvelope(response, "internal_error");
+    onEvent({ type: "error", code, message: errorMessage });
     return;
   }
 

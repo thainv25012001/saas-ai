@@ -129,6 +129,47 @@ describe("fetchFrameOrigins", () => {
     expect(await fetchFrameOrigins("http://api", "pk_429", () => 1)).toEqual(["https://a.com"]);
   });
 
+  it("serves the last known origins when a refetch is answered 429, even past the TTL", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(okResponse(["https://a.com"]))
+      .mockResolvedValueOnce(new Response("slow down", { status: 429 }))
+      .mockResolvedValueOnce(okResponse(["https://b.com"]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await fetchFrameOrigins("http://api", "pk_stale_429", () => 0)).toEqual([
+      "https://a.com",
+    ]);
+    // Expired, the refetch fails: a live widget must stay framed.
+    expect(await fetchFrameOrigins("http://api", "pk_stale_429", () => 60_000)).toEqual([
+      "https://a.com",
+    ]);
+    // The stale answer is not treated as fresh: the next call asks again.
+    expect(await fetchFrameOrigins("http://api", "pk_stale_429", () => 60_001)).toEqual([
+      "https://b.com",
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("serves the last known origins on a network error after the TTL", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(okResponse(["https://a.com"]))
+      .mockRejectedValueOnce(new TypeError("fetch failed"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchFrameOrigins("http://api", "pk_stale_net", () => 0);
+    expect(await fetchFrameOrigins("http://api", "pk_stale_net", () => 45_000)).toEqual([
+      "https://a.com",
+    ]);
+  });
+
+  it("answers [] on a failure when that key never had a successful answer", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 429 })));
+    expect(await fetchFrameOrigins("http://api", "pk_never_ok", () => 0)).toEqual([]);
+    expect(await fetchFrameOrigins("http://api", "pk_never_ok", () => 60_000)).toEqual([]);
+  });
+
   it("answers [] for a malformed body", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(okResponse("https://a.com")));
     expect(await fetchFrameOrigins("http://api", "pk_bad", () => 0)).toEqual([]);

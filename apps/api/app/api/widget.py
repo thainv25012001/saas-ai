@@ -187,11 +187,18 @@ def _reusable_visitor_id(request: Request, widget: PublicWidget) -> str | None:
 
 
 @router.get("/{public_key}/frame-policy")
-async def frame_policy(public_key: str, request: Request) -> FramePolicyOut:
+async def frame_policy(public_key: str) -> FramePolicyOut:
     """Always 200: `[]` for anything unavailable, so this reveals no more than
-    the embed page itself would."""
+    the embed page itself would.
+
+    Limited per *key*, not per IP: the only caller is our own web server's
+    middleware, so a per-IP budget would be one budget shared by every agent,
+    and a flood of made-up keys would exhaust it and unframe every real
+    widget. Per key, a flood only ever limits the key it names. (The key sits
+    only inside the Redis key, which `enforce_rate_limit` never logs beyond
+    its leading scope.)"""
     await enforce_rate_limit(
-        f"widget:frame:ip:{client_ip(request)}",
+        f"widget:frame:key:{public_key}",
         limit=FRAME_POLICY_LIMIT,
         window_seconds=FRAME_POLICY_WINDOW_SECONDS,
     )

@@ -27,8 +27,8 @@ export function frameAncestorsHeader(origins: string[]): string {
 
 const CACHE_TTL_MS = 30_000;
 const CACHE_MAX_ENTRIES = 500;
-/** A slow API must not hold the embed page hostage; on timeout the page is
- * framed for `'self'` only, like any other failure. */
+/** A slow API must not hold the embed page hostage; a timeout is handled
+ * like any other failure (the last known answer, else `'self'` only). */
 const FETCH_TIMEOUT_MS = 3_000;
 
 type CacheEntry = { origins: string[]; storedAt: number };
@@ -49,8 +49,14 @@ function remember(publicKey: string, origins: string[], now: number): void {
 
 /**
  * The agent's allowed origins, from `GET /api/v1/widget/{key}/frame-policy`.
- * Any failure answers `[]` -- framed by this app only -- and is not cached,
- * so a blip does not lock a customer's site out for the whole TTL.
+ *
+ * A fresh answer (under 30 s old) is served from the cache. On any failure
+ * -- network, timeout, a non-200 including 429, a malformed body -- this
+ * serves the key's last successful answer however old it is: this server is
+ * the API's only caller for this route, so a blip or a rate limit must not
+ * unframe a widget that is live on a customer's site. Only a key that has
+ * never been answered successfully falls back to `[]` (framed by this app
+ * only). A failure is never stored, so the next request asks again.
  */
 export async function fetchFrameOrigins(
   apiBase: string,
@@ -59,6 +65,7 @@ export async function fetchFrameOrigins(
 ): Promise<string[]> {
   const hit = cache.get(publicKey);
   if (hit && now() - hit.storedAt < CACHE_TTL_MS) return hit.origins;
+  const fallback = hit?.origins ?? [];
 
   try {
     const url = `${apiBase.replace(/\/+$/, "")}/api/v1/widget/${encodeURIComponent(publicKey)}/frame-policy`;
@@ -66,15 +73,15 @@ export async function fetchFrameOrigins(
       cache: "no-store",
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
-    if (!response.ok) return [];
+    if (!response.ok) return fallback;
     const body: unknown = await response.json();
-    if (typeof body !== "object" || body === null) return [];
+    if (typeof body !== "object" || body === null) return fallback;
     const raw = (body as { allowed_origins?: unknown }).allowed_origins;
-    if (!Array.isArray(raw)) return [];
+    if (!Array.isArray(raw)) return fallback;
     const origins = raw.filter((value): value is string => typeof value === "string");
     remember(publicKey, origins, now());
     return origins;
   } catch {
-    return [];
+    return fallback;
   }
 }
