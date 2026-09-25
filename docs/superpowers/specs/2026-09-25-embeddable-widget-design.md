@@ -106,8 +106,9 @@ in a `tenant_session`, under RLS, exactly as `resolve_api_key` does.
 `visitor_id` is given and differs from `conversation.visitor_id`, it raises `NotFoundError`
 — the same answer as a cross-tenant id.
 
-**Lead source.** `ToolContext` gains `channel`; `create_lead` sets `source` to the
-conversation's channel value (`widget`, `playground`, `api`). No schema change.
+**Lead source.** `LeadService.create` already loads the conversation to check tenancy; it
+now reads the conversation's `channel` in that same query and sets `source` to its value
+(`widget`, `playground`, `api`). No schema change, no `ToolContext` change.
 
 ## 4. Visitor identity and endpoints
 
@@ -219,17 +220,24 @@ It posts `ready` to `window.parent` with target origin `*` (it cannot know the h
 and the payload is public config), and `close` likewise.
 
 **Frame policy — `src/middleware.ts`.** The matcher gains `/embed/:path*`. For those paths
-the middleware fetches `GET /api/v1/widget/{key}/frame-policy` (server-side, via the API base URL `auth-proxy.ts` already resolves from `API_INTERNAL_URL`,
-`next: { revalidate: 30 }`) and sets:
+the middleware fetches `GET /api/v1/widget/{key}/frame-policy` (server-side, via the API base URL `auth-proxy.ts` already resolves from `API_INTERNAL_URL`),
+caching each answer in a module-level map for 30 s (middleware runs on the edge runtime,
+where Next's fetch cache does not apply), and sets:
 
 ```
-Content-Security-Policy: frame-ancestors <origins…> <APP_ORIGIN>
+Content-Security-Policy: frame-ancestors 'self' <origins…>
 ```
 
 and removes `X-Frame-Options`. With no origins (or a fetch failure) it sets
-`frame-ancestors <APP_ORIGIN>` only — the dashboard preview still works, every other site is
+`frame-ancestors 'self'` only — the dashboard preview still works, every other site is
 refused. `lib/security-headers.ts` excludes `/embed/*` from the global framing headers and
 keeps them for every other route. The header builder is a pure function with tests.
+
+**Event parsing.** `parseSSEStream` validates the playground's full event shapes and
+silently skips anything else, so projected widget events would be dropped. Its frame
+reader is split out as `parseSSEFrames(chunks, toEvent)`; `parseSSEStream` becomes
+`parseSSEFrames(chunks, toSSEEvent)` with no behaviour change, and the widget passes its
+own `toWidgetEvent`.
 
 ## 7. Dashboard
 
