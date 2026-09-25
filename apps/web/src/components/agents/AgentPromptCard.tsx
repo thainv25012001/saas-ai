@@ -38,6 +38,11 @@ export function AgentPromptCard({
   useEffect(() => setValue(currentPromptId ?? DEFAULT_VALUE), [currentPromptId]);
 
   const chosen = prompts.find((prompt) => prompt.id === value) ?? null;
+  // A linked prompt the loaded list does not hold (a list cached before it
+  // was created, say) still gets an option: a native select whose value
+  // matches none paints its first -- "Built-in default" -- and Save would then
+  // send `null` and silently unlink the agent.
+  const unlisted = value !== DEFAULT_VALUE && chosen === null;
 
   function onSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -55,6 +60,7 @@ export function AgentPromptCard({
         {(props) => (
           <Select {...props} value={value} onChange={(e) => setValue(e.target.value)} title={chosen?.name}>
             <option value={DEFAULT_VALUE}>Built-in default</option>
+            {unlisted ? <option value={value}>Current prompt (not in this list)</option> : null}
             {prompts.map((prompt) => (
               <option key={prompt.id} value={prompt.id}>
                 {prompt.name}

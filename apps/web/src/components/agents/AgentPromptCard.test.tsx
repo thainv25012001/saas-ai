@@ -52,6 +52,14 @@ describe("AgentPromptCard", () => {
     expect(screen.getByRole("link", { name: /create one/i })).toHaveAttribute("href", "/dashboard/prompts");
   });
 
+  it("keeps a linked prompt the list does not contain, rather than showing the default", () => {
+    const onSave = setup({ currentPromptId: "p9" });
+    expect(screen.getByLabelText(/system prompt/i)).toHaveValue("p9");
+    expect(screen.getByRole("option", { name: "Current prompt (not in this list)" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save prompt" }));
+    expect(onSave).toHaveBeenCalledWith("p9");
+  });
+
   it("does not pass the default off as the saved value when the list failed", () => {
     setup({ prompts: [], failed: true, currentPromptId: "p1" });
     expect(screen.getByText(/could not load prompts/i)).toBeInTheDocument();

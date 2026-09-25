@@ -24,7 +24,6 @@ import {
   ConfiguredProvidersDocument,
   CreateApiKeyDocument,
   DeleteAgentDocument,
-  PromptsDocument,
   ProviderModelsDocument,
   RevokeApiKeyDocument,
   SetAgentPromptDocument,
@@ -36,6 +35,7 @@ import { agentStatusLabel, agentStatusTone } from "@/lib/agent-status";
 import { API_URL } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { mcpEndpointUrl } from "@/lib/mcp";
+import { usePromptOptionsQuery } from "@/lib/prompt-queries";
 import { activeVersionOf } from "@/lib/prompts";
 import { editableProviders, modelFieldHelp, providerLabel } from "@/lib/providers";
 import { firstGraphQLError } from "@/lib/graphql-errors";
@@ -97,7 +97,7 @@ export default function AgentDetailPage({
   const [revokingKeyId, setRevokingKeyId] = useState<string | null>(null);
   const [revokeKeyError, setRevokeKeyError] = useState<string | null>(null);
 
-  const [promptsResult] = useQuery({ query: PromptsDocument, pause: loading || !user });
+  const [promptsResult] = usePromptOptionsQuery(loading || !user);
   const [setPromptResult, setAgentPrompt] = useMutation(SetAgentPromptDocument);
   const [promptSaved, setPromptSaved] = useState(false);
 

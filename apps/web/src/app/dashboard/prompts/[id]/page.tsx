@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { use, useEffect, useState } from "react";
-import { useMutation, useQuery } from "urql";
+import { useMutation } from "urql";
 import { NewVersionForm } from "@/components/prompts/NewVersionForm";
 import { VersionList } from "@/components/prompts/VersionList";
 import { VersionView } from "@/components/prompts/VersionView";
@@ -11,20 +11,17 @@ import { Badge } from "@/components/ui/Badge";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { LoadingState } from "@/components/ui/Spinner";
-import { ActivatePromptVersionDocument, CreatePromptVersionDocument, PromptDocument } from "@/graphql/generated";
+import { ActivatePromptVersionDocument, CreatePromptVersionDocument } from "@/graphql/generated";
 import { agentStatusLabel, agentStatusTone } from "@/lib/agent-status";
 import { useAuth } from "@/lib/auth";
 import { firstGraphQLError } from "@/lib/graphql-errors";
+import { usePromptDetailQuery } from "@/lib/prompt-queries";
 import { activeVersionOf } from "@/lib/prompts";
 
 export default function PromptDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const { user, loading } = useAuth();
-  const [{ data, fetching, error }, refetch] = useQuery({
-    query: PromptDocument,
-    variables: { id },
-    pause: loading || !user,
-  });
+  const [{ data, fetching, error }, refetch] = usePromptDetailQuery(id, loading || !user);
   const [activateResult, activate] = useMutation(ActivatePromptVersionDocument);
   const [createResult, createVersion] = useMutation(CreatePromptVersionDocument);
   const [selectedId, setSelectedId] = useState<string | null>(null);
