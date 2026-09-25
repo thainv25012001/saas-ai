@@ -29,13 +29,35 @@ const originalContentWindow = Object.getOwnPropertyDescriptor(
   "contentWindow",
 );
 
-function runLoader(attributes: Record<string, string>) {
+const AVAILABLE = {
+  available: true,
+  brand_color: "#0F766E",
+  position: "right",
+  title: null as string | null,
+};
+
+let fetchMock: ReturnType<typeof vi.fn>;
+
+function configResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+/** Lets the loader's config fetch and its `.then` chain settle. */
+async function settle() {
+  for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function runLoader(attributes: Record<string, string>) {
   // Unattached, so happy-dom never tries to fetch it.
   const script = document.createElement("script");
   for (const [name, value] of Object.entries(attributes)) script.setAttribute(name, value);
   Object.defineProperty(document, "currentScript", { value: script, configurable: true });
   new Function(LOADER)();
   Object.defineProperty(document, "currentScript", { value: null, configurable: true });
+  await settle();
 }
 
 function hosts() {
@@ -93,6 +115,8 @@ beforeEach(() => {
   settings.disableIframePageLoading = true;
   // happy-dom reports the refused page load through console.error.
   vi.spyOn(console, "error").mockImplementation(() => {});
+  fetchMock = vi.fn().mockImplementation(async () => configResponse(AVAILABLE));
+  vi.stubGlobal("fetch", fetchMock);
 });
 
 afterEach(() => {
@@ -103,26 +127,27 @@ afterEach(() => {
   delete (window as { __saWidgetLoaded?: boolean }).__saWidgetLoaded;
   document.body.innerHTML = "";
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("widget.js", () => {
-  it("creates one host element with a closed shadow root and a launcher", () => {
-    runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
+  it("creates one host element with a closed shadow root and a launcher", async () => {
+    await runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
 
     expect(hosts()).toHaveLength(1);
     expect(launcher().getAttribute("aria-label")).toBe("Open chat");
     expect(iframe()).toBeNull();
   });
 
-  it("does nothing on a second load", () => {
-    runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
-    runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
+  it("does nothing on a second load", async () => {
+    await runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
+    await runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
 
     expect(hosts()).toHaveLength(1);
     expect(roots).toHaveLength(1);
   });
 
-  it("finds its script by selector when currentScript is unavailable", () => {
+  it("finds its script by selector when currentScript is unavailable", async () => {
     const script = document.createElement("script");
     script.setAttribute("data-key", "pk_sel");
     // `type` keeps happy-dom from trying to fetch and run it.
@@ -132,12 +157,13 @@ describe("widget.js", () => {
     Object.defineProperty(document, "currentScript", { value: null, configurable: true });
 
     new Function(LOADER)();
+    await settle();
 
     expect(hosts()).toHaveLength(1);
   });
 
-  it("opens the embed page for its key on the first click, and toggles after", () => {
-    runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
+  it("opens the embed page for its key on the first click, and toggles after", async () => {
+    await runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
 
     launcher().click();
 
@@ -163,8 +189,8 @@ describe("widget.js", () => {
     );
   });
 
-  it("hides the frame on a close from the frame itself", () => {
-    runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
+  it("hides the frame on a close from the frame itself", async () => {
+    await runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
     launcher().click();
     const frame = iframe() as HTMLIFrameElement;
 
@@ -174,8 +200,8 @@ describe("widget.js", () => {
     expect(launcher().getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("ignores a message from the wrong origin", () => {
-    runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
+  it("ignores a message from the wrong origin", async () => {
+    await runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
     launcher().click();
     const frame = iframe() as HTMLIFrameElement;
 
@@ -184,8 +210,8 @@ describe("widget.js", () => {
     expect(frame.hidden).toBe(false);
   });
 
-  it("ignores a message from the right origin but another window", () => {
-    runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
+  it("ignores a message from the right origin but another window", async () => {
+    await runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
     launcher().click();
     const frame = iframe() as HTMLIFrameElement;
 
@@ -195,8 +221,8 @@ describe("widget.js", () => {
     expect(frame.hidden).toBe(false);
   });
 
-  it("applies the brand colour and side from ready, rejecting a non-hex colour", () => {
-    runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
+  it("applies the brand colour and side from ready, rejecting a non-hex colour", async () => {
+    await runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
     launcher().click();
     const frame = iframe() as HTMLIFrameElement;
     const host = hosts()[0] as HTMLElement;
@@ -207,7 +233,11 @@ describe("widget.js", () => {
     );
     expect(launcher().style.backgroundColor).not.toBe("");
     expect(host.getAttribute("data-position")).toBe("left");
+    // Open, the launcher is the close control; the title labels it closed.
+    expect(launcher().getAttribute("aria-label")).toBe("Close chat");
+    launcher().click();
     expect(launcher().getAttribute("aria-label")).toBe("Open chat: Ask Acme");
+    launcher().click();
 
     const before = launcher().style.backgroundColor;
     post(
@@ -218,13 +248,86 @@ describe("widget.js", () => {
     expect(host.getAttribute("data-position")).toBe("left");
   });
 
-  it("warns once and draws nothing without data-key", () => {
+  it("asks the app's config route for its key before drawing, without credentials", async () => {
+    await runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(`${APP_ORIGIN}/api/v1/widget/pk_abc/config`);
+    expect((fetchMock.mock.calls[0][1] as RequestInit).credentials).toBe("omit");
+  });
+
+  it("draws with the owner's colour, side and title from the start", async () => {
+    fetchMock.mockImplementation(async () =>
+      configResponse({ available: true, brand_color: "#0F766E", position: "left", title: "Ask Acme" }),
+    );
+
+    await runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
+
+    const host = hosts()[0] as HTMLElement;
+    expect(host.getAttribute("data-position")).toBe("left");
+    expect(launcher().style.backgroundColor).not.toBe("");
+    expect(launcher().getAttribute("aria-label")).toBe("Open chat: Ask Acme");
+    expect(iframe()).toBeNull();
+  });
+
+  it("ignores a non-hex colour from the config", async () => {
+    fetchMock.mockImplementation(async () =>
+      configResponse({ available: true, brand_color: "red;background:url(x)", position: "top", title: null }),
+    );
+
+    await runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
+
+    const host = hosts()[0] as HTMLElement;
+    expect(host.getAttribute("data-position")).toBe("right");
+    expect(launcher().style.backgroundColor).not.toContain("url");
+  });
+
+  it.each([
+    ["unavailable", async () => configResponse({ available: false, brand_color: null, position: null, title: null })],
+    ["a non-200", async () => configResponse({ error: {} }, 429)],
+    ["a network failure", async () => Promise.reject(new TypeError("fetch failed"))],
+    ["a malformed body", async () => new Response("not json", { status: 200 })],
+  ])("draws nothing, with one console.info, on %s", async (_label, answer) => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    fetchMock.mockImplementation(answer);
+
+    await runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
+
+    expect(hosts()).toHaveLength(0);
+    expect(roots).toHaveLength(0);
+    expect(info).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps its own close control above the full-screen frame on a small screen", async () => {
+    await runLoader({ src: `${APP_ORIGIN}/widget.js`, "data-key": "pk_abc" });
+    const host = hosts()[0] as HTMLElement;
+    const css = root().querySelector("style")?.textContent ?? "";
+
+    // The small-screen rule lifts the open launcher above the frame.
+    const small = css.slice(css.indexOf("@media (max-width:480px)"));
+    expect(small).toMatch(/:host\(\[data-open\]\) \.launcher\{[^}]*position:fixed/);
+    expect(small).toMatch(/:host\(\[data-open\]\) \.launcher\{[^}]*z-index:2/);
+
+    launcher().click();
+    const frame = iframe() as HTMLIFrameElement;
+    expect(host.hasAttribute("data-open")).toBe(true);
+    expect(launcher().getAttribute("aria-label")).toBe("Close chat");
+
+    // Works without anything from the frame -- one that never loaded.
+    launcher().click();
+    expect(frame.hidden).toBe(true);
+    expect(host.hasAttribute("data-open")).toBe(false);
+    expect(launcher().getAttribute("aria-label")).toBe("Open chat");
+  });
+
+  it("warns once and draws nothing without data-key", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    runLoader({ src: `${APP_ORIGIN}/widget.js` });
+    await runLoader({ src: `${APP_ORIGIN}/widget.js` });
 
     expect(hosts()).toHaveLength(0);
     expect(roots).toHaveLength(0);
     expect(warn).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
