@@ -367,6 +367,7 @@ class ChatService:
         override_provider: str | None = None,
         override_model: str | None = None,
         prompt_version_id: uuid.UUID | None = None,
+        visitor_id: str | None = None,
     ) -> AsyncIterator[ChatEvent]:
         """`override_provider`/`override_model` answer this one turn with
         something other than the agent's configured pair, without writing
@@ -391,6 +392,16 @@ class ChatService:
         pin is a caller mistake, not a reason to leave a conversation behind.
         `app/api/chat.py` never passes this -- the playground always runs the
         agent's own active version.
+
+        `visitor_id`, per spec §3: on a new conversation it is stored on the
+        row (`CreateConversationInput.visitor_id`) so a later call can prove
+        it is the same visitor resuming. On an existing conversation it is
+        the resume check itself -- see the mismatch guard in Step 4 below,
+        right next to the agent-mismatch one it mirrors. `None` (every
+        caller but the widget) skips the check entirely, which is what keeps
+        the playground and API paths -- and reading/continuing any
+        conversation from the dashboard side, which never has a visitor id
+        to compare -- unaffected.
         """
         # Step 1: load the agent and its config. Both raise NotFoundError
         # (cross-tenant, or a config row that does not exist) before any
@@ -431,11 +442,22 @@ class ChatService:
         created = conversation_id is None
         if created:
             conversation = await self._conversations.create(
-                agent_id, CreateConversationInput(channel=channel)
+                agent_id, CreateConversationInput(channel=channel, visitor_id=visitor_id)
             )
         else:
             assert conversation_id is not None
             conversation = await self._conversations.get(conversation_id)
+            # Visitor mismatch, checked in the same pre-yield span as the
+            # agent-mismatch check right below (and for the same reason): a
+            # widget caller naming a conversation_id that resolves under this
+            # tenant but belongs to a *different* visitor must 404 exactly
+            # like a cross-tenant id, not silently let one visitor read or
+            # append to another's conversation. `visitor_id is not None`
+            # guards every non-widget caller (which never passes one) and the
+            # dashboard reading a visitor conversation (which also passes
+            # none) -- only a *given*, differing visitor_id is a mismatch.
+            if visitor_id is not None and conversation.visitor_id != visitor_id:
+                raise NotFoundError("conversation not found")
             if conversation.agent_id != agent_id:
                 # Review round 1, Important finding 2: this used to be
                 # silently tolerated -- `agent`/`provider_name`/`model_name`/

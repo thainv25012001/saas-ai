@@ -38,13 +38,15 @@ class LeadService:
         consistent `agent_id`.
         """
         result = await self.session.execute(
-            select(Conversation.id).where(
+            select(Conversation.id, Conversation.channel).where(
                 Conversation.id == conversation_id,
                 Conversation.organization_id == self.tenant.organization_id,
             )
         )
-        if result.scalar_one_or_none() is None:
+        row = result.one_or_none()
+        if row is None:
             raise NotFoundError("conversation not found")
+        _conversation_id, channel = row
 
         lead = Lead(
             id=uuid7(),
@@ -55,6 +57,7 @@ class LeadService:
             email=data.email,
             phone=data.phone,
             interest=data.interest,
+            source=channel.value,
         )
         self.session.add(lead)
         await self.session.flush()

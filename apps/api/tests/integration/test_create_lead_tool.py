@@ -290,6 +290,64 @@ async def test_cross_tenant_conversation_id_is_refused_and_writes_nothing(
     assert (await _leads_for_conversation(owner_connection, other_conversation.id)) == []
 
 
+async def test_lead_from_a_widget_conversation_has_source_widget(tenant_a, owner_connection):
+    """`LeadService.create` reads the conversation's own `channel` in the same
+    tenancy-checking SELECT it already runs, and stores it verbatim as
+    `Lead.source` -- so a lead the widget's `create_lead` call produces is
+    attributed to the channel it actually came from."""
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+        conversation = await ConversationService(session, tenant_a).create(
+            agent.id,
+            CreateConversationInput(channel=ConversationChannel.WIDGET, visitor_id="visitor-1"),
+        )
+
+    async with tenant_session(tenant_a) as session:
+        tool = CreateLeadTool(session)
+        result = await tool.execute(
+            CreateLeadTool.args_model(
+                name="Widget Visitor", email="widget@example.com", interest="pricing"
+            ),
+            _ctx(tenant_a, agent_id=conversation.agent_id, conversation_id=conversation.id),
+        )
+
+    assert result.is_error is False
+    assert result.data is not None
+    lead_id = uuid.UUID(result.data["lead_id"])
+    stored_source = (
+        await owner_connection.execute(
+            text("SELECT source FROM leads WHERE id = :id"), {"id": lead_id}
+        )
+    ).scalar_one()
+    assert stored_source == "widget"
+
+
+async def test_lead_from_a_playground_conversation_has_source_playground(
+    tenant_a, owner_connection
+):
+    async with tenant_session(tenant_a) as session:
+        conversation = await _conversation(session, tenant_a)
+
+    async with tenant_session(tenant_a) as session:
+        tool = CreateLeadTool(session)
+        result = await tool.execute(
+            CreateLeadTool.args_model(
+                name="Playground Tester", email="playground@example.com", interest="demo"
+            ),
+            _ctx(tenant_a, agent_id=conversation.agent_id, conversation_id=conversation.id),
+        )
+
+    assert result.is_error is False
+    assert result.data is not None
+    lead_id = uuid.UUID(result.data["lead_id"])
+    stored_source = (
+        await owner_connection.execute(
+            text("SELECT source FROM leads WHERE id = :id"), {"id": lead_id}
+        )
+    ).scalar_one()
+    assert stored_source == "playground"
+
+
 async def test_sql_level_failure_does_not_poison_the_callers_transaction(tenant_a, monkeypatch):
     """The savepoint ruling, restated for the one writing tool: a
     database-level failure inside `LeadService.create` must not abort the
