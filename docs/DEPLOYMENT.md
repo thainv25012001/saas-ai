@@ -75,10 +75,12 @@ The role split is what makes Row-Level Security real: `app_owner` owns the table
 RLS) and only runs migrations; `app_user` is what the application connects as and is subject to
 every policy. Neither role has `BYPASSRLS`.
 
-**The runtime role must be named `app_user`.** Migration `0015_api_keys` creates the
-`resolve_api_key` `SECURITY DEFINER` function (MCP key lookup) and grants EXECUTE on it to the role
-named `app_user` literally; under any other name that migration fails, and renaming the role later
-leaves the API unable to authenticate any MCP key.
+**Migrations grant to whichever role `DATABASE_URL` names.** Migration `0015_api_keys` creates the
+`resolve_api_key` `SECURITY DEFINER` function (MCP key lookup) and grants EXECUTE on it to the
+runtime role, read from `DATABASE_URL`'s user (`app.db.base.runtime_role`) — so the migrate job must
+be given the same `DATABASE_URL` the API uses, and that role must already exist when migrations run.
+`app_user` is only the name this guide and local development use. Renaming the role later leaves it
+without that grant; re-run the `GRANT EXECUTE ON FUNCTION resolve_api_key(bytea) TO <role>` by hand.
 
 Paste the connection strings Neon gives you as they are, only swapping in the `app_user` /
 `app_owner` credentials. `Settings` normalizes them on load (`_normalize_database_url` in
