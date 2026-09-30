@@ -258,6 +258,12 @@ prompt_versions
 constantly while identity and lifecycle fields are stable. The split keeps the hot row
 small and the audit story clean.
 
+`persona`, `tone`, `language` and `fallback_message` reach the model: `ChatService`
+appends them as an "Agent settings" section after whichever prompt text answers the turn
+(pinned, active, or the default), so an agent linked to its own prompt still gets them.
+`persona` is where an operator says what the business does and sells; without it the
+model knows only the organization's name.
+
 The partial unique index is what makes "the agent always uses the active version" a
 database guarantee rather than a convention.
 

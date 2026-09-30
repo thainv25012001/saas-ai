@@ -28,6 +28,7 @@ from app.core.logging import get_logger
 from app.core.tenancy import TenantContext
 from app.db.models import (
     Agent,
+    AgentConfig,
     ConversationChannel,
     ConversationMessage,
     MessageCitation,
@@ -108,6 +109,31 @@ def _render_template(template: str, variables: Mapping[str, str]) -> str:
         return variables.get(match.group(1), match.group(0))
 
     return _VARIABLE_PATTERN.sub(_substitute, template)
+
+
+def _agent_settings_section(config: AgentConfig) -> str:
+    """The agent's own settings (persona, tone, language, fallback message),
+    appended after whichever prompt text answers the turn.
+
+    Appended rather than offered as template variables: these fields are
+    edited on the agent's settings form, and an author writing a prompt
+    cannot be expected to know to reference them. Without this they were
+    stored and never sent, so a persona describing what the business does
+    never reached the model -- which then guessed at what the company sells.
+
+    Not rendered through `_render_template`: this is operator-typed data, and
+    a `{{...}}` in a persona is left exactly as typed.
+    """
+    lines = ["Agent settings:"]
+    if config.persona and config.persona.strip():
+        lines.append(f"- About you and the business you represent: {config.persona.strip()}")
+    lines.append(f"- Tone: {config.tone}")
+    lines.append(f"- Reply in this language (unless the customer writes in another): {config.language}")
+    lines.append(
+        "- When you do not have the information a customer asks for, say: "
+        f"{config.fallback_message}"
+    )
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,7 +449,7 @@ class ChatService:
         # actually answered the turn -- `None` for the fallback default,
         # otherwise whichever version's text was rendered.
         system_prompt, prompt_version_id = await self._resolve_system_prompt(
-            agent, prompt_version_id
+            agent, config, prompt_version_id
         )
 
         # Step 4: create or load the conversation (404s cross-tenant for an
@@ -935,10 +961,14 @@ class ChatService:
         await self.session.flush()
 
     async def _resolve_system_prompt(
-        self, agent: Agent, pinned_version_id: uuid.UUID | None = None
+        self,
+        agent: Agent,
+        config: AgentConfig,
+        pinned_version_id: uuid.UUID | None = None,
     ) -> tuple[str, uuid.UUID | None]:
         """Step 2+3: resolve the prompt version that answers this turn (a
-        pinned one, else the active one, else the default) and render it.
+        pinned one, else the active one, else the default), render it, and
+        append the agent's own settings (`_agent_settings_section`).
         `prompt_version_id` is `None` exactly when the fallback default was
         used -- that is what lets every assistant message be traced back to
         the exact prompt text that produced it, per PHASE-2.md §6, without
@@ -979,7 +1009,8 @@ class ChatService:
             "company_name": organization.name,
             "agent_name": agent.name,
         }
-        return _render_template(template, variables), prompt_version_id
+        rendered = _render_template(template, variables).rstrip()
+        return f"{rendered}\n\n{_agent_settings_section(config)}", prompt_version_id
 
     async def _organization(self) -> Organization:
         result = await self.session.execute(
