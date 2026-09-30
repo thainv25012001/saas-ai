@@ -1,6 +1,7 @@
 import pytest
 from sqlalchemy import select
 
+from app.agents.schemas import UpdateAgentConfigInput
 from app.agents.service import AgentService
 from app.chat.service import (
     ChatError,
@@ -149,6 +150,54 @@ async def test_company_name_is_substituted_and_no_placeholder_remains(tenant_a):
     # tenant_a's organization is created by conftest._make_tenant as "Tenant A".
     assert "Tenant A" in provider.last_request.system
     assert "{{" not in provider.last_request.system
+
+
+async def test_agent_config_persona_tone_language_and_fallback_reach_the_model(tenant_a):
+    """The agent settings form edits these fields; the model must actually
+    see them, or a persona describing what the business does is silently
+    ignored and the model guesses at what the company sells."""
+    provider = FakeProvider(script=["ok"])
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a)
+        await AgentService(session, tenant_a).update_config(
+            agent.id,
+            UpdateAgentConfigInput(
+                persona="PERSONA MARKER: we install solar panels for homes in Hanoi.",
+                tone="formal",
+                language="vi",
+                fallback_message="FALLBACK MARKER: please call our hotline.",
+            ),
+        )
+        service = ChatService(session, tenant_a, provider_override=provider)
+        _ = [event async for event in service.send(agent.id, "Hello")]
+
+    assert provider.last_request is not None
+    system = provider.last_request.system
+    assert "PERSONA MARKER: we install solar panels for homes in Hanoi." in system
+    assert "formal" in system
+    assert "vi" in system
+    assert "FALLBACK MARKER: please call our hotline." in system
+
+
+async def test_agent_config_is_applied_to_a_linked_prompt_too(tenant_a):
+    """Agent settings belong to the agent, not to the default prompt: an agent
+    with its own linked prompt still gets its persona."""
+    provider = FakeProvider(script=["ok"])
+    async with tenant_session(tenant_a) as session:
+        prompt = await PromptService(session, tenant_a).create_prompt(
+            CreatePromptInput(name="Custom", key="custom", system_prompt="CUSTOM {{company_name}}")
+        )
+        agent = await _agent(session, tenant_a)
+        agent.prompt_id = prompt.id
+        await AgentService(session, tenant_a).update_config(
+            agent.id, UpdateAgentConfigInput(persona="PERSONA MARKER")
+        )
+        service = ChatService(session, tenant_a, provider_override=provider)
+        _ = [event async for event in service.send(agent.id, "Hello")]
+
+    assert provider.last_request is not None
+    assert "CUSTOM Tenant A" in provider.last_request.system
+    assert "PERSONA MARKER" in provider.last_request.system
 
 
 async def test_undeclared_template_variable_is_left_untouched(tenant_a):

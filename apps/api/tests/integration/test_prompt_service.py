@@ -151,6 +151,16 @@ async def test_default_prompt_contains_the_grounding_rules():
     assert "Never invent" in DEFAULT_SALES_SYSTEM_PROMPT
 
 
+async def test_default_prompt_forbids_guessing_what_the_company_offers():
+    """Asked "what do you have?", a model with no tool result lists generic
+    shop categories the company does not sell. The prompt must send it to a
+    tool first and forbid made-up examples."""
+    from app.prompts.defaults import DEFAULT_SALES_SYSTEM_PROMPT
+
+    assert "search_products" in DEFAULT_SALES_SYSTEM_PROMPT
+    assert "Never list example products, categories, or services" in DEFAULT_SALES_SYSTEM_PROMPT
+
+
 async def test_list_versions_is_newest_first(tenant_a):
     async with tenant_session(tenant_a) as session:
         service = PromptService(session, tenant_a)
