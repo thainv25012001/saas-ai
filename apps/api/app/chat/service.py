@@ -128,7 +128,9 @@ def _agent_settings_section(config: AgentConfig) -> str:
     if config.persona and config.persona.strip():
         lines.append(f"- About you and the business you represent: {config.persona.strip()}")
     lines.append(f"- Tone: {config.tone}")
-    lines.append(f"- Reply in this language (unless the customer writes in another): {config.language}")
+    lines.append(
+        f"- Reply in this language (unless the customer writes in another): {config.language}"
+    )
     lines.append(
         "- When you do not have the information a customer asks for, say: "
         f"{config.fallback_message}"
