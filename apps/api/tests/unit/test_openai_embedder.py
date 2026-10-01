@@ -11,6 +11,8 @@ from app.llm.errors import (
     LLMUnavailableError,
 )
 
+from ._llm_stubs import status_error
+
 pytestmark = pytest.mark.anyio
 
 
@@ -60,13 +62,6 @@ def _timeout_error() -> openai.APITimeoutError:
 
 def _connection_error() -> openai.APIConnectionError:
     return openai.APIConnectionError(request=_request_object())
-
-
-def _status_error(status_code: int) -> openai.APIStatusError:
-    response = httpx2.Response(
-        status_code, request=_request_object(), json={"error": {"type": "some_error"}}
-    )
-    return openai.APIStatusError("failed", response=response, body=None)
 
 
 def test_dimensions_are_1536():
@@ -130,13 +125,13 @@ async def test_connection_error_is_mapped_to_llm_unavailable_error():
 
 
 async def test_unauthenticated_status_error_is_mapped_to_llm_configuration_error():
-    provider = _raising_provider(_status_error(401))
+    provider = _raising_provider(status_error(401))
     with pytest.raises(LLMConfigurationError):
         await provider.embed(["alpha"])
 
 
 async def test_forbidden_status_error_is_mapped_to_llm_configuration_error():
-    provider = _raising_provider(_status_error(403))
+    provider = _raising_provider(status_error(403))
     with pytest.raises(LLMConfigurationError):
         await provider.embed(["alpha"])
 
@@ -144,12 +139,12 @@ async def test_forbidden_status_error_is_mapped_to_llm_configuration_error():
 async def test_bad_request_status_error_is_mapped_to_llm_configuration_error():
     """A 400 must not be reported as `LLMUnavailableError`, which reads as
     transient and invites retrying a request that can never succeed."""
-    provider = _raising_provider(_status_error(400))
+    provider = _raising_provider(status_error(400))
     with pytest.raises(LLMConfigurationError):
         await provider.embed(["alpha"])
 
 
 async def test_server_status_error_is_mapped_to_llm_unavailable_error():
-    provider = _raising_provider(_status_error(503))
+    provider = _raising_provider(status_error(503))
     with pytest.raises(LLMUnavailableError):
         await provider.embed(["alpha"])

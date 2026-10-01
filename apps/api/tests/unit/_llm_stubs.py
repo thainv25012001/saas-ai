@@ -8,6 +8,9 @@ non-obvious part, and a second copy would lose it.
 
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx2
+import openai
+
 
 def tool_call_delta(index, id=None, name=None, arguments=None):
     """One fragment of a streamed OpenAI tool call.
@@ -71,13 +74,48 @@ def streaming(provider, chunks):
     that coroutine runs `side_effect` and returns the async generator.
     """
 
-    def _aiter(**_kwargs):
-        async def gen():
-            for item in chunks:
-                yield item
+    return _install(provider, lambda **_kwargs: _aiter(chunks))
 
-        return gen()
 
+def scripted(provider, *outcomes):
+    """Point `provider` at one outcome per `create(...)` call, in order.
+
+    An exception outcome is raised by the call itself (the request was
+    refused); a list is streamed, and an exception INSIDE the list is raised
+    at that point in the stream (the request failed mid-answer).
+    """
+    remaining = list(outcomes)
+
+    def _create(**_kwargs):
+        outcome = remaining.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return _aiter(outcome)
+
+    return _install(provider, _create)
+
+
+def status_error(status_code, body=None):
+    """The SDK's `APIStatusError` for an HTTP `status_code` response. The
+    error mapping reads only the status, so the URL is immaterial."""
+    request = httpx2.Request("POST", "https://api.openai.com/v1")
+    response = httpx2.Response(
+        status_code, request=request, json=body or {"error": {"type": "some_error"}}
+    )
+    return openai.APIStatusError("failed", response=response, body=body)
+
+
+def _aiter(items):
+    async def gen():
+        for item in items:
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+
+    return gen()
+
+
+def _install(provider, create):
     provider._client = MagicMock()  # noqa: SLF001
-    provider._client.chat.completions.create = AsyncMock(side_effect=_aiter)  # noqa: SLF001
+    provider._client.chat.completions.create = AsyncMock(side_effect=create)  # noqa: SLF001
     return provider

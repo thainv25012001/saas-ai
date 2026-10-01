@@ -22,6 +22,7 @@ from app.llm.types import Usage
 from app.prompts.schemas import CreatePromptInput, CreateVersionInput
 from app.prompts.service import PromptService
 from tests.factories import agent_input
+from tests.llm_doubles import FALLBACK_MODEL, AnsweredByAnotherModel
 
 pytestmark = pytest.mark.anyio
 
@@ -357,6 +358,24 @@ async def _usage_events(tenant, conversation_id):
             select(UsageEvent).where(UsageEvent.conversation_id == conversation_id)
         )
         return list(result.scalars().all())
+
+
+async def test_the_model_that_answered_is_what_gets_recorded(tenant_a):
+    """After a fallback, the message, the `message_end` event and the usage
+    row must name the model that answered, not the one that was rejected --
+    otherwise the dashboard shows a dead model as working."""
+    async with tenant_session(tenant_a) as session:
+        agent = await _agent(session, tenant_a, model="retired/m:free")
+        service = ChatService(
+            session, tenant_a, provider_override=AnsweredByAnotherModel(script=["ok"])
+        )
+        events = [event async for event in service.send(agent.id, "Hello")]
+
+    conversation_id = next(e.conversation_id for e in events if isinstance(e, ChatMessageStart))
+    end = next(e for e in events if isinstance(e, ChatMessageEnd))
+    assert end.model == FALLBACK_MODEL
+    rows = await _usage_events(tenant_a, conversation_id)
+    assert [row.model for row in rows] == [FALLBACK_MODEL]
 
 
 async def test_a_successful_turn_writes_exactly_one_usage_event(tenant_a):
