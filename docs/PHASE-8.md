@@ -422,3 +422,11 @@ Copied from the spec's own §9, plus what surfaced during implementation.
   widget.
 - **Lifting the streaming body out of `api/chat.py`** (`app/api/streaming.py::stream_body`)
   touches the playground path; `test_chat_endpoint.py` passes unchanged, pinning that.
+- **OpenRouter free ids are retired without notice**, and `agents.model` is not checked
+  against the live roster — so a widget could go silent overnight. `OpenRouterProvider`
+  sends two other free models in OpenRouter's `models` routing list, and retries once on
+  another free model when the request is rejected with 400/404 before any text streamed.
+  The visitor may therefore be answered by a model the owner did not pick. After our own
+  retry, the message, `message_end` and the `usage_events` row name the fallback
+  (`AgentUsage.model`) and `llm_model_fallback` is logged; a switch made by OpenRouter's
+  routing list is not visible to us and is recorded under the requested model.

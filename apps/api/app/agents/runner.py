@@ -93,9 +93,14 @@ class AgentUsage:
     """The RUNNING TOTAL across every step so far, not just the step that
     just finished -- see the module docstring. A consumer that only reads
     the last `AgentUsage` in the stream gets the correct total for the whole
-    turn without having to sum anything itself."""
+    turn without having to sum anything itself.
+
+    `model` is the model the provider's `message_end` named for the step
+    just finished -- not always the one requested (see
+    `OpenRouterProvider._stream`). `None` if it sent no `message_end`."""
 
     usage: Usage
+    model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +156,8 @@ class _StepOutcome:
     #: The provider's own `stop_reason` for this step, `None` if it sent
     #: none. See `AgentFinish`.
     stop_reason: str | None = None
+    #: The model the provider says answered this step. See `AgentUsage`.
+    model: str | None = None
 
 
 class AgentRunner:
@@ -284,6 +291,7 @@ class AgentRunner:
         calls: list[ToolUseBlock] = []
         usage = Usage()
         stop_reason: str | None = None
+        model: str | None = None
         async for event in self.provider.stream(request):
             if isinstance(event, TextDeltaEvent):
                 text_parts.append(event.text)
@@ -294,8 +302,13 @@ class AgentRunner:
                 usage = event.usage
             elif isinstance(event, MessageEndEvent):
                 stop_reason = event.stop_reason
+                model = event.model
         yield _StepOutcome(
-            text="".join(text_parts), calls=calls, usage=usage, stop_reason=stop_reason
+            text="".join(text_parts),
+            calls=calls,
+            usage=usage,
+            stop_reason=stop_reason,
+            model=model,
         )
 
     async def run(
@@ -344,7 +357,7 @@ class AgentRunner:
                 raise AssertionError("_run_step ended without yielding a _StepOutcome")
 
             total_usage = _sum_usage(total_usage, outcome.usage)
-            yield AgentUsage(usage=total_usage)
+            yield AgentUsage(usage=total_usage, model=outcome.model)
 
             calls = self._unique_calls(outcome.calls, seen_call_ids)
 

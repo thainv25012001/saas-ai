@@ -6,13 +6,16 @@ itself, and one end-to-end smoke test proving the inherited loop really does
 run when driven through this subclass.
 """
 
+from unittest.mock import AsyncMock
+
 import pytest
 
+from app.llm.errors import LLMConfigurationError
 from app.llm.openrouter_provider import OPENROUTER_BASE_URL, OpenRouterProvider
 from app.llm.types import CompletionRequest, Message, ToolResultBlock, ToolSpec
 from app.llm.types import ToolUseBlock as AppToolUseBlock
 
-from ._llm_stubs import chunk, streaming
+from ._llm_stubs import chunk, scripted, status_error, streaming
 
 pytestmark = pytest.mark.anyio
 
@@ -32,8 +35,27 @@ def _chunk(text=None, usage=None, finish_reason=None):
     return chunk(text=text, usage=usage, finish_reason=finish_reason)
 
 
+#: Stands in for the live free-model roster, so no test ever reaches the network.
+_FALLBACKS = ["google/gemma-4-31b-it:free", "nex-agi/nex-n2.5-mini:free", "poolside/x:free"]
+
+
+def _provider(fallback_ids=_FALLBACKS) -> OpenRouterProvider:
+    return OpenRouterProvider(
+        api_key="test-key", fallback_models=AsyncMock(return_value=fallback_ids)
+    )
+
+
 def _provider_with(chunks) -> OpenRouterProvider:
-    return streaming(OpenRouterProvider(api_key="test-key"), chunks)
+    return streaming(_provider(), chunks)
+
+
+def _model_rejected(status_code=400):
+    return status_error(status_code, body={"error": {"message": "not a valid model ID"}})
+
+
+def _sent_models(provider: OpenRouterProvider) -> list[str]:
+    calls = provider._client.chat.completions.create.call_args_list  # noqa: SLF001
+    return [call.kwargs["model"] for call in calls]
 
 
 def test_requests_go_to_openrouter_not_openai():
@@ -121,4 +143,88 @@ async def test_reasoning_is_disabled_so_the_model_answers_in_prose():
     async for _ in provider.stream(_request()):
         pass
     kwargs = provider._client.chat.completions.create.call_args.kwargs  # noqa: SLF001
-    assert kwargs["extra_body"] == {"reasoning": {"enabled": False}}
+    assert kwargs["extra_body"]["reasoning"] == {"enabled": False}
+
+
+async def test_openrouter_is_given_fallback_models_to_route_to():
+    """OpenRouter's own `models` routing: if the primary cannot serve (down,
+    rate limited, refused), OpenRouter tries the next without a second round
+    trip from us. The primary leads, and never appears twice."""
+    provider = streaming(
+        _provider(["z-ai/glm-5.2:free", *_FALLBACKS]), [_chunk("hi", finish_reason="stop")]
+    )
+    async for _ in provider.stream(_request()):
+        pass
+    kwargs = provider._client.chat.completions.create.call_args.kwargs  # noqa: SLF001
+    assert kwargs["extra_body"]["models"] == ["z-ai/glm-5.2:free", *_FALLBACKS[:2]]
+
+
+async def test_a_400_on_the_primary_retries_once_on_a_fallback_model():
+    """The widget's real failure: the agent's saved free model was retired,
+    and OpenRouter 400s the request before a single token streams."""
+    provider = scripted(
+        _provider(), _model_rejected(), [_chunk("hi", finish_reason="stop"), _chunk(usage=(5, 1))]
+    )
+    events = [event async for event in provider.stream(_request())]
+
+    assert _sent_models(provider) == ["z-ai/glm-5.2:free", _FALLBACKS[0]]
+    assert [e.type for e in events] == ["message_start", "text_delta", "usage", "message_end"]
+    # What answered is what gets recorded -- not the model that 400ed.
+    assert events[0].model == _FALLBACKS[0]
+    assert events[-1].model == _FALLBACKS[0]
+    # The fallback's own routing list must not lead back to the dead model.
+    retry_kwargs = provider._client.chat.completions.create.call_args.kwargs  # noqa: SLF001
+    assert "z-ai/glm-5.2:free" not in retry_kwargs["extra_body"]["models"]
+
+
+async def test_a_404_no_endpoint_also_falls_back():
+    """OpenRouter answers 404 when no endpoint serves the model at all (e.g.
+    none that supports tool use) -- as permanent as a 400 for that model."""
+    provider = scripted(_provider(), _model_rejected(404), [_chunk("hi", finish_reason="stop")])
+    events = [event async for event in provider.stream(_request())]
+    assert _sent_models(provider) == ["z-ai/glm-5.2:free", _FALLBACKS[0]]
+    assert events[-1].model == _FALLBACKS[0]
+
+
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_bad_credentials_are_not_retried_on_another_model(status_code):
+    """A bad key fails identically on every model; retrying only doubles the
+    time to the same error."""
+    provider = scripted(_provider(), status_error(status_code))
+    with pytest.raises(LLMConfigurationError):
+        async for _ in provider.stream(_request()):
+            pass
+    assert _sent_models(provider) == ["z-ai/glm-5.2:free"]
+
+
+async def test_only_one_fallback_is_tried():
+    """A 400 caused by the request itself (not the model) fails on every
+    model -- one retry, then the original error surfaces."""
+    provider = scripted(_provider(), _model_rejected(), _model_rejected())
+    with pytest.raises(LLMConfigurationError):
+        async for _ in provider.stream(_request()):
+            pass
+    assert _sent_models(provider) == ["z-ai/glm-5.2:free", _FALLBACKS[0]]
+
+
+async def test_no_retry_once_text_has_reached_the_caller():
+    """Switching models mid-answer would splice two models' text into one
+    reply the visitor already half-read."""
+
+    provider = scripted(_provider(), [_chunk("Hel"), _model_rejected()])
+    seen = []
+    with pytest.raises(LLMConfigurationError):
+        async for event in provider.stream(_request()):
+            seen.append(event.type)
+    assert seen == ["message_start", "text_delta"]
+    assert _sent_models(provider) == ["z-ai/glm-5.2:free"]
+
+
+async def test_with_no_other_model_available_the_original_error_surfaces():
+    provider = scripted(_provider(["z-ai/glm-5.2:free"]), _model_rejected())
+    with pytest.raises(LLMConfigurationError):
+        async for _ in provider.stream(_request()):
+            pass
+    assert _sent_models(provider) == ["z-ai/glm-5.2:free"]
+    kwargs = provider._client.chat.completions.create.call_args.kwargs  # noqa: SLF001
+    assert kwargs["extra_body"]["models"] == ["z-ai/glm-5.2:free"]

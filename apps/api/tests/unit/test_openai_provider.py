@@ -1,5 +1,3 @@
-from unittest.mock import AsyncMock, MagicMock
-
 import httpx2
 import openai
 import pytest
@@ -7,6 +5,7 @@ import pytest
 from app.llm.errors import (
     LLMConfigurationError,
     LLMEmptyResponseError,
+    LLMModelRejectedError,
     LLMRateLimitError,
     LLMUnavailableError,
 )
@@ -14,7 +13,7 @@ from app.llm.openai_provider import OpenAIProvider
 from app.llm.types import CompletionRequest, Message, TextBlock, ToolResultBlock, ToolSpec
 from app.llm.types import ToolUseBlock as AppToolUseBlock
 
-from ._llm_stubs import chunk, streaming, tool_call_delta
+from ._llm_stubs import chunk, scripted, status_error, streaming, tool_call_delta
 
 pytestmark = pytest.mark.anyio
 
@@ -32,6 +31,10 @@ def _request(**overrides) -> CompletionRequest:
 
 def _chunk(text=None, usage=None, finish_reason=None, tool_calls=None):
     return chunk(text=text, usage=usage, finish_reason=finish_reason, tool_calls=tool_calls)
+
+
+def _raising(exc):
+    return scripted(OpenAIProvider(api_key="test-key"), exc)
 
 
 def _provider_with(chunks):
@@ -55,20 +58,6 @@ def _timeout_error() -> openai.APITimeoutError:
 
 def _connection_error() -> openai.APIConnectionError:
     return openai.APIConnectionError(request=_request_object())
-
-
-def _status_error(status_code: int) -> openai.APIStatusError:
-    response = httpx2.Response(
-        status_code, request=_request_object(), json={"error": {"type": "some_error"}}
-    )
-    return openai.APIStatusError("failed", response=response, body=None)
-
-
-def _raising_provider(exc: Exception) -> OpenAIProvider:
-    provider = OpenAIProvider(api_key="test-key")
-    provider._client = MagicMock()  # noqa: SLF001
-    provider._client.chat.completions.create = AsyncMock(side_effect=exc)  # noqa: SLF001
-    return provider
 
 
 async def test_system_prompt_becomes_the_first_message():
@@ -175,35 +164,35 @@ async def test_generate_reassembles_the_same_text_as_stream():
 
 
 async def test_rate_limit_error_is_mapped_to_llm_rate_limit_error():
-    provider = _raising_provider(_rate_limit_error())
+    provider = _raising(_rate_limit_error())
     with pytest.raises(LLMRateLimitError):
         async for _ in provider.stream(_request()):
             pass
 
 
 async def test_timeout_error_is_mapped_to_llm_unavailable_error():
-    provider = _raising_provider(_timeout_error())
+    provider = _raising(_timeout_error())
     with pytest.raises(LLMUnavailableError):
         async for _ in provider.stream(_request()):
             pass
 
 
 async def test_connection_error_is_mapped_to_llm_unavailable_error():
-    provider = _raising_provider(_connection_error())
+    provider = _raising(_connection_error())
     with pytest.raises(LLMUnavailableError):
         async for _ in provider.stream(_request()):
             pass
 
 
 async def test_unauthenticated_status_error_is_mapped_to_llm_configuration_error():
-    provider = _raising_provider(_status_error(401))
+    provider = _raising(status_error(401))
     with pytest.raises(LLMConfigurationError):
         async for _ in provider.stream(_request()):
             pass
 
 
 async def test_forbidden_status_error_is_mapped_to_llm_configuration_error():
-    provider = _raising_provider(_status_error(403))
+    provider = _raising(status_error(403))
     with pytest.raises(LLMConfigurationError):
         async for _ in provider.stream(_request()):
             pass
@@ -212,14 +201,33 @@ async def test_forbidden_status_error_is_mapped_to_llm_configuration_error():
 async def test_bad_request_status_error_is_mapped_to_llm_configuration_error():
     """A 400 must not be reported as `LLMUnavailableError`, which reads as
     transient and invites retrying a request that can never succeed."""
-    provider = _raising_provider(_status_error(400))
+    provider = _raising(status_error(400))
     with pytest.raises(LLMConfigurationError):
         async for _ in provider.stream(_request()):
             pass
 
 
+@pytest.mark.parametrize("status_code", [400, 404])
+async def test_a_rejected_model_is_told_apart_from_other_bad_requests(status_code):
+    """`LLMModelRejectedError` is what `OpenRouterProvider` falls back on; a
+    bad key or any other 4xx must not look like it."""
+    provider = _raising(status_error(status_code))
+    with pytest.raises(LLMModelRejectedError):
+        async for _ in provider.stream(_request()):
+            pass
+
+
+@pytest.mark.parametrize("status_code", [401, 422])
+async def test_other_client_errors_are_not_a_rejected_model(status_code):
+    provider = _raising(status_error(status_code))
+    with pytest.raises(LLMConfigurationError) as raised:
+        async for _ in provider.stream(_request()):
+            pass
+    assert not isinstance(raised.value, LLMModelRejectedError)
+
+
 async def test_server_status_error_is_mapped_to_llm_unavailable_error():
-    provider = _raising_provider(_status_error(503))
+    provider = _raising(status_error(503))
     with pytest.raises(LLMUnavailableError):
         async for _ in provider.stream(_request()):
             pass

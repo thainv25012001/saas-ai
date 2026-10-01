@@ -24,6 +24,7 @@ from app.llm.base import ModelCapabilities, SchemaT
 from app.llm.errors import (
     LLMConfigurationError,
     LLMEmptyResponseError,
+    LLMModelRejectedError,
     LLMRateLimitError,
     LLMUnavailableError,
 )
@@ -110,7 +111,7 @@ class OpenAIProvider:
     def capabilities(self, model: str) -> ModelCapabilities:
         return _CAPABILITIES
 
-    def _extra_body(self) -> dict[str, object] | None:
+    async def _extra_body(self, request: CompletionRequest) -> dict[str, object] | None:
         """Vendor-specific request body fields, merged in by the SDK.
 
         `None` for OpenAI itself, which rejects body fields it does not know.
@@ -275,6 +276,7 @@ class OpenAIProvider:
         messages = self._messages(request)
         max_tokens = self._max_tokens(request)
         tools = self._tools(request)
+        extra_body = await self._extra_body(request)
         try:
             # `AsyncCompletions.create` is `@overload`ed on the LITERAL value
             # of `stream=`. Building one `dict[str, Any]` of kwargs and
@@ -297,7 +299,7 @@ class OpenAIProvider:
                     stream_options={"include_usage": True},
                     temperature=request.temperature,
                     tools=tools,
-                    extra_body=self._extra_body(),
+                    extra_body=extra_body,
                 )
             else:
                 stream = await self._client.chat.completions.create(
@@ -307,7 +309,7 @@ class OpenAIProvider:
                     stream=True,
                     stream_options={"include_usage": True},
                     tools=tools,
-                    extra_body=self._extra_body(),
+                    extra_body=extra_body,
                 )
 
             yield MessageStartEvent(model=request.model)
@@ -395,6 +397,10 @@ class OpenAIProvider:
                 if exc.status_code in (401, 403):
                     raise LLMConfigurationError(
                         "the model provider rejected our credentials"
+                    ) from exc
+                if exc.status_code in (400, 404):
+                    raise LLMModelRejectedError(
+                        f"the model provider rejected the model ({exc.status_code})"
                     ) from exc
                 raise LLMConfigurationError(
                     f"the model provider rejected our request ({exc.status_code})"
