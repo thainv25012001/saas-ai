@@ -588,6 +588,7 @@ class ChatService:
         # if the provider sent none -- "it did not say", which is a different
         # fact from the `None` this column used to carry unconditionally.
         stop_reason: str | None = None
+        answered_model: str | None = None
         chat_error: ChatError | None = None
         started_at = time.monotonic()
 
@@ -659,6 +660,7 @@ class ChatService:
                     # summing) is correct here for the same reason: the value
                     # already *is* the cumulative total as of this step.
                     usage = event.usage
+                    answered_model = event.model or answered_model
                 elif isinstance(event, AgentFinish):
                     stop_reason = event.stop_reason
                 elif isinstance(event, AgentStepLimit):
@@ -683,15 +685,10 @@ class ChatService:
 
         latency_ms = int((time.monotonic() - started_at) * 1000)
         final_text = "".join(accumulated)
-        # AgentRunner is always constructed with `model=model_name` above,
-        # and every provider (FakeProvider included) echoes `request.model`
-        # back unchanged in every event -- so this is not a guess, it is the
-        # value that was actually requested on every step of this turn. (A
-        # provider that ever normalizes/rewrites the model string in its own
-        # response would need `AgentUsage` or a sibling event to carry it
-        # forward; none does today, and `AgentRunner` does not expose a
-        # per-step model field for `send()` to read instead.)
-        model_used = model_name
+        # What answered, which a provider fallback can make differ from what
+        # was requested (see `AgentUsage.model`); the requested model stands
+        # in only when no step reported one.
+        model_used = answered_model or model_name
 
         # Everything below writes. Wrapped, because a turn that already
         # reached the user must not be lost to an exception raised while

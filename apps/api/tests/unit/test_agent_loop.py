@@ -52,6 +52,7 @@ from app.llm.types import (
 )
 from app.tools.base import AgentTool, ToolContext, ToolResult
 from app.tools.registry import ToolRegistry
+from tests.llm_doubles import FALLBACK_MODEL, AnsweredByAnotherModel
 
 pytestmark = pytest.mark.anyio
 
@@ -310,6 +311,15 @@ async def test_usage_sums_across_steps_rather_than_being_overwritten() -> None:
     # instead of summing would report 10/5 here, not 20/10.
     assert final.input_tokens == 20
     assert final.output_tokens == 10
+
+
+async def test_usage_reports_the_model_that_actually_answered() -> None:
+    runner = _runner(AnsweredByAnotherModel(script=["ok"]), _registry())
+
+    events = [event async for event in runner.run("system", [], [], _ctx())]
+
+    usage_events = [e for e in events if isinstance(e, AgentUsage)]
+    assert usage_events[-1].model == FALLBACK_MODEL
 
 
 class _FillerThenToolProvider:

@@ -44,6 +44,13 @@ class LLMConfigurationError(LLMError):
     status_code = 500
 
 
+class LLMModelRejectedError(LLMConfigurationError):
+    """The provider refused the MODEL rather than the key: an unknown or
+    retired id (400), or no endpoint that serves it (404). Another model may
+    well succeed, which is what `OpenRouterProvider` falls back on; callers
+    that do not care see an ordinary `LLMConfigurationError`."""
+
+
 class LLMEmptyResponseError(LLMError):
     code = "llm_empty_response"
     status_code = 502
