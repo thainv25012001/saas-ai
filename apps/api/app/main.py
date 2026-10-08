@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.routing import Route
 
-from app.api import auth, chat, documents, evaluations, gmail, health, products, widget
+from app.api import auth, chat, documents, evaluations, gmail, health, products, pubsub, widget
 from app.core.config import get_settings
 from app.core.errors import AppError, format_validation_errors
 from app.core.logging import configure_logging, get_logger, request_id_var
@@ -192,6 +192,7 @@ def create_app() -> FastAPI:
     app.include_router(products.router)
     app.include_router(evaluations.router)
     app.include_router(gmail.router)
+    app.include_router(pubsub.router)
     app.include_router(widget.router)
 
     # An exact route, not a `Mount`: `/mcp/` redirects to `/mcp` rather than

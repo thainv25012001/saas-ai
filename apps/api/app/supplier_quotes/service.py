@@ -126,6 +126,127 @@ class SupplierQuoteService:
         await self.session.flush()
         return mapping
 
+    async def save_mapping_proposal(
+        self,
+        supplier_id: Any,
+        *,
+        worksheet_name: str,
+        header_row: int,
+        column_mapping: dict[str, str],
+        column_labels: list[str],
+        source_message_id: Any,
+        source_attachment_id: str,
+    ) -> SupplierMapping:
+        """Persist a validated, unconfirmed label-only proposal for review."""
+        supplier = await self._get_supplier(supplier_id)
+        message = await self._get_message(source_message_id)
+        if message.supplier_id not in {None, supplier.id}:
+            raise NotFoundError("supplier message not found")
+        attachment_ids = {
+            item.get("attachment_id") for item in message.attachment_ids if isinstance(item, dict)
+        }
+        if source_attachment_id not in attachment_ids:
+            raise NotFoundError("supplier attachment not found")
+        if not worksheet_name or len(worksheet_name) > 128 or not 1 <= header_row <= 25_000:
+            raise ValidationError("invalid workbook mapping proposal")
+        if len(column_labels) > 100 or any(not label.strip() for label in column_labels):
+            raise ValidationError("invalid workbook column labels")
+        allowed_fields = {
+            "supplier_sku",
+            "product_name",
+            "specification",
+            "unit_price",
+            "currency",
+            "unit",
+            "minimum_order_quantity",
+            "quantity_tiers",
+            "lead_time",
+            "valid_until",
+        }
+        if any(field not in allowed_fields for field in column_mapping):
+            raise ValidationError("unsupported workbook mapping field")
+
+        current_version = await self.session.scalar(
+            select(func.max(SupplierMapping.version)).where(
+                SupplierMapping.organization_id == self.tenant.organization_id,
+                SupplierMapping.supplier_id == supplier.id,
+            )
+        )
+        mapping = SupplierMapping(
+            organization_id=self.tenant.organization_id,
+            supplier_id=supplier.id,
+            version=(current_version or 0) + 1,
+            worksheet_name=worksheet_name,
+            header_row=header_row,
+            column_mapping=column_mapping,
+            column_labels=[label.strip()[:128] for label in column_labels],
+            source_message_id=message.id,
+            source_attachment_id=source_attachment_id,
+            default_currency=None,
+            default_purchase_unit=None,
+            is_confirmed=False,
+        )
+        self.session.add(mapping)
+        message.supplier_id = supplier.id
+        message.status = "review_required"
+        await self.session.flush()
+        return mapping
+
+    async def latest_confirmed_mapping(self, supplier_id: Any) -> SupplierMapping | None:
+        mappings = await self.list_confirmed_mappings(supplier_id)
+        return mappings[0] if mappings else None
+
+    async def list_confirmed_mappings(self, supplier_id: Any) -> list[SupplierMapping]:
+        result = await self.session.execute(
+            select(SupplierMapping)
+            .where(
+                SupplierMapping.organization_id == self.tenant.organization_id,
+                SupplierMapping.supplier_id == supplier_id,
+                SupplierMapping.is_confirmed.is_(True),
+            )
+            .order_by(SupplierMapping.version.desc(), SupplierMapping.id.desc())
+        )
+        return list(result.scalars().all())
+
+    async def get_or_create_message(
+        self,
+        *,
+        connection_id: Any,
+        gmail_message_id: str,
+        history_id: str,
+        sender_email: str,
+        received_at: datetime | None,
+        attachment_ids: list[dict[str, Any]],
+    ) -> tuple[SupplierMessage, bool]:
+        result = await self.session.execute(
+            select(SupplierMessage).where(
+                SupplierMessage.organization_id == self.tenant.organization_id,
+                SupplierMessage.gmail_connection_id == connection_id,
+                SupplierMessage.gmail_message_id == gmail_message_id,
+            )
+        )
+        message = result.scalar_one_or_none()
+        if message is not None:
+            should_process = message.status not in {
+                "ignored",
+                "review_required",
+                "processed",
+            }
+            return message, should_process
+        message = SupplierMessage(
+            organization_id=self.tenant.organization_id,
+            gmail_connection_id=connection_id,
+            gmail_message_id=gmail_message_id,
+            history_id=history_id,
+            sender_email=sender_email[:320],
+            received_at=received_at,
+            attachment_ids=attachment_ids,
+            status="processing",
+        )
+        self.session.add(message)
+        await self.session.flush()
+        return message, True
+
     async def record_processing_status(
         self,
         message_id: Any,

@@ -18,6 +18,7 @@ class SupplierOffer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     product_id: str
+    quote_id: str | None = None
     supplier_id: str
     supplier_name: str
     unit_price: Decimal | None
@@ -40,6 +41,7 @@ class RankedSupplierOffer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     supplier_id: str
+    quote_id: str | None = None
     supplier_name: str
     unit_price: Decimal | None
     profit_status: str
@@ -400,6 +402,7 @@ def _ranked_offer(
         resolved_reasons.append(reason)
     return RankedSupplierOffer(
         supplier_id=offer.supplier_id,
+        quote_id=offer.quote_id,
         supplier_name=offer.supplier_name,
         unit_price=offer.unit_price,
         profit_status=status,

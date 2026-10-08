@@ -9,6 +9,7 @@ actually being in this list for exactly that reason.
 from collections.abc import Callable
 from typing import Any
 
+from arq import cron
 from arq.connections import RedisSettings
 from arq.worker import Function, func
 
@@ -18,7 +19,9 @@ from app.workers.tasks import (
     EVALUATION_MAX_TRIES,
     import_products_task,
     ingest_document_task,
+    renew_gmail_watches_task,
     run_evaluation_task,
+    sync_gmail_mailbox_task,
     title_conversation_task,
 )
 
@@ -44,6 +47,8 @@ class WorkerSettings:
         ingest_document_task,
         title_conversation_task,
         import_products_task,
+        sync_gmail_mailbox_task,
+        renew_gmail_watches_task,
         # Wrapped, for its own timeout: an evaluation runs its cases one
         # after another (docs/PHASE-6.md §5), so up to 200 real provider
         # turns plus judge calls cannot fit `job_timeout` below. `func`
@@ -54,6 +59,15 @@ class WorkerSettings:
         # is told the same number: on the last try its time budget fails
         # the run rather than raising a `Retry` arq would never act on.
         func(run_evaluation_task, timeout=3600, max_tries=EVALUATION_MAX_TRIES),
+    ]
+    cron_jobs = [
+        cron(
+            "app.workers.tasks.renew_gmail_watches_task",
+            hour=3,
+            minute=0,
+            timeout=3600,
+            max_tries=1,
+        ),
     ]
     on_startup = _on_startup
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)

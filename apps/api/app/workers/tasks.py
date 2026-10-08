@@ -24,6 +24,7 @@ from app.core.tenancy import TenantContext, tenant_session
 from app.db.models import MessageRole
 from app.documents.service import DocumentService
 from app.evaluations.runner import run_evaluation
+from app.gmail.sync import run_gmail_maintenance, run_gmail_sync
 from app.llm.errors import LLMError
 from app.llm.registry import get_provider
 from app.llm.types import CompletionRequest
@@ -295,3 +296,23 @@ async def run_evaluation_task(
         job_try=int(ctx.get("job_try", 1)),
         max_tries=EVALUATION_MAX_TRIES,
     )
+
+
+async def sync_gmail_mailbox_task(
+    _ctx: dict[str, Any],
+    *,
+    mailbox_email: str,
+    notification_history_id: str,
+    force_sync: bool = False,
+) -> None:
+    """Resolve and synchronize only the tenants connected to this mailbox."""
+    await run_gmail_sync(
+        mailbox_email=mailbox_email,
+        notification_history_id=notification_history_id,
+        force_sync=force_sync,
+    )
+
+
+async def renew_gmail_watches_task(_ctx: dict[str, Any]) -> None:
+    """Daily watch renewal and bounded Gmail history reconciliation."""
+    await run_gmail_maintenance()

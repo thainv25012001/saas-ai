@@ -106,6 +106,26 @@ def test_import_products_task_is_registered() -> None:
     assert import_products_task in WorkerSettings.functions
 
 
+def test_gmail_sync_and_maintenance_tasks_are_registered() -> None:
+    from app.workers.tasks import renew_gmail_watches_task, sync_gmail_mailbox_task
+
+    assert sync_gmail_mailbox_task in WorkerSettings.functions
+    assert renew_gmail_watches_task in WorkerSettings.functions
+
+
+def test_gmail_watch_renewal_is_scheduled_daily() -> None:
+    from app.workers.tasks import renew_gmail_watches_task
+
+    registered = [
+        job
+        for job in WorkerSettings.cron_jobs
+        if job.coroutine is renew_gmail_watches_task
+    ]
+    assert len(registered) == 1
+    assert registered[0].hour == 3
+    assert registered[0].minute == 0
+
+
 def test_run_evaluation_task_is_registered_under_its_own_name_with_a_one_hour_timeout() -> None:
     """Registered through `arq.worker.func`, not bare, because an evaluation
     run needs its own 1-hour timeout (docs/PHASE-6.md §5) rather than the

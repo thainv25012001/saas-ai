@@ -110,6 +110,22 @@ class GmailClient:
             params={"format": "full"},
         )
 
+    async def list_messages(
+        self,
+        access_token: str,
+        query: str,
+        *,
+        page_token: str | None = None,
+        max_results: int = 500,
+    ) -> dict[str, object]:
+        params: dict[str, str | int] = {
+            "q": query,
+            "maxResults": min(max(max_results, 1), 500),
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        return await self._request("GET", "messages", access_token, params=params)
+
     async def get_attachment(
         self,
         access_token: str,
