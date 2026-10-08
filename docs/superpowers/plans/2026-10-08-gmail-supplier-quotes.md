@@ -239,8 +239,8 @@
 
 **Files:** all files in Tasks 1–9.
 
-- [ ] **Step 1: Run the complete API suite:** `make test`.
-- [ ] **Step 2: Run API checks:** `make lint`.
-- [ ] **Step 3: Run complete web tests, types, and lint:** `cd apps/web && npm test && npm run typecheck && npm run lint`.
-- [ ] **Step 4: Run `git diff --check`, inspect the complete diff against the spec, and verify migration upgrade/downgrade and generated GraphQL artifacts are included.**
-- [ ] **Step 5: Record any unavailable live-Google verification explicitly.** No Google OAuth credentials, Cloud Pub/Sub topic, or external OAuth approval may be fabricated; unit/integration tests must cover the local behavior.
+- [x] **Step 1: Run the complete API suite:** `make test`.
+- [x] **Step 2: Run API checks:** `make lint`.
+- [x] **Step 3: Run complete web tests, types, and lint:** `cd apps/web && npm test && npm run typecheck && npm run lint`.
+- [x] **Step 4: Run `git diff --check`, inspect the complete diff against the spec, and verify migration upgrade/downgrade and generated GraphQL artifacts are included.**
+- [x] **Step 5: Record any unavailable live-Google verification explicitly.** No Google OAuth credentials, Cloud Pub/Sub topic, or external OAuth approval may be fabricated; unit/integration tests must cover the local behavior.
