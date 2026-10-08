@@ -852,6 +852,56 @@ lookup table that would need updating for a channel value the API adds
 later — the "unknown id still renders" rule from Dropdowns, applied to a
 badge instead of a `<select>` option.
 
+## Supplier quotes (`app/dashboard/supplier-quotes`)
+
+One scrolling page of four cards, in the order an owner meets them: Gmail,
+Needs review, Reports, Suppliers. The components live in
+[`components/supplier-quotes/`](../apps/web/src/components/supplier-quotes/),
+and every label and status lookup lives in
+[`lib/supplier-quotes.ts`](../apps/web/src/lib/supplier-quotes.ts), in the
+one-lookup shape of "Status as a tone".
+
+- **A profit figure, or the reason there is none.** `profitCell` returns the
+  API's `unitGrossProfit` when it exists and otherwise a `warn` badge naming
+  why: `Missing sale price`, `Sale price older than 90 days`,
+  `Currency differs from catalogue`. A blank or `0` cell would claim "no
+  profit", which is a different statement. The dashboard never computes
+  profit itself; the API's deterministic comparison is the only source.
+- **A rank names its basis and its group.** `rankLabel` renders
+  `#1 by purchase price · USD per each`. The API ranks offers only within one
+  currency and purchase unit, so a bare `#1` would claim a comparison it
+  refused to make. An incomparable offer reads `Not ranked`, and its reasons
+  sit in the Notes column.
+- **A mapping review shows header labels, never cell values.** A proposal
+  stores the worksheet's column labels and no sample rows, so there is
+  nothing else to show. Each field is a `Select` over those labels with a
+  "Not in this sheet" option. `mappingProblems` mirrors the API's
+  `WorkbookMapping` rules in the API's own terms, and Confirm stays disabled
+  until they are met. The server's check still counts.
+- **Confirm, then queue, as two steps.** The page calls
+  `confirmSupplierMapping` and only after it answers (its transaction has
+  committed) calls the REST reprocess route. If queueing fails, the mapping
+  still stands, so the page shows a `warn` alert that says exactly that,
+  with a "Queue it again" button, not a `danger` alert implying the save was
+  lost.
+- **Gmail controls are owner-only and absent otherwise**, the
+  `McpAccessCard` precedent. A member sees the mailbox and its health but no
+  buttons, plus one line saying who can change it. The OAuth start route
+  answers JSON (`authorization_url`) and the page navigates itself, because a
+  navigation cannot carry the Bearer token.
+- **No delivery controls.** Reports stay in the dashboard (spec §8);
+  `QuoteReports.test.tsx` asserts that no send, share or export button exists.
+
+Untrusted text gets a sixth source here: everything read out of a supplier's
+spreadsheet (product names, SKUs, units) and the sender's address. All of
+it renders as plain text children, and `QuoteReports.test.tsx` pins this with
+a `<script>` payload in a product name.
+
+`Decimal` GraphQL fields are typed `string` in `codegen.ts`, since the API
+serializes them exactly (`"10.0000"`), and they go through `formatPrice` like
+catalogue prices do. `summaryJson` stays `unknown`; `reportCounts` reads its
+two counts and treats any other shape as zero.
+
 ## Adding a component
 
 1. Does a primitive already do it? Extend that one instead — a second thing

@@ -178,10 +178,19 @@ async def reprocess_supplier_message(
     return {"status": "queued"}
 
 
-@router.get("/oauth/start")
+class GmailOAuthStart(BaseModel):
+    authorization_url: str
+
+
+@router.post("/oauth/start", response_model=GmailOAuthStart)
 async def start_gmail_oauth(
     tenant: Annotated[TenantContext, Depends(get_current_tenant)],
-) -> RedirectResponse:
+) -> GmailOAuthStart:
+    """Return Google's consent URL; the dashboard navigates there itself.
+
+    A redirect would be unusable: this route needs the Bearer token, and a
+    browser navigation cannot send one.
+    """
     _require_owner(tenant)
     if tenant.user_id is None:
         raise AuthenticationError("Gmail OAuth requires an authenticated user")
@@ -193,7 +202,7 @@ async def start_gmail_oauth(
         state=ticket.state,
         code_verifier=ticket.code_verifier,
     )
-    return RedirectResponse(authorization_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+    return GmailOAuthStart(authorization_url=authorization_url)
 
 
 @router.get("/oauth/callback")

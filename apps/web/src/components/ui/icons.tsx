@@ -24,7 +24,8 @@ export type IconName =
   | "upload"
   | "retry"
   | "trash"
-  | "tool";
+  | "tool"
+  | "mail";
 
 const GLYPHS: Record<IconName, React.ReactNode> = {
   overview: (
@@ -150,6 +151,12 @@ const GLYPHS: Record<IconName, React.ReactNode> = {
   tool: (
     <>
       <path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 1 5.4-5.4l-2.3 2.3-2-2z" />
+    </>
+  ),
+  mail: (
+    <>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="m3 7 9 6 9-6" />
     </>
   ),
 };

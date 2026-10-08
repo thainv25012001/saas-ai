@@ -18,9 +18,11 @@ const config: CodegenConfig = {
       config: {
         // Without this every custom scalar lands as `unknown`, and each id
         // then needs a `String(...)` at its use site -- a cast that says
-        // nothing and can never fail. Naming the two scalars this schema
-        // actually has is the one place to fix that.
-        scalars: { UUID: "string", DateTime: "string" },
+        // nothing and can never fail. Naming the scalars with a fixed wire
+        // shape is the one place to fix that. `Decimal` arrives as a string
+        // (Strawberry serializes it exactly, e.g. "10.0000"); `JSON` stays
+        // `unknown`, so every reader has to parse it defensively.
+        scalars: { UUID: "string", DateTime: "string", Decimal: "string" },
       },
     },
   },

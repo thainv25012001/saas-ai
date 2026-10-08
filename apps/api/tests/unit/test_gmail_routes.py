@@ -44,7 +44,7 @@ def _test_app(tenant: TenantContext) -> FastAPI:
     return app
 
 
-async def test_oauth_start_redirects_owner_to_google_with_readonly_scope(
+async def test_oauth_start_returns_google_consent_url_with_readonly_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.api import gmail as gmail_api
@@ -78,10 +78,12 @@ async def test_oauth_start_redirects_owner_to_google_with_readonly_scope(
         base_url="http://test",
         follow_redirects=False,
     ) as client:
-        response = await client.get("/api/v1/gmail/oauth/start")
+        response = await client.post("/api/v1/gmail/oauth/start")
 
-    assert response.status_code == 307, response.text
-    location = response.headers["location"]
+    # JSON, not a redirect: the dashboard calls this with its Bearer token and
+    # then navigates itself, since a browser navigation cannot carry the header.
+    assert response.status_code == 200, response.text
+    location = response.json()["authorization_url"]
     assert location.startswith("https://accounts.google.com/o/oauth2/v2/auth?")
     assert "scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.readonly" in location
     assert "code_challenge_method=S256" in location
@@ -116,7 +118,7 @@ async def test_non_owner_cannot_start_gmail_oauth(monkeypatch: pytest.MonkeyPatc
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=_test_app(tenant)), base_url="http://test"
     ) as client:
-        response = await client.get("/api/v1/gmail/oauth/start")
+        response = await client.post("/api/v1/gmail/oauth/start")
 
     assert response.status_code == 403
 

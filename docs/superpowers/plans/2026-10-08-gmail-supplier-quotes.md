@@ -218,10 +218,10 @@
 - Report rows show profit only when computable; otherwise display “Missing sale price” and the purchase-price rank. Incomparable currency/unit rows are labeled and not placed in the same ranking.
 - No outbound report delivery controls or destination selection are exposed.
 
-- [ ] **Step 1: Write failing Vitest tests** for mapping preview confirmation, missing-price rendering, purchase-price rank, unknown currency/unit status, loading/error/empty states, and no send-destination UI.
-- [ ] **Step 2: Run the focused Vitest files** and confirm missing component/formatting behavior.
-- [ ] **Step 3: Implement the dashboard using generated GraphQL documents, the authenticated REST client, and existing page/card/table patterns.** Show proposed mappings with header labels, permit mapping edits before confirmation, and avoid rendering email bodies, sample cell values, or entire workbooks.
-- [ ] **Step 4: Run focused Vitest tests, then `cd apps/web && npm run typecheck && npm run lint`**.
+- [x] **Step 1: Write failing Vitest tests** for mapping preview confirmation, missing-price rendering, purchase-price rank, unknown currency/unit status, loading/error/empty states, and no send-destination UI.
+- [x] **Step 2: Run the focused Vitest files** and confirm missing component/formatting behavior.
+- [x] **Step 3: Implement the dashboard using generated GraphQL documents, the authenticated REST client, and existing page/card/table patterns.** Show proposed mappings with header labels, permit mapping edits before confirmation, and avoid rendering email bodies, sample cell values, or entire workbooks.
+- [x] **Step 4: Run focused Vitest tests, then `cd apps/web && npm run typecheck && npm run lint`**.
 
 ### Task 9: Configuration and deployment documentation
 
