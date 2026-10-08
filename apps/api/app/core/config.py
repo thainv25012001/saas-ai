@@ -102,6 +102,19 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     openrouter_api_key: str | None = None
+    gmail_oauth_client_id: str | None = None
+    gmail_oauth_client_secret: str | None = None
+    gmail_oauth_redirect_uri: str | None = None
+    gmail_web_redirect_uri: str | None = None
+    gmail_token_encryption_key: str | None = None
+    gmail_pubsub_topic: str | None = None
+    gmail_pubsub_push_audience: str | None = None
+    gmail_pubsub_expected_service_account: str | None = None
+    gmail_attachment_max_bytes: int = Field(default=20 * 1024 * 1024, gt=0)
+    gmail_workbook_max_rows: int = Field(default=25_000, gt=0, le=25_000)
+    gmail_preview_rows: int = Field(default=5, gt=0, le=5)
+    gmail_sale_price_max_age_days: int = Field(default=90, gt=0)
+    gmail_oauth_state_ttl_seconds: int = Field(default=600, gt=0)
     # `fake` keeps the playground working with no key configured. Set to
     # `openai` or `anthropic` once a key is present.
     default_llm_provider: str = "fake"

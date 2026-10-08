@@ -8,10 +8,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.config import get_settings
 from app.supplier_quotes.schemas import CanonicalQuoteRow, QuantityTier
 
 RANKING_BASIS = Literal["gross_profit", "purchase_price", "none", "grouped"]
-PRICE_FRESHNESS = timedelta(days=90)
 
 
 class SupplierOffer(BaseModel):
@@ -430,7 +430,8 @@ def _sale_price_status(
     observed_at = _as_utc(timestamp)
     current = _as_utc(now)
     age = current - observed_at
-    if age < timedelta(0) or age > PRICE_FRESHNESS:
+    freshness = timedelta(days=get_settings().gmail_sale_price_max_age_days)
+    if age < timedelta(0) or age > freshness:
         return "stale_sale_price"
     return "available"
 

@@ -14,6 +14,7 @@ from openpyxl.utils.cell import range_boundaries
 from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.worksheet.worksheet import Worksheet
 
+from app.core.config import get_settings
 from app.supplier_quotes.schemas import (
     CanonicalQuoteRow,
     QuantityTier,
@@ -26,9 +27,6 @@ from app.supplier_quotes.schemas import (
     WorkbookSheetInspection,
 )
 
-MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
-MAX_WORKSHEET_ROWS = 25_000
-MAX_PREVIEW_ROWS = 5
 MAX_HEADER_SCAN_ROWS = 50
 MAX_COLUMN_COUNT = 100
 MAX_CELL_PREVIEW_CHARS = 160
@@ -47,7 +45,7 @@ def inspect_supplier_workbook(data: bytes) -> WorkbookInspection:
         return WorkbookInspection(sheets=[], issues=[issue])
     assert workbook is not None
 
-    remaining_samples = MAX_PREVIEW_ROWS
+    remaining_samples = get_settings().gmail_preview_rows
     inspected_sheets: list[WorkbookSheetInspection] = []
     try:
         for worksheet in workbook.worksheets:
@@ -126,7 +124,10 @@ def parse_supplier_workbook(data: bytes, mapping: WorkbookMapping) -> WorkbookPa
                 ],
             )
 
-        if worksheet.max_row is not None and worksheet.max_row > MAX_WORKSHEET_ROWS:
+        if (
+            worksheet.max_row is not None
+            and worksheet.max_row > get_settings().gmail_workbook_max_rows
+        ):
             return WorkbookParseResult(
                 rows=[],
                 issues=[
@@ -234,8 +235,10 @@ def parse_supplier_workbook(data: bytes, mapping: WorkbookMapping) -> WorkbookPa
 
 
 def _open_workbook(data: bytes) -> tuple[Any | None, WorkbookRowIssue | None]:
-    if len(data) > MAX_ATTACHMENT_BYTES:
-        return None, _issue("file_too_large", "The workbook exceeds the 20 MiB attachment limit.")
+    if len(data) > get_settings().gmail_attachment_max_bytes:
+        return None, _issue(
+            "file_too_large", "The workbook exceeds the configured attachment limit."
+        )
     if not data:
         return None, _issue("invalid_workbook", "The attachment is not a readable XLSX workbook.")
     try:
@@ -263,7 +266,10 @@ def _open_workbook(data: bytes) -> tuple[Any | None, WorkbookRowIssue | None]:
 
 
 def _read_preview_rows(worksheet: Worksheet) -> list[tuple[Any, ...]]:
-    max_row = min(worksheet.max_row or 0, MAX_HEADER_SCAN_ROWS + MAX_PREVIEW_ROWS)
+    max_row = min(
+        worksheet.max_row or 0,
+        MAX_HEADER_SCAN_ROWS + get_settings().gmail_preview_rows,
+    )
     if max_row == 0:
         return []
     return [
