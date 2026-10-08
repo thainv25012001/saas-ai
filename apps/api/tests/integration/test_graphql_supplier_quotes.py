@@ -200,9 +200,24 @@ async def test_pending_mapping_can_be_confirmed_for_its_source_message(
             column_labels=["Item", "Price", "Currency", "Unit"],
             source_message_id=message.id,
             source_attachment_id="gmail-attachment-internal",
+            sheet_options=[
+                {"worksheet_name": "Quote", "header_row": 1, "labels": ["Item", "Price"]},
+                {"worksheet_name": "Totals", "header_row": 4, "labels": ["Sum"]},
+            ],
         )
         proposal_id = proposal.id
         source_message_id = message.id
+
+    pending = await graphql(
+        api_client,
+        "query { pendingSupplierMappings { id sheetOptions { worksheetName headerRow labels } } }",
+        headers=_auth(token),
+    )
+    [listed] = pending.json()["data"]["pendingSupplierMappings"]
+    assert listed["sheetOptions"] == [
+        {"worksheetName": "Quote", "headerRow": 1, "labels": ["Item", "Price"]},
+        {"worksheetName": "Totals", "headerRow": 4, "labels": ["Sum"]},
+    ]
 
     response = await graphql(
         api_client,

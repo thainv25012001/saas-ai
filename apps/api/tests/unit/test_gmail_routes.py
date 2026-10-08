@@ -319,3 +319,98 @@ async def test_supplier_reprocess_is_enqueued_only_after_tenant_transaction_comm
     assert response.status_code == 202, response.text
     assert response.json() == {"status": "queued"}
     assert queued == [(str(organization_id), str(message_id), str(mapping_id))]
+
+
+async def test_reconnecting_a_disconnected_mailbox_starts_from_the_new_watch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api import gmail as gmail_api
+    from app.core.config import Settings
+    from app.db.models import GmailConnection
+    from app.gmail.client import GmailClient, GmailProfile, GmailWatchResult
+    from app.gmail.oauth import GmailOAuthClient, OAuthStateStore, OAuthTokens
+    from app.gmail.token_crypto import decrypt_token
+
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql+asyncpg://app_user:password@localhost:5432/app",
+        migration_database_url="postgresql+asyncpg://app_owner:password@localhost:5432/app",
+        jwt_secret="unit-test-secret-that-is-long-enough",
+        gmail_oauth_client_id="client-id",
+        gmail_oauth_client_secret="client-secret",
+        gmail_oauth_redirect_uri="https://api.example.com/api/v1/gmail/oauth/callback",
+        gmail_web_redirect_uri="https://app.example.com/dashboard/supplier-quotes",
+        gmail_token_encryption_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        gmail_pubsub_topic="projects/test/topics/gmail",
+    )
+    redis = _FakeRedis()
+    monkeypatch.setattr(gmail_api, "get_settings", lambda: settings)
+    monkeypatch.setattr(gmail_api, "get_redis", lambda: redis)
+    monkeypatch.setattr("app.gmail.token_crypto.get_settings", lambda: settings)
+    organization_id, user_id = uuid.uuid4(), uuid.uuid4()
+    await OAuthStateStore(redis).issue(organization_id, user_id)
+    state = next(iter(redis.values)).removeprefix("gmail:oauth:state:")
+    existing = GmailConnection(
+        organization_id=organization_id,
+        email="supplierinbox@example.com",
+        refresh_token_ciphertext=None,
+        history_id="5",
+        status="disconnected",
+    )
+
+    class _Result:
+        def first(self) -> tuple[str]:
+            return ("owner",)
+
+        def scalar_one_or_none(self) -> GmailConnection:
+            return existing
+
+    class _Session:
+        async def execute(self, _statement: object) -> _Result:
+            return _Result()
+
+        def add(self, _record: object) -> None:
+            raise AssertionError("the existing row is reused")
+
+    @asynccontextmanager
+    async def fake_session():
+        yield _Session()
+
+    monkeypatch.setattr(gmail_api, "untenanted_session", fake_session)
+    monkeypatch.setattr(gmail_api, "tenant_session", lambda _tenant: fake_session())
+
+    async def exchange(*_args: object, **_kwargs: object) -> OAuthTokens:
+        return OAuthTokens(access_token="secret-access", refresh_token="secret-refresh")
+
+    async def profile(_self: GmailClient, _token: str) -> GmailProfile:
+        return GmailProfile(emailAddress="SupplierInbox@example.com", historyId="17")
+
+    async def watch(_self: GmailClient, _token: str, _topic: str) -> GmailWatchResult:
+        return GmailWatchResult(
+            history_id="18", expiration=datetime.fromtimestamp(1_900_000_000, tz=UTC)
+        )
+
+    monkeypatch.setattr(GmailOAuthClient, "exchange_code", exchange)
+    monkeypatch.setattr(GmailClient, "get_profile", profile)
+    monkeypatch.setattr(GmailClient, "watch", watch)
+    tenant = TenantContext(
+        organization_id=organization_id,
+        user_id=user_id,
+        role=MembershipRole.OWNER,
+        request_id="test",
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_test_app(tenant)),
+        base_url="http://test",
+        follow_redirects=False,
+    ) as client:
+        response = await client.get(
+            "/api/v1/gmail/oauth/callback", params={"code": "oauth-code", "state": state}
+        )
+
+    assert "gmail=connected" in response.headers["location"]
+    # Mail that arrived while disconnected is not backfilled.
+    assert existing.history_id == "18"
+    assert existing.status == "connected"
+    assert existing.refresh_token_ciphertext is not None
+    assert decrypt_token(existing.refresh_token_ciphertext) == "secret-refresh"

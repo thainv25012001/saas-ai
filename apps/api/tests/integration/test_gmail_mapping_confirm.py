@@ -152,3 +152,72 @@ async def test_queue_it_again_is_never_swallowed_by_an_earlier_job_id(
     # makes every retry inside that hour a silent no-op.
     assert len(calls) == 2
     assert all("_job_id" not in call for call in calls)
+
+
+async def test_disconnecting_clears_the_credential_but_keeps_quote_history(
+    tenant_a: TenantContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import base64
+
+    from app.core.config import get_settings
+    from app.db.models import SupplierReport
+    from app.gmail.client import GmailClient
+    from app.gmail.oauth import GmailOAuthClient, OAuthTokens
+    from app.gmail.token_crypto import encrypt_token
+    from app.graphql.types import GmailConnection as GmailConnectionView
+
+    key = b"d" * 32
+    settings = get_settings().model_copy(
+        update={"gmail_token_encryption_key": base64.b64encode(key).decode()}
+    )
+    monkeypatch.setattr("app.gmail.token_crypto.get_settings", lambda: settings)
+    stopped: list[str] = []
+
+    async def refresh(_self: GmailOAuthClient, _token: str, **_k: object) -> OAuthTokens:
+        return OAuthTokens(access_token="access-token")
+
+    async def stop_watch(_self: GmailClient, token: str) -> None:
+        stopped.append(token)
+
+    monkeypatch.setattr(GmailOAuthClient, "refresh_access_token", refresh)
+    monkeypatch.setattr(GmailClient, "stop_watch", stop_watch)
+    async with tenant_session(tenant_a) as session:
+        service = SupplierQuoteService(session, tenant_a)
+        supplier = await service.create_supplier(SupplierInput(name="Acme"))
+        connection = GmailConnection(
+            organization_id=tenant_a.organization_id,
+            email="buyer@example.com",
+            refresh_token_ciphertext=encrypt_token("refresh-token", key=key),
+            history_id="50",
+            status="connected",
+        )
+        session.add(connection)
+        await session.flush()
+        message, _ = await service.get_or_create_message(
+            connection_id=connection.id,
+            gmail_message_id="kept",
+            history_id="50",
+            sender_email="quotes@acme.example",
+            received_at=datetime.now(UTC),
+            attachment_ids=[{"attachment_id": "part:1"}],
+        )
+        await service.upsert_quote_rows(supplier.id, message.id, "part:1", [])
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(tenant_a)), base_url="http://test"
+    ) as client:
+        response = await client.delete("/api/v1/gmail/connection")
+
+    assert response.status_code == 204
+    assert stopped == ["access-token"]
+    async with tenant_session(tenant_a) as session:
+        row = await session.scalar(select(GmailConnection))
+        reports = (await session.execute(select(SupplierReport))).scalars().all()
+    assert row is not None
+    assert (row.status, row.refresh_token_ciphertext, row.watch_expires_at) == (
+        "disconnected",
+        None,
+        None,
+    )
+    assert len(reports) == 1
+    assert GmailConnectionView.from_model(row).connected is False

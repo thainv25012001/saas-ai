@@ -1274,7 +1274,7 @@ class GmailConnection:
 
     @classmethod
     def from_model(cls, model: GmailConnectionModel | None) -> "GmailConnection":
-        if model is None:
+        if model is None or model.status == "disconnected":
             return cls(connected=False)
         return cls(
             connected=True,
@@ -1339,6 +1339,15 @@ class ConfirmSupplierMappingInput:
 
 
 @strawberry.type
+class SupplierSheetOption:
+    """A worksheet header row the owner may move a proposal to. Labels only."""
+
+    worksheet_name: str
+    header_row: int
+    labels: list[str]
+
+
+@strawberry.type
 class SupplierMappingReview:
     id: uuid.UUID
     supplier_id: uuid.UUID
@@ -1348,6 +1357,7 @@ class SupplierMappingReview:
     header_row: int
     columns: list[SupplierMappingColumn]
     column_labels: list[str]
+    sheet_options: list[SupplierSheetOption]
     default_currency: str | None
     default_purchase_unit: str | None
     is_confirmed: bool
@@ -1369,6 +1379,17 @@ class SupplierMappingReview:
             header_row=model.header_row,
             columns=columns,
             column_labels=list(model.column_labels),
+            sheet_options=[
+                SupplierSheetOption(
+                    worksheet_name=str(option["worksheet_name"]),
+                    header_row=int(option["header_row"]),
+                    labels=[label for label in option.get("labels", []) if isinstance(label, str)],
+                )
+                for option in model.sheet_options
+                if isinstance(option, dict)
+                and isinstance(option.get("worksheet_name"), str)
+                and isinstance(option.get("header_row"), int)
+            ],
             default_currency=model.default_currency,
             default_purchase_unit=model.default_purchase_unit,
             is_confirmed=model.is_confirmed,

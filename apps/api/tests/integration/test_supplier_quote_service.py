@@ -210,3 +210,73 @@ async def test_failed_rows_are_recorded_without_discarding_valid_rows(tenant_a):
     assert report.summary_json["issue_count"] == 1
     assert report.summary_json["row_issues"][0]["code"] == "invalid_price"
     assert "call for price" not in str(report.summary_json)
+
+
+async def test_only_the_owner_changes_supplier_configuration(tenant_a):
+    import dataclasses
+
+    from app.core.errors import PermissionDeniedError
+    from app.db.models import MembershipRole
+
+    async with tenant_session(tenant_a) as session:
+        supplier, message_id = await _setup(SupplierQuoteService(session, tenant_a))
+        proposal = await SupplierQuoteService(session, tenant_a).save_mapping(
+            supplier.id, _mapping_input(message_id)
+        )
+        member = SupplierQuoteService(
+            session, dataclasses.replace(tenant_a, role=MembershipRole.MEMBER)
+        )
+        # A member adding sender domain "gmail.com" would make every Gmail
+        # sender a confirmed supplier: configuration is the owner's.
+        with pytest.raises(PermissionDeniedError):
+            await member.create_supplier(SupplierInput(name="Anyone"))
+        with pytest.raises(PermissionDeniedError):
+            await member.update_supplier(supplier.id, SupplierInput(name="Renamed"))
+        with pytest.raises(PermissionDeniedError):
+            await member.confirm_mapping(proposal.id, mapping=_mapping_input(message_id).mapping)
+
+
+async def test_a_proposal_on_the_wrong_sheet_can_be_moved_to_another_candidate(tenant_a):
+    from app.core.errors import ValidationError as AppValidationError
+
+    options = [
+        {"worksheet_name": "Cover", "header_row": 1, "labels": ["Supplier", "ACME"]},
+        {"worksheet_name": "Quote", "header_row": 3, "labels": ["Item", "Price", "Cur", "UOM"]},
+    ]
+    async with tenant_session(tenant_a) as session:
+        service = SupplierQuoteService(session, tenant_a)
+        supplier, message_id = await _setup(service)
+        proposal = await service.save_mapping_proposal(
+            supplier.id,
+            worksheet_name="Cover",
+            header_row=1,
+            column_mapping={},
+            column_labels=["Supplier", "ACME"],
+            source_message_id=message_id,
+            source_attachment_id="attachment-1",
+            sheet_options=options,
+        )
+        with pytest.raises(AppValidationError):
+            await service.confirm_mapping(
+                proposal.id,
+                mapping=WorkbookMapping(
+                    worksheet_name="Elsewhere",
+                    header_row=2,
+                    columns={"product_name": "Item", "unit_price": "Price"},
+                    default_currency="USD",
+                    default_purchase_unit="each",
+                ),
+            )
+        confirmed = await service.confirm_mapping(
+            proposal.id,
+            mapping=WorkbookMapping(
+                worksheet_name="Quote",
+                header_row=3,
+                columns={"product_name": "Item", "unit_price": "Price", "currency": "Cur"},
+                default_purchase_unit="each",
+            ),
+        )
+
+    assert (confirmed.worksheet_name, confirmed.header_row) == ("Quote", 3)
+    assert confirmed.column_labels == ["Item", "Price", "Cur", "UOM"]
+    assert confirmed.sheet_options == options

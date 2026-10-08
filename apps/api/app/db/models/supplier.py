@@ -28,6 +28,9 @@ class Supplier(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
     sender_emails: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     sender_domains: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    #: Supplier SKU -> catalogue product id, remembered when an owner accepts
+    #: a product match, so that SKU matches without review next time.
+    sku_aliases: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, default=dict)
 
 
 class SupplierMapping(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
@@ -51,6 +54,10 @@ class SupplierMapping(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
     header_row: Mapped[int] = mapped_column(Integer, nullable=False)
     column_mapping: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     column_labels: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    #: Every worksheet/header-row candidate in the source workbook as
+    #: `{worksheet_name, header_row, labels}`: header labels only, never cell
+    #: values, so an owner can move a proposal to the right sheet or row.
+    sheet_options: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     source_message_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("supplier_messages.id", ondelete="SET NULL"),

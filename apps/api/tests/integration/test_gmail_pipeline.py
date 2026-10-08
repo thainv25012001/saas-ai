@@ -373,7 +373,9 @@ async def test_maintenance_continues_past_a_mailbox_that_fails(
 
     await sync_module.run_gmail_maintenance()
 
-    assert sorted(synced) == sorted([_MAILBOX, "other@example.com"])
+    # Other tests' organizations may leave mailboxes behind; what matters is
+    # that the failing one did not stop the other from being maintained.
+    assert {_MAILBOX, "other@example.com"} <= set(synced)
     assert (await connection_row(tenant_a)).last_error_code == "gmail_maintenance_failed"
 
 
@@ -426,3 +428,33 @@ async def test_a_confirmed_layout_reprocesses_even_when_gmail_reissues_attachmen
     assert [(quote.supplier_sku, quote.match_status) for quote in quotes] == [
         ("SKU-1", "confirmed")
     ]
+
+
+async def test_a_new_layout_is_proposed_on_the_first_sheet_that_has_headers(
+    owner_connection: Any, tenant_a: TenantContext, fake_gmail: FakeGmail
+) -> None:
+    from app.gmail.sync import run_gmail_sync
+
+    workbook = Workbook()
+    cover = workbook.active
+    assert cover is not None
+    cover.title = "Cover"
+    cover.append(("Thank you for your enquiry",))
+    offers = workbook.create_sheet("Offers")
+    offers.append(("SKU", "Name", "Price"))
+    offers.append(("SKU-1", "Widget", 10))
+    buffer = BytesIO()
+    workbook.save(buffer)
+    await seed_mailbox(owner_connection, tenant_a, confirmed_layout=False)
+    fake_gmail.messages["m-1"] = gmail_message("m-1")
+    fake_gmail.attachments["att-1"] = buffer.getvalue()
+    fake_gmail.history_message_ids = ["m-1"]
+
+    await run_gmail_sync(mailbox_email=_MAILBOX, notification_history_id="200")
+
+    async with tenant_session(tenant_a) as session:
+        [proposal] = await SupplierQuoteService(session, tenant_a).list_pending_mappings()
+    assert (proposal.worksheet_name, proposal.header_row) == ("Offers", 1)
+    assert {"worksheet_name": "Offers", "header_row": 1, "labels": ["SKU", "Name", "Price"]} in (
+        proposal.sheet_options
+    )

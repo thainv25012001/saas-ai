@@ -16,7 +16,9 @@ class GmailConnection(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
     )
 
     email: Mapped[str] = mapped_column(String(255), nullable=False)
-    refresh_token_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    #: `None` once disconnected: the credential is deleted, the row and its
+    #: supplier history are kept (migration 0020).
+    refresh_token_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
     history_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     watch_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

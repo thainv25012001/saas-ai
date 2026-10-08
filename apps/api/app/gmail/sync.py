@@ -327,7 +327,11 @@ async def run_gmail_message_reprocess(
             )
         )
         connection = connection_result.scalar_one_or_none()
-        if connection is None or connection.status != "connected":
+        if (
+            connection is None
+            or connection.status != "connected"
+            or connection.refresh_token_ciphertext is None
+        ):
             supplier_message.status = "failed"
             supplier_message.error_code = "gmail_connection_unavailable"
             supplier_message.processed_at = datetime.now(UTC)
@@ -441,7 +445,7 @@ async def _maintain_mailbox(
             )
         )
         connection = result.scalar_one_or_none()
-        if connection is None:
+        if connection is None or connection.refresh_token_ciphertext is None:
             return
         refresh_ciphertext = connection.refresh_token_ciphertext
         expires_at = connection.watch_expires_at
@@ -509,7 +513,11 @@ async def _sync_connection(
             )
         )
         connection = result.scalar_one_or_none()
-        if connection is None or connection.status != "connected":
+        if (
+            connection is None
+            or connection.status != "connected"
+            or connection.refresh_token_ciphertext is None
+        ):
             return
         cursor = connection.history_id
         last_sync = connection.last_history_sync_at or connection.created_at
@@ -890,7 +898,7 @@ async def _process_gmail_message(
                         if proposal_suggestion is not None
                         and sheet.name == proposal_suggestion.worksheet_name
                     ),
-                    inspection.sheets[0] if inspection.sheets else None,
+                    _first_sheet_with_headers(inspection),
                 )
                 target_header = (
                     proposal_suggestion.header_row
@@ -919,6 +927,7 @@ async def _process_gmail_message(
                         column_labels=labels or ["Unrecognized columns"],
                         source_message_id=supplier_message.id,
                         source_attachment_id=attachment.attachment_id,
+                        sheet_options=_sheet_options(inspection),
                     )
                     mapping_id = proposal_record.id
                 issue = WorkbookRowIssue(
@@ -1004,6 +1013,7 @@ async def _process_gmail_message(
                         or ["Unrecognized columns"],
                         source_message_id=supplier_message.id,
                         source_attachment_id=attachment.attachment_id,
+                        sheet_options=_sheet_options(inspection),
                     )
                     mapping_id = proposal_record.id
                 row_issues.append(
@@ -1098,7 +1108,7 @@ async def _record_mapping_review(
     attachment: GmailAttachment,
     inspection: Any,
 ) -> None:
-    sheet = inspection.sheets[0] if inspection.sheets else None
+    sheet = _first_sheet_with_headers(inspection)
     header_row = sheet.candidate_header_rows[0] if sheet and sheet.candidate_header_rows else None
     mapping_id = None
     issues = list(inspection.issues)
@@ -1116,6 +1126,7 @@ async def _record_mapping_review(
             column_labels=labels or ["Unrecognized columns"],
             source_message_id=message.id,
             source_attachment_id=attachment.attachment_id,
+            sheet_options=_sheet_options(inspection),
         )
         mapping_id = proposal.id
     issues.append(
@@ -1179,6 +1190,31 @@ async def _load_product_candidates(
         .limit(5000)
     )
     return list(result.scalars().all())
+
+
+def _first_sheet_with_headers(inspection: Any) -> Any | None:
+    """Where to put a proposal without a usable suggestion: the first sheet
+    that has a header-like row, not merely the first sheet -- a cover page
+    first would otherwise leave no proposal and no way forward."""
+    return next((sheet for sheet in inspection.sheets if sheet.candidate_header_rows), None)
+
+
+def _sheet_options(inspection: Any) -> list[dict[str, Any]]:
+    """Every header-row candidate in the workbook, labels only, for the owner
+    to choose from if the proposal picked the wrong sheet or row."""
+    return [
+        {
+            "worksheet_name": sheet.name,
+            "header_row": row,
+            "labels": [
+                label.strip()[:128]
+                for label in sheet.header_labels.get(row, [])
+                if isinstance(label, str) and label.strip()
+            ],
+        }
+        for sheet in inspection.sheets
+        for row in sheet.candidate_header_rows
+    ]
 
 
 def _attachment_identities(attachments: list[GmailAttachment]) -> list[dict[str, Any]]:

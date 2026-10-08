@@ -537,6 +537,7 @@ type SupplierMappingReview {
   headerRow: Int!
   columns: [SupplierMappingColumn!]!
   columnLabels: [String!]!
+  sheetOptions: [SupplierSheetOption!]!
   defaultCurrency: String
   defaultPurchaseUnit: String
   isConfirmed: Boolean!
@@ -612,6 +613,12 @@ type SupplierReportDetail {
   report: SupplierReport!
   attachments: [SupplierAttachment!]!
   quotes: [SupplierQuote!]!
+}
+
+type SupplierSheetOption {
+  worksheetName: String!
+  headerRow: Int!
+  labels: [String!]!
 }
 
 scalar UUID

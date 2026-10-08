@@ -9,9 +9,10 @@ from sqlalchemy import Table, delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import ConflictError, NotFoundError, ValidationError
+from app.core.errors import ConflictError, NotFoundError, PermissionDeniedError, ValidationError
 from app.core.ids import uuid7
 from app.core.tenancy import TenantContext
+from app.db.models import MembershipRole
 from app.db.models.gmail_connection import GmailConnection
 from app.db.models.supplier import Supplier, SupplierMapping
 from app.db.models.supplier_quote import SupplierMessage, SupplierQuote, SupplierReport
@@ -43,12 +44,59 @@ class QuoteUpsertResult:
     report: SupplierReport
 
 
+_MAX_SHEET_OPTIONS = 50
+
+
+def _clean_sheet_options(options: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Bounded `{worksheet_name, header_row, labels}` entries; labels only."""
+    cleaned: list[dict[str, Any]] = []
+    for option in options[:_MAX_SHEET_OPTIONS]:
+        name, row, labels = (
+            option.get("worksheet_name"),
+            option.get("header_row"),
+            option.get("labels"),
+        )
+        if (
+            not isinstance(name, str)
+            or not name
+            or len(name) > 128
+            or not isinstance(row, int)
+            or not 1 <= row <= 25_000
+            or not isinstance(labels, list)
+        ):
+            raise ValidationError("invalid workbook sheet option")
+        texts = [label.strip()[:128] for label in labels[:100] if isinstance(label, str)]
+        cleaned.append(
+            {"worksheet_name": name, "header_row": row, "labels": [t for t in texts if t]}
+        )
+    return cleaned
+
+
+def _option_labels(
+    proposal: SupplierMapping, worksheet_name: str, header_row: int
+) -> list[str] | None:
+    if (worksheet_name, header_row) == (proposal.worksheet_name, proposal.header_row):
+        return list(proposal.column_labels)
+    for option in proposal.sheet_options:
+        if (option.get("worksheet_name"), option.get("header_row")) == (worksheet_name, header_row):
+            return [label for label in option.get("labels", []) if isinstance(label, str)]
+    return None
+
+
 class SupplierQuoteService:
     def __init__(self, session: AsyncSession, tenant: TenantContext) -> None:
         self.session = session
         self.tenant = tenant
 
+    def _require_owner(self) -> None:
+        """Supplier configuration decides which senders are trusted and how
+        their files are read, so it is the owner's (spec section 3), like
+        connecting Gmail. Worker contexts never call these methods."""
+        if self.tenant.role is not MembershipRole.OWNER:
+            raise PermissionDeniedError("only the organization owner can configure suppliers")
+
     async def create_supplier(self, data: SupplierInput) -> Supplier:
+        self._require_owner()
         await self._assert_supplier_name_available(data.name)
         supplier = Supplier(
             organization_id=self.tenant.organization_id,
@@ -114,6 +162,7 @@ class SupplierQuoteService:
         *,
         mapping: WorkbookMapping,
     ) -> SupplierMapping:
+        self._require_owner()
         proposal = await self._get_mapping(mapping_id)
         if proposal.is_confirmed:
             raise ConflictError("supplier mapping is already confirmed")
@@ -122,20 +171,21 @@ class SupplierQuoteService:
         message = await self._get_message(proposal.source_message_id)
         if message.supplier_id not in {None, proposal.supplier_id}:
             raise NotFoundError("supplier message not found")
-        canonical_labels = {
-            label.strip().casefold(): label.strip() for label in proposal.column_labels
-        }
+        # The owner may keep the proposed sheet and row or move to any other
+        # candidate the workbook offered; labels are checked against that one.
+        labels = _option_labels(proposal, mapping.worksheet_name, mapping.header_row)
+        if labels is None:
+            raise ValidationError("choose one of the worksheet header rows found in this file")
+        canonical_labels = {label.strip().casefold(): label.strip() for label in labels}
         selected_labels = [label.strip().casefold() for label in mapping.columns.values()]
-        if (
-            mapping.worksheet_name != proposal.worksheet_name
-            or mapping.header_row != proposal.header_row
-            or len(set(selected_labels)) != len(selected_labels)
-            or any(label not in canonical_labels for label in selected_labels)
+        if len(set(selected_labels)) != len(selected_labels) or any(
+            label not in canonical_labels for label in selected_labels
         ):
             raise ValidationError("mapping must use the reviewed worksheet headers")
 
         proposal.worksheet_name = mapping.worksheet_name
         proposal.header_row = mapping.header_row
+        proposal.column_labels = list(labels)
         proposal.column_mapping = cast(
             dict[str, Any],
             {
@@ -154,6 +204,7 @@ class SupplierQuoteService:
         return proposal
 
     async def update_supplier(self, supplier_id: Any, data: SupplierInput) -> Supplier:
+        self._require_owner()
         result = await self.session.execute(
             select(Supplier).where(
                 Supplier.id == supplier_id,
@@ -226,6 +277,7 @@ class SupplierQuoteService:
         column_labels: list[str],
         source_message_id: Any,
         source_attachment_id: str,
+        sheet_options: list[dict[str, Any]] | None = None,
     ) -> SupplierMapping:
         """Persist a validated, unconfirmed label-only proposal for review."""
         supplier = await self._get_supplier(supplier_id)
@@ -255,6 +307,7 @@ class SupplierQuoteService:
         }
         if any(field not in allowed_fields for field in column_mapping):
             raise ValidationError("unsupported workbook mapping field")
+        options = _clean_sheet_options(sheet_options or [])
 
         current_version = await self.session.scalar(
             select(func.max(SupplierMapping.version)).where(
@@ -270,6 +323,7 @@ class SupplierQuoteService:
             header_row=header_row,
             column_mapping=column_mapping,
             column_labels=[label.strip()[:128] for label in column_labels],
+            sheet_options=options,
             source_message_id=message.id,
             source_attachment_id=source_attachment_id,
             default_currency=None,

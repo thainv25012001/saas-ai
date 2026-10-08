@@ -117,7 +117,7 @@ async def gmail_connection_status(
             select(GmailConnection).where(GmailConnection.organization_id == tenant.organization_id)
         )
         connection = result.scalar_one_or_none()
-        if connection is None:
+        if connection is None or connection.status == "disconnected":
             return GmailConnectionStatus(connected=False)
         return GmailConnectionStatus(
             connected=True,
@@ -310,8 +310,13 @@ async def gmail_oauth_callback(
         existing_email = existing.email if existing is not None else None
         previous_ciphertext = existing.refresh_token_ciphertext if existing is not None else None
         previous_refresh_token: str | None = None
-        if existing is not None and existing.email == mailbox_email:
+        if (
+            existing is not None
+            and existing.email == mailbox_email
+            and existing.refresh_token_ciphertext is not None
+        ):
             previous_refresh_token = decrypt_token(existing.refresh_token_ciphertext)
+        was_disconnected = existing is not None and existing.status == "disconnected"
 
     refresh_token = tokens.refresh_token or previous_refresh_token
     if not refresh_token:
@@ -345,7 +350,9 @@ async def gmail_oauth_callback(
             else:
                 connection.email = mailbox_email
                 connection.refresh_token_ciphertext = encrypt_token(refresh_token)
-                if existing_email != mailbox_email or not connection.history_id:
+                # Reconnecting starts from now, like a first connection:
+                # mail that arrived while disconnected is not backfilled.
+                if existing_email != mailbox_email or not connection.history_id or was_disconnected:
                     connection.history_id = watch.history_id
                 connection.watch_expires_at = watch.expiration
                 connection.status = "connected"
@@ -382,7 +389,11 @@ async def disconnect_gmail(
             return Response(status_code=status.HTTP_204_NO_CONTENT)
         connection_id = connection.id
         try:
-            refresh_token: str | None = decrypt_token(connection.refresh_token_ciphertext)
+            refresh_token: str | None = (
+                decrypt_token(connection.refresh_token_ciphertext)
+                if connection.refresh_token_ciphertext is not None
+                else None
+            )
         except (RuntimeError, ValueError):
             refresh_token = None
 
@@ -403,5 +414,10 @@ async def disconnect_gmail(
         )
         connection = result.scalar_one_or_none()
         if connection is not None:
-            await session.delete(connection)
+            # Delete the credential, keep the row: supplier messages, quotes
+            # and reports hang off it, and deleting it cascaded them away.
+            connection.status = "disconnected"
+            connection.refresh_token_ciphertext = None
+            connection.watch_expires_at = None
+            connection.last_error_code = None
     return Response(status_code=status.HTTP_204_NO_CONTENT)
