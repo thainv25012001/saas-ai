@@ -53,11 +53,11 @@
 - `WorkbookMapping` identifies a sheet, header row, source-column names, and explicit per-supplier defaults for currency and purchase unit.
 - `CanonicalQuoteRow` retains source sheet/row, supplier SKU, product name/specification, decimal unit price, currency, unit, MOQ, quantity tiers, lead time, validity, and extraction confidence.
 
-- [ ] **Step 1: Write failing unit tests** for inspection of a multi-sheet workbook, a non-first header row, and a five-row sample cap; also test parsing with mapped column synonyms, blank optional MOQ, and exact source row metadata.
-- [ ] **Step 2: Run the focused tests** with `cd apps/api && uv run pytest tests/unit/test_supplier_quote_workbooks.py -q`; confirm failure because the module and parser do not exist.
-- [ ] **Step 3: Implement the inspection and parser.** Load `.xlsx` bytes with `openpyxl` in read-only/data-only mode; inspection returns bounded labels/sample values for an in-memory LLM mapping suggestion, while parsing uses only a confirmed profile, parses price with `Decimal`, and produces row-level issues without failing unrelated valid rows.
-- [ ] **Step 4: Add failing-then-passing tests** for missing worksheets, invalid price, repeated headers, merged cells, missing cached formula value, an invalid ZIP/XLSX payload, a file over 20 MiB, and a worksheet over 25,000 rows. Unsupported or ambiguous workbook structure returns a bounded parse issue; formulas are never evaluated.
-- [ ] **Step 5: Run `cd apps/api && uv run pytest tests/unit/test_supplier_quote_workbooks.py -q`** and verify all focused cases pass.
+- [x] **Step 1: Write failing unit tests** for inspection of a multi-sheet workbook, a non-first header row, and a five-row sample cap; also test parsing with mapped column synonyms, blank optional MOQ, and exact source row metadata.
+- [x] **Step 2: Run the focused tests** with `cd apps/api && uv run pytest tests/unit/test_supplier_quote_workbooks.py -q`; confirm failure because the module and parser do not exist.
+- [x] **Step 3: Implement the inspection and parser.** Load `.xlsx` bytes with `openpyxl` in read-only/data-only mode; inspection returns bounded labels/sample values for an in-memory LLM mapping suggestion, while parsing uses only a confirmed profile, parses price with `Decimal`, and produces row-level issues without failing unrelated valid rows.
+- [x] **Step 4: Add failing-then-passing tests** for missing worksheets, invalid price, repeated headers, merged cells, missing cached formula value, an invalid ZIP/XLSX payload, a file over 20 MiB, and a worksheet over 25,000 rows. Unsupported or ambiguous workbook structure returns a bounded parse issue; formulas are never evaluated.
+- [x] **Step 5: Run `cd apps/api && uv run pytest tests/unit/test_supplier_quote_workbooks.py -q`** and verify all focused cases pass.
 
 ### Task 2: Supplier offer matching and deterministic comparison
 
@@ -70,11 +70,11 @@
 - Produces `compare_product_offers(offers, catalog_product, now) -> OfferComparison`; a sale price is usable only when `price_updated_at` exists and is no more than 90 days old.
 - Produces `match_catalog_product(quote, products, confirmed_supplier_sku_map) -> MatchResult`; exact catalogue SKU and confirmed supplier mappings take precedence over suggestions.
 
-- [ ] **Step 1: Write failing tests** for known sale price, missing sale price, missing quote price, currency mismatch, unit mismatch, and offers grouped by product rather than ranked across unrelated products.
-- [ ] **Step 2: Run `cd apps/api && uv run pytest tests/unit/test_supplier_quote_analysis.py -q`** and confirm the new comparison functions are missing.
-- [ ] **Step 3: Implement pure comparison functions.** Use `Decimal`; compute unit gross profit only for compatible units/currency with an available catalog price. Otherwise set profit to unknown and return a precise reason. When sale price is absent, rank only comparable purchase prices.
-- [ ] **Step 4: Add failing-then-passing tests** for zero/negative prices, ties, absent catalog price, prices older than 90 days, and quantity-tier offers where a common order quantity is not supplied. Do not infer a quantity tier; surface those cases as incomplete.
-- [ ] **Step 5: Run `cd apps/api && uv run pytest tests/unit/test_supplier_quote_analysis.py -q`** and confirm deterministic ranking.
+- [x] **Step 1: Write failing tests** for known sale price, missing sale price, missing quote price, currency mismatch, unit mismatch, and offers grouped by product rather than ranked across unrelated products.
+- [x] **Step 2: Run `cd apps/api && uv run pytest tests/unit/test_supplier_quote_analysis.py -q`** and confirm the new comparison functions are missing.
+- [x] **Step 3: Implement pure comparison functions.** Use `Decimal`; compute unit gross profit only for compatible units/currency with an available catalog price. Otherwise set profit to unknown and return a precise reason. When sale price is absent, rank only comparable purchase prices.
+- [x] **Step 4: Add failing-then-passing tests** for zero/negative prices, ties, absent catalog price, prices older than 90 days, and quantity-tier offers where a common order quantity is not supplied. Do not infer a quantity tier; surface those cases as incomplete.
+- [x] **Step 5: Run `cd apps/api && uv run pytest tests/unit/test_supplier_quote_analysis.py -q`** and confirm deterministic ranking.
 
 ### Task 3: Tenant-scoped persistence and Gmail event resolution
 
@@ -142,11 +142,11 @@
 - `GmailClient` uses `httpx` for OAuth exchange/refresh and Gmail REST calls: profile, watch/stop, history pages, full message metadata/body parts, and attachment bytes.
 - OAuth authorization is server-side, state is one-time and bound to the authenticated organization/user, scopes are limited to `gmail.readonly`, and access tokens are never sent to the browser.
 
-- [ ] **Step 1: Write failing unit tests** for token encryption round-trip, wrong-key/tamper rejection, OAuth state expiry/replay, exact read-only scope construction, and token refresh preserving a previously stored refresh token when Google omits a new one.
-- [ ] **Step 2: Run the three focused test files** and confirm the implementation is absent.
-- [ ] **Step 3: Add direct runtime dependencies `cryptography>=44`, `httpx>=0.27`, and `google-auth[requests]>=2`** to `apps/api/pyproject.toml`, then update `apps/api/uv.lock`. The existing `httpx` declaration is dev-only. Implement AES-GCM encryption with a configured 256-bit key; never fall back to plaintext if the key is missing.
-- [ ] **Step 4: Implement OAuth state/PKCE and Gmail client calls.** Validate callback state before token exchange, fetch the connected mailbox identity, persist refresh-token ciphertext, refresh access tokens server-side, and convert provider errors to bounded application errors.
-- [ ] **Step 5: Run the focused Gmail unit tests** with HTTP requests intercepted by `httpx.MockTransport`; assert scopes, endpoint paths, payloads, and no token/body values in raised errors.
+- [x] **Step 1: Write failing unit tests** for token encryption round-trip, wrong-key/tamper rejection, OAuth state expiry/replay, exact read-only scope construction, and token refresh preserving a previously stored refresh token when Google omits a new one.
+- [x] **Step 2: Run the three focused test files** and confirm the implementation is absent.
+- [x] **Step 3: Add direct runtime dependencies `cryptography>=44`, `httpx>=0.27`, and `google-auth[requests]>=2`** to `apps/api/pyproject.toml`, then update `apps/api/uv.lock`. The existing `httpx` declaration is dev-only. Implement AES-GCM encryption with a configured 256-bit key; never fall back to plaintext if the key is missing.
+- [x] **Step 4: Implement OAuth state/PKCE and Gmail client calls.** Validate callback state before token exchange, fetch the connected mailbox identity, persist refresh-token ciphertext, refresh access tokens server-side, and convert provider errors to bounded application errors.
+- [x] **Step 5: Run the focused Gmail unit tests** with HTTP requests intercepted by `httpx.MockTransport`; assert scopes, endpoint paths, payloads, and no token/body values in raised errors.
 
 ### Task 6: Pub/Sub webhook, mailbox sync, and queued XLSX processing
 
