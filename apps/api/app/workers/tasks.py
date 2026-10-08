@@ -303,7 +303,7 @@ async def run_evaluation_task(
 
 
 async def sync_gmail_mailbox_task(
-    _ctx: dict[str, Any],
+    ctx: dict[str, Any],
     *,
     mailbox_email: str,
     notification_history_id: str,
@@ -323,7 +323,7 @@ async def renew_gmail_watches_task(_ctx: dict[str, Any]) -> None:
 
 
 async def reprocess_supplier_message_task(
-    _ctx: dict[str, Any],
+    ctx: dict[str, Any],
     *,
     organization_id: str,
     supplier_message_id: str,
