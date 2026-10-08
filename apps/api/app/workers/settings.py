@@ -20,6 +20,7 @@ from app.workers.tasks import (
     import_products_task,
     ingest_document_task,
     renew_gmail_watches_task,
+    reprocess_supplier_message_task,
     run_evaluation_task,
     sync_gmail_mailbox_task,
     title_conversation_task,
@@ -49,6 +50,7 @@ class WorkerSettings:
         import_products_task,
         sync_gmail_mailbox_task,
         renew_gmail_watches_task,
+        reprocess_supplier_message_task,
         # Wrapped, for its own timeout: an evaluation runs its cases one
         # after another (docs/PHASE-6.md §5), so up to 200 real provider
         # turns plus judge calls cannot fit `job_timeout` below. `func`

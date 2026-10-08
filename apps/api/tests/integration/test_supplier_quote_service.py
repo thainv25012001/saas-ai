@@ -153,6 +153,22 @@ async def test_quote_upsert_is_idempotent_and_report_is_retrievable(tenant_a):
     assert [row.id for row in quote_rows] == [first.quotes[0].id]
 
 
+async def test_reprocessing_drops_rows_missing_from_the_new_parse(tenant_a):
+    second_row = _quote().model_copy(update={"source_row_number": 3, "supplier_sku": "SUP-2"})
+    async with tenant_session(tenant_a) as session:
+        service = SupplierQuoteService(session, tenant_a)
+        supplier, message_id = await _setup(service)
+        first = await service.upsert_quote_rows(
+            supplier.id, message_id, "attachment-1", [_quote(), second_row]
+        )
+        second = await service.upsert_quote_rows(
+            supplier.id, message_id, "attachment-1", [_quote()]
+        )
+
+    assert len(first.quotes) == 2
+    assert [row.id for row in second.quotes] == [first.quotes[0].id]
+
+
 async def test_failed_rows_are_recorded_without_discarding_valid_rows(tenant_a):
     issue = WorkbookRowIssue(
         worksheet_name="Offers",

@@ -32,6 +32,8 @@ from app.products.service import ProductService
 from app.prompts import schemas as prompt_schemas
 from app.prompts.defaults import DEFAULT_SALES_SYSTEM_PROMPT
 from app.prompts.service import PromptService
+from app.supplier_quotes import schemas as supplier_quote_schemas
+from app.supplier_quotes.service import SupplierQuoteService
 from app.tools.runtime import resolve_enabled_tool_names
 from app.widget import schemas as widget_schemas
 from app.widget.service import WidgetSettingsService
@@ -123,6 +125,13 @@ def _product_imports(info: Info) -> ProductImportService:
     return ProductImportService(info.context.session, info.context.tenant)
 
 
+def _supplier_quotes(info: Info) -> SupplierQuoteService:
+    _require_tenant(info)
+    assert info.context.tenant is not None
+    assert info.context.session is not None
+    return SupplierQuoteService(info.context.session, info.context.tenant)
+
+
 def _evaluations(info: Info) -> EvaluationService:
     _require_tenant(info)
     assert info.context.tenant is not None
@@ -197,6 +206,44 @@ class Query:
         if organization is None:
             raise AuthenticationError("organization no longer exists")
         return gql.Organization.from_model(organization)
+
+    @strawberry.field
+    async def gmail_connection(self, info: Info) -> gql.GmailConnection:
+        return gql.GmailConnection.from_model(await _supplier_quotes(info).get_gmail_connection())
+
+    @strawberry.field
+    async def suppliers(self, info: Info) -> list[gql.Supplier]:
+        rows = await _supplier_quotes(info).list_suppliers()
+        return [gql.Supplier.from_model(row) for row in rows]
+
+    @strawberry.field
+    async def pending_supplier_messages(
+        self, info: Info, limit: int = 50, offset: int = 0
+    ) -> list[gql.SupplierMessageReview]:
+        rows = await _supplier_quotes(info).list_pending_messages(limit=limit, offset=offset)
+        return [gql.SupplierMessageReview.from_model(row) for row in rows]
+
+    @strawberry.field
+    async def pending_supplier_mappings(
+        self, info: Info, limit: int = 50, offset: int = 0
+    ) -> list[gql.SupplierMappingReview]:
+        rows = await _supplier_quotes(info).list_pending_mappings(limit=limit, offset=offset)
+        return [gql.SupplierMappingReview.from_model(row) for row in rows]
+
+    @strawberry.field
+    async def supplier_reports(
+        self, info: Info, limit: int = 50, offset: int = 0
+    ) -> list[gql.SupplierReport]:
+        rows = await _supplier_quotes(info).list_reports(limit=limit, offset=offset)
+        return [gql.SupplierReport.from_model(row) for row in rows]
+
+    @strawberry.field
+    async def supplier_report(self, info: Info, id: uuid.UUID) -> gql.SupplierReportDetail:
+        report, quotes = await _supplier_quotes(info).get_report(id)
+        return gql.SupplierReportDetail(
+            report=gql.SupplierReport.from_model(report),
+            quotes=[gql.SupplierQuote.from_model(quote) for quote in quotes],
+        )
 
     @strawberry.field
     async def agents(self, info: Info) -> list[gql.Agent]:
@@ -508,6 +555,62 @@ class Query:
 
 @strawberry.type
 class Mutation:
+    @strawberry.mutation
+    async def create_supplier(self, info: Info, input: gql.SupplierInput) -> gql.Supplier:
+        payload = _build(
+            supplier_quote_schemas.SupplierInput,
+            name=input.name,
+            sender_emails=input.sender_emails,
+            sender_domains=input.sender_domains,
+            is_active=input.is_active,
+        )
+        supplier = await _supplier_quotes(info).create_supplier(payload)
+        return gql.Supplier.from_model(supplier)
+
+    @strawberry.mutation
+    async def update_supplier(
+        self,
+        info: Info,
+        id: uuid.UUID,
+        input: gql.SupplierInput,
+    ) -> gql.Supplier:
+        payload = _build(
+            supplier_quote_schemas.SupplierInput,
+            name=input.name,
+            sender_emails=input.sender_emails,
+            sender_domains=input.sender_domains,
+            is_active=input.is_active,
+        )
+        supplier = await _supplier_quotes(info).update_supplier(id, payload)
+        return gql.Supplier.from_model(supplier)
+
+    @strawberry.mutation
+    async def confirm_supplier_mapping(
+        self,
+        info: Info,
+        id: uuid.UUID,
+        input: gql.ConfirmSupplierMappingInput,
+    ) -> gql.SupplierMappingReview:
+        columns: dict[str, str] = {}
+        for column in input.columns:
+            field = column.field.value
+            if field in columns:
+                raise AppValidationError("a mapping field can be selected only once")
+            columns[field] = column.label
+        mapping_payload = _build(
+            supplier_quote_schemas.WorkbookMapping,
+            worksheet_name=input.worksheet_name,
+            header_row=input.header_row,
+            columns=columns,
+            default_currency=input.default_currency,
+            default_purchase_unit=input.default_purchase_unit,
+        )
+        mapping = await _supplier_quotes(info).confirm_mapping(
+            id,
+            mapping=mapping_payload,
+        )
+        return gql.SupplierMappingReview.from_model(mapping)
+
     @strawberry.mutation
     async def create_agent(self, info: Info, input: gql.CreateAgentInput) -> gql.Agent:
         agent = await _agents(info).create_agent(

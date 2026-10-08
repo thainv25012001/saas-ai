@@ -24,7 +24,11 @@ from app.core.tenancy import TenantContext, tenant_session
 from app.db.models import MessageRole
 from app.documents.service import DocumentService
 from app.evaluations.runner import run_evaluation
-from app.gmail.sync import run_gmail_maintenance, run_gmail_sync
+from app.gmail.sync import (
+    run_gmail_maintenance,
+    run_gmail_message_reprocess,
+    run_gmail_sync,
+)
 from app.llm.errors import LLMError
 from app.llm.registry import get_provider
 from app.llm.types import CompletionRequest
@@ -316,3 +320,18 @@ async def sync_gmail_mailbox_task(
 async def renew_gmail_watches_task(_ctx: dict[str, Any]) -> None:
     """Daily watch renewal and bounded Gmail history reconciliation."""
     await run_gmail_maintenance()
+
+
+async def reprocess_supplier_message_task(
+    _ctx: dict[str, Any],
+    *,
+    organization_id: str,
+    supplier_message_id: str,
+    mapping_id: str,
+) -> None:
+    """Re-fetch a reviewed supplier email after its workbook mapping is confirmed."""
+    await run_gmail_message_reprocess(
+        organization_id=organization_id,
+        supplier_message_id=supplier_message_id,
+        mapping_id=mapping_id,
+    )

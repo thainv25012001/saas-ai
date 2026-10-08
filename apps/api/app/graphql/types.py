@@ -2,9 +2,11 @@ import enum
 import json
 import uuid
 from datetime import datetime
-from typing import Any
+from decimal import Decimal
+from typing import Any, cast
 
 import strawberry
+from strawberry.scalars import JSON
 
 from app.api_keys.service import CreatedApiKey as CreatedApiKeyResult
 from app.core.errors import AuthenticationError
@@ -18,6 +20,7 @@ from app.db.models import EvalCase as EvalCaseModel
 from app.db.models import EvalDataset as EvalDatasetModel
 from app.db.models import EvalResult as EvalResultModel
 from app.db.models import EvalRun as EvalRunModel
+from app.db.models import GmailConnection as GmailConnectionModel
 from app.db.models import Lead as LeadModel
 from app.db.models import MessageCitation as MessageCitationModel
 from app.db.models import Organization as OrganizationModel
@@ -26,6 +29,11 @@ from app.db.models import ProductImport as ProductImportModel
 from app.db.models import Prompt as PromptModel
 from app.db.models import PromptVersion as PromptVersionModel
 from app.db.models import Tool as ToolModel
+from app.db.models.supplier import Supplier as SupplierModel
+from app.db.models.supplier import SupplierMapping as SupplierMappingModel
+from app.db.models.supplier_quote import SupplierMessage as SupplierMessageModel
+from app.db.models.supplier_quote import SupplierQuote as SupplierQuoteModel
+from app.db.models.supplier_quote import SupplierReport as SupplierReportModel
 from app.graphql.context import Context
 from app.widget.service import WidgetView
 
@@ -1239,3 +1247,225 @@ class UpdateWidgetSettingsInput:
     position: WidgetPosition
     title: str | None = None
     daily_message_cap: int
+
+
+@strawberry.enum
+class SupplierQuoteField(enum.Enum):
+    SUPPLIER_SKU = "supplier_sku"
+    PRODUCT_NAME = "product_name"
+    SPECIFICATION = "specification"
+    UNIT_PRICE = "unit_price"
+    CURRENCY = "currency"
+    UNIT = "unit"
+    MINIMUM_ORDER_QUANTITY = "minimum_order_quantity"
+    QUANTITY_TIERS = "quantity_tiers"
+    LEAD_TIME = "lead_time"
+    VALID_UNTIL = "valid_until"
+
+
+@strawberry.type
+class GmailConnection:
+    connected: bool
+    email: str | None = None
+    status: str | None = None
+    watch_expires_at: datetime | None = None
+    last_history_sync_at: datetime | None = None
+    last_error_code: str | None = None
+
+    @classmethod
+    def from_model(cls, model: GmailConnectionModel | None) -> "GmailConnection":
+        if model is None:
+            return cls(connected=False)
+        return cls(
+            connected=True,
+            email=model.email,
+            status=model.status,
+            watch_expires_at=model.watch_expires_at,
+            last_history_sync_at=model.last_history_sync_at,
+            last_error_code=model.last_error_code,
+        )
+
+
+@strawberry.type
+class Supplier:
+    id: uuid.UUID
+    name: str
+    sender_emails: list[str]
+    sender_domains: list[str]
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_model(cls, model: SupplierModel) -> "Supplier":
+        return cls(
+            id=model.id,
+            name=model.name,
+            sender_emails=list(model.sender_emails),
+            sender_domains=list(model.sender_domains),
+            is_active=model.is_active,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
+
+@strawberry.input
+class SupplierInput:
+    name: str
+    sender_emails: list[str] = strawberry.field(default_factory=list)
+    sender_domains: list[str] = strawberry.field(default_factory=list)
+    is_active: bool = True
+
+
+@strawberry.type
+class SupplierMappingColumn:
+    field: SupplierQuoteField
+    label: str
+
+
+@strawberry.input
+class SupplierMappingColumnInput:
+    field: SupplierQuoteField
+    label: str
+
+
+@strawberry.input
+class ConfirmSupplierMappingInput:
+    worksheet_name: str
+    header_row: int
+    columns: list[SupplierMappingColumnInput]
+    default_currency: str | None = None
+    default_purchase_unit: str | None = None
+
+
+@strawberry.type
+class SupplierMappingReview:
+    id: uuid.UUID
+    supplier_id: uuid.UUID
+    source_message_id: uuid.UUID | None
+    version: int
+    worksheet_name: str
+    header_row: int
+    columns: list[SupplierMappingColumn]
+    column_labels: list[str]
+    default_currency: str | None
+    default_purchase_unit: str | None
+    is_confirmed: bool
+    created_at: datetime
+
+    @classmethod
+    def from_model(cls, model: SupplierMappingModel) -> "SupplierMappingReview":
+        columns = [
+            SupplierMappingColumn(field=SupplierQuoteField(key), label=value)
+            for key, value in model.column_mapping.items()
+            if key in SupplierQuoteField._value2member_map_ and isinstance(value, str)
+        ]
+        return cls(
+            id=model.id,
+            supplier_id=model.supplier_id,
+            source_message_id=model.source_message_id,
+            version=model.version,
+            worksheet_name=model.worksheet_name,
+            header_row=model.header_row,
+            columns=columns,
+            column_labels=list(model.column_labels),
+            default_currency=model.default_currency,
+            default_purchase_unit=model.default_purchase_unit,
+            is_confirmed=model.is_confirmed,
+            created_at=model.created_at,
+        )
+
+
+@strawberry.type
+class SupplierMessageReview:
+    id: uuid.UUID
+    supplier_id: uuid.UUID | None
+    sender_email: str
+    received_at: datetime | None
+    status: str
+    classification: str | None
+    classification_confidence: float | None
+    error_code: str | None
+    attachment_count: int
+
+    @classmethod
+    def from_model(cls, model: SupplierMessageModel) -> "SupplierMessageReview":
+        return cls(
+            id=model.id,
+            supplier_id=model.supplier_id,
+            sender_email=model.sender_email,
+            received_at=model.received_at,
+            status=model.status,
+            classification=model.classification,
+            classification_confidence=model.classification_confidence,
+            error_code=model.error_code,
+            attachment_count=len(model.attachment_ids),
+        )
+
+
+@strawberry.type
+class SupplierReport:
+    id: uuid.UUID
+    supplier_message_id: uuid.UUID
+    profit_status: str
+    best_profit: Decimal | None
+    best_margin_percent: Decimal | None
+    summary_json: JSON
+    created_at: datetime
+
+    @classmethod
+    def from_model(cls, model: SupplierReportModel) -> "SupplierReport":
+        return cls(
+            id=model.id,
+            supplier_message_id=model.supplier_message_id,
+            profit_status=model.profit_status,
+            best_profit=model.best_profit,
+            best_margin_percent=model.best_margin_percent,
+            summary_json=cast(JSON, model.summary_json),
+            created_at=model.created_at,
+        )
+
+
+@strawberry.type
+class SupplierQuote:
+    id: uuid.UUID
+    supplier_id: uuid.UUID
+    product_id: uuid.UUID | None
+    supplier_sku: str | None
+    product_name: str | None
+    specification: str | None
+    unit_price: Decimal | None
+    currency: str | None
+    purchase_unit: str | None
+    profit_status: str
+    unit_gross_profit: Decimal | None
+    margin_percent: Decimal | None
+    purchase_price_rank: int | None
+    ranking_basis: str
+    comparability_reasons: list[str]
+
+    @classmethod
+    def from_model(cls, model: SupplierQuoteModel) -> "SupplierQuote":
+        return cls(
+            id=model.id,
+            supplier_id=model.supplier_id,
+            product_id=model.product_id,
+            supplier_sku=model.supplier_sku,
+            product_name=model.product_name,
+            specification=model.specification,
+            unit_price=model.unit_price,
+            currency=model.currency,
+            purchase_unit=model.purchase_unit,
+            profit_status=model.profit_status,
+            unit_gross_profit=model.unit_gross_profit,
+            margin_percent=model.margin_percent,
+            purchase_price_rank=model.purchase_price_rank,
+            ranking_basis=model.ranking_basis,
+            comparability_reasons=list(model.comparability_reasons),
+        )
+
+
+@strawberry.type
+class SupplierReportDetail:
+    report: SupplierReport
+    quotes: list[SupplierQuote]

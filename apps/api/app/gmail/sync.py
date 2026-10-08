@@ -24,6 +24,7 @@ from app.db.models import (
     SupplierQuote,
     SupplierReport,
 )
+from app.db.models.supplier import SupplierMapping
 from app.gmail.client import GmailAPIError, GmailClient
 from app.gmail.oauth import GmailOAuthClient
 from app.gmail.token_crypto import decrypt_token, encrypt_token
@@ -101,10 +102,9 @@ async def fetch_history_batch(
                 if not isinstance(record, dict):
                     continue
                 record_cursor = record.get("id")
-                if (
-                    isinstance(record_cursor, str)
-                    and _history_id_value(record_cursor) >= _history_id_value(history_cursor)
-                ):
+                if isinstance(record_cursor, str) and _history_id_value(
+                    record_cursor
+                ) >= _history_id_value(history_cursor):
                     history_cursor = record_cursor
                 added = record.get("messagesAdded", [])
                 if not isinstance(added, list):
@@ -230,15 +230,10 @@ async def run_gmail_sync(
     normalized_email = mailbox_email.strip().casefold()
     async with untenanted_session() as session:
         result = await session.execute(
-            text(
-                "SELECT organization_id, connection_id "
-                "FROM resolve_gmail_mailboxes(:email)"
-            ),
+            text("SELECT organization_id, connection_id FROM resolve_gmail_mailboxes(:email)"),
             {"email": normalized_email},
         )
-        resolved = [
-            (uuid.UUID(str(row[0])), uuid.UUID(str(row[1]))) for row in result.all()
-        ]
+        resolved = [(uuid.UUID(str(row[0])), uuid.UUID(str(row[1]))) for row in result.all()]
 
     for organization_id, connection_id in resolved:
         lock = get_redis().lock(
@@ -260,6 +255,111 @@ async def run_gmail_sync(
                 await lock.release()
             except LockError:
                 pass
+
+
+async def run_gmail_message_reprocess(
+    *,
+    organization_id: str,
+    supplier_message_id: str,
+    mapping_id: str,
+) -> None:
+    """Re-fetch one reviewed Gmail message after its layout is confirmed."""
+    try:
+        org_id = uuid.UUID(organization_id)
+        message_id = uuid.UUID(supplier_message_id)
+        confirmed_mapping_id = uuid.UUID(mapping_id)
+    except ValueError as exc:
+        raise GmailSyncError("supplier message reprocess request is invalid") from exc
+    tenant = _worker_tenant(org_id, f"gmail-reprocess:{message_id}")
+    async with tenant_session(tenant) as session:
+        message_result = await session.execute(
+            select(SupplierMessage).where(
+                SupplierMessage.id == message_id,
+                SupplierMessage.organization_id == org_id,
+            )
+        )
+        supplier_message = message_result.scalar_one_or_none()
+        mapping_result = await session.execute(
+            select(SupplierMapping).where(
+                SupplierMapping.id == confirmed_mapping_id,
+                SupplierMapping.organization_id == org_id,
+                SupplierMapping.is_confirmed.is_(True),
+                SupplierMapping.source_message_id == message_id,
+            )
+        )
+        mapping = mapping_result.scalar_one_or_none()
+        if supplier_message is None or mapping is None:
+            return
+        connection_result = await session.execute(
+            select(GmailConnection).where(
+                GmailConnection.id == supplier_message.gmail_connection_id,
+                GmailConnection.organization_id == org_id,
+            )
+        )
+        connection = connection_result.scalar_one_or_none()
+        if connection is None or connection.status != "connected":
+            supplier_message.status = "failed"
+            supplier_message.error_code = "gmail_connection_unavailable"
+            supplier_message.processed_at = datetime.now(UTC)
+            return
+        connection_id = connection.id
+        mailbox_email = connection.email
+        refresh_ciphertext = connection.refresh_token_ciphertext
+        history_id = supplier_message.history_id or connection.history_id or "0"
+        gmail_message_id = supplier_message.gmail_message_id
+
+    lock = get_redis().lock(
+        f"gmail:sync:{connection_id}",
+        timeout=_MAILBOX_LOCK_TTL_SECONDS,
+        blocking_timeout=0,
+    )
+    if not await lock.acquire(blocking=False):
+        raise GmailSyncError("Gmail mailbox is already being synchronized")
+    try:
+        try:
+            refresh_token = decrypt_token(refresh_ciphertext)
+            tokens = await GmailOAuthClient().refresh_access_token(refresh_token)
+        except (RuntimeError, ValueError):
+            await _mark_connection_error(tenant, connection_id, "gmail_refresh_failed")
+            return
+        if tokens.refresh_token and tokens.refresh_token != refresh_token:
+            async with tenant_session(tenant) as session:
+                result = await session.execute(
+                    select(GmailConnection).where(
+                        GmailConnection.id == connection_id,
+                        GmailConnection.organization_id == org_id,
+                    )
+                )
+                connection = result.scalar_one_or_none()
+                if connection is not None:
+                    connection.refresh_token_ciphertext = encrypt_token(tokens.refresh_token)
+        gmail = GmailClient()
+        message = await fetch_message_if_available(gmail, tokens.access_token, gmail_message_id)
+        if message is None:
+            async with tenant_session(tenant) as session:
+                service = SupplierQuoteService(session, tenant)
+                await service.record_processing_status(
+                    message_id,
+                    status="review_required",
+                    error_code="gmail_message_unavailable",
+                )
+            return
+        await _process_gmail_message(
+            tenant=tenant,
+            connection_id=connection_id,
+            mailbox_email=mailbox_email,
+            history_id=history_id,
+            message_id=gmail_message_id,
+            message=message,
+            gmail=gmail,
+            access_token=tokens.access_token,
+            force_reprocess=True,
+        )
+    finally:
+        try:
+            await lock.release()
+        except LockError:
+            pass
 
 
 async def run_gmail_maintenance() -> None:
@@ -412,9 +512,7 @@ async def _sync_connection(
 
     for message_id in message_ids:
         try:
-            message = await fetch_message_if_available(
-                gmail, tokens.access_token, message_id
-            )
+            message = await fetch_message_if_available(gmail, tokens.access_token, message_id)
             if message is None:
                 continue
             if not _is_inbox_message(message):
@@ -557,6 +655,7 @@ async def _process_gmail_message(
     message: dict[str, Any],
     gmail: GmailClient,
     access_token: str,
+    force_reprocess: bool = False,
 ) -> None:
     sender_email, subject, snippet, received_at = _message_metadata(message)
     attachments = extract_xlsx_attachments(message)
@@ -574,6 +673,7 @@ async def _process_gmail_message(
             sender_email=sender_email,
             received_at=received_at,
             attachment_ids=persisted_attachment_ids,
+            force_reprocess=force_reprocess,
         )
         if not should_process:
             return
@@ -638,16 +738,14 @@ async def _process_gmail_message(
             if mapping is None:
                 proposal_result = await suggest_mapping(inspection)
                 proposal_suggestion = proposal_result.suggestion
-                target_sheet = (
-                    next(
-                        (
-                            sheet
-                            for sheet in inspection.sheets
-                            if proposal_suggestion is not None
-                            and sheet.name == proposal_suggestion.worksheet_name
-                        ),
-                        inspection.sheets[0] if inspection.sheets else None,
-                    )
+                target_sheet = next(
+                    (
+                        sheet
+                        for sheet in inspection.sheets
+                        if proposal_suggestion is not None
+                        and sheet.name == proposal_suggestion.worksheet_name
+                    ),
+                    inspection.sheets[0] if inspection.sheets else None,
                 )
                 target_header = (
                     proposal_suggestion.header_row
@@ -669,10 +767,7 @@ async def _process_gmail_message(
                         worksheet_name=target_sheet.name,
                         header_row=target_header,
                         column_mapping=(
-                            {
-                                field: label
-                                for field, label in proposal_suggestion.columns.items()
-                            }
+                            {field: label for field, label in proposal_suggestion.columns.items()}
                             if proposal_suggestion is not None
                             else {}
                         ),
@@ -727,7 +822,8 @@ async def _process_gmail_message(
 
             parsed = parse_supplier_workbook(workbook_bytes, workbook_mapping)
             structural_issue = any(
-                issue.code in {
+                issue.code
+                in {
                     "worksheet_not_found",
                     "header_row_not_found",
                     "column_not_found",
@@ -751,8 +847,7 @@ async def _process_gmail_message(
                         worksheet_name=proposal_suggestion.worksheet_name,
                         header_row=proposal_suggestion.header_row,
                         column_mapping={
-                            field: label
-                            for field, label in proposal_suggestion.columns.items()
+                            field: label for field, label in proposal_suggestion.columns.items()
                         },
                         column_labels=[
                             label.strip()[:128]
@@ -806,9 +901,7 @@ async def _process_gmail_message(
                 row_issues=row_issues,
             )
             for quote in upsert.quotes:
-                stored_match = match_results.get(
-                    (quote.worksheet_name, quote.source_row_number)
-                )
+                stored_match = match_results.get((quote.worksheet_name, quote.source_row_number))
                 if stored_match is None:
                     continue
                 quote.match_status = stored_match.status

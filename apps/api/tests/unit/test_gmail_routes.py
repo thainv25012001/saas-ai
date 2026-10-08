@@ -231,14 +231,16 @@ async def test_valid_callback_saves_only_encrypted_refresh_token(
     monkeypatch.setattr(GmailClient, "watch", watch)
 
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=_test_app(
-            TenantContext(
-                organization_id=organization_id,
-                user_id=user_id,
-                role=MembershipRole.OWNER,
-                request_id="test",
+        transport=httpx.ASGITransport(
+            app=_test_app(
+                TenantContext(
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    role=MembershipRole.OWNER,
+                    request_id="test",
+                )
             )
-        )),
+        ),
         base_url="http://test",
         follow_redirects=False,
     ) as client:
@@ -254,3 +256,64 @@ async def test_valid_callback_saves_only_encrypted_refresh_token(
     assert saved.email == "supplierinbox@example.com"
     assert saved.refresh_token_ciphertext != "secret-refresh"
     assert decrypt_token(saved.refresh_token_ciphertext) == "secret-refresh"
+
+
+async def test_supplier_reprocess_is_enqueued_only_after_tenant_transaction_commits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api import gmail as gmail_api
+
+    organization_id, message_id, supplier_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    mapping_id, connection_id = uuid.uuid4(), uuid.uuid4()
+    committed = False
+    queued: list[tuple[str, str, str]] = []
+
+    class _Result:
+        def scalar_one_or_none(self) -> object:
+            return type(
+                "MessageRow",
+                (),
+                {
+                    "id": message_id,
+                    "supplier_id": supplier_id,
+                    "gmail_connection_id": connection_id,
+                },
+            )()
+
+    class _Session:
+        async def execute(self, _statement: object) -> _Result:
+            return _Result()
+
+        async def scalar(self, _statement: object) -> object:
+            if not hasattr(self, "mapping_seen"):
+                self.mapping_seen = True
+                return mapping_id
+            return type("ConnectionRow", (), {"status": "connected"})()
+
+    @asynccontextmanager
+    async def fake_session(_tenant: TenantContext):
+        nonlocal committed
+        yield _Session()
+        committed = True
+
+    async def enqueue(org_id: str, source_message_id: str, confirmed_mapping_id: str) -> None:
+        assert committed is True
+        queued.append((org_id, source_message_id, confirmed_mapping_id))
+
+    monkeypatch.setattr(gmail_api, "tenant_session", fake_session)
+    monkeypatch.setattr(gmail_api, "enqueue_supplier_message_reprocess", enqueue)
+    tenant = TenantContext(
+        organization_id=organization_id,
+        user_id=uuid.uuid4(),
+        role=MembershipRole.OWNER,
+        request_id="test",
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_test_app(tenant)), base_url="http://test"
+    ) as client:
+        response = await client.post(f"/api/v1/gmail/supplier-messages/{message_id}/reprocess")
+
+    assert response.status_code == 202, response.text
+    assert response.json() == {"status": "queued"}
+    assert queued == [(str(organization_id), str(message_id), str(mapping_id))]

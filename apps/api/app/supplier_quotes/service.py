@@ -5,19 +5,21 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import Table, func, select
+from sqlalchemy import Table, delete, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.core.ids import uuid7
 from app.core.tenancy import TenantContext
+from app.db.models.gmail_connection import GmailConnection
 from app.db.models.supplier import Supplier, SupplierMapping
 from app.db.models.supplier_quote import SupplierMessage, SupplierQuote, SupplierReport
 from app.supplier_quotes.schemas import (
     CanonicalQuoteRow,
     SaveSupplierMappingInput,
     SupplierInput,
+    WorkbookMapping,
     WorkbookRowIssue,
 )
 
@@ -66,6 +68,90 @@ class SupplierQuoteService:
         )
         return list(result.scalars().all())
 
+    async def get_gmail_connection(self) -> GmailConnection | None:
+        result = await self.session.execute(
+            select(GmailConnection).where(
+                GmailConnection.organization_id == self.tenant.organization_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def list_pending_messages(
+        self, *, limit: int = 50, offset: int = 0
+    ) -> list[SupplierMessage]:
+        result = await self.session.execute(
+            select(SupplierMessage)
+            .where(
+                SupplierMessage.organization_id == self.tenant.organization_id,
+                SupplierMessage.status.in_(["review_required", "failed"]),
+            )
+            .order_by(SupplierMessage.received_at.desc(), SupplierMessage.id.desc())
+            .limit(min(max(limit, 1), _MAX_LIST_LIMIT))
+            .offset(max(offset, 0))
+        )
+        return list(result.scalars().all())
+
+    async def list_pending_mappings(
+        self, *, limit: int = 50, offset: int = 0
+    ) -> list[SupplierMapping]:
+        result = await self.session.execute(
+            select(SupplierMapping)
+            .where(
+                SupplierMapping.organization_id == self.tenant.organization_id,
+                SupplierMapping.is_confirmed.is_(False),
+                SupplierMapping.source_message_id.is_not(None),
+            )
+            .order_by(SupplierMapping.created_at.desc(), SupplierMapping.id.desc())
+            .limit(min(max(limit, 1), _MAX_LIST_LIMIT))
+            .offset(max(offset, 0))
+        )
+        return list(result.scalars().all())
+
+    async def confirm_mapping(
+        self,
+        mapping_id: Any,
+        *,
+        mapping: WorkbookMapping,
+    ) -> SupplierMapping:
+        proposal = await self._get_mapping(mapping_id)
+        if proposal.is_confirmed:
+            raise ConflictError("supplier mapping is already confirmed")
+        if proposal.source_message_id is None or proposal.source_attachment_id is None:
+            raise ValidationError("only a mapping proposal from a supplier email can be confirmed")
+        message = await self._get_message(proposal.source_message_id)
+        if message.supplier_id not in {None, proposal.supplier_id}:
+            raise NotFoundError("supplier message not found")
+        canonical_labels = {
+            label.strip().casefold(): label.strip() for label in proposal.column_labels
+        }
+        selected_labels = [label.strip().casefold() for label in mapping.columns.values()]
+        if (
+            mapping.worksheet_name != proposal.worksheet_name
+            or mapping.header_row != proposal.header_row
+            or len(set(selected_labels)) != len(selected_labels)
+            or any(label not in canonical_labels for label in selected_labels)
+        ):
+            raise ValidationError("mapping must use the reviewed worksheet headers")
+
+        proposal.worksheet_name = mapping.worksheet_name
+        proposal.header_row = mapping.header_row
+        proposal.column_mapping = cast(
+            dict[str, Any],
+            {
+                field: canonical_labels[label.strip().casefold()]
+                for field, label in mapping.columns.items()
+            },
+        )
+        proposal.default_currency = mapping.default_currency
+        proposal.default_purchase_unit = mapping.default_purchase_unit
+        proposal.is_confirmed = True
+        message.supplier_id = proposal.supplier_id
+        message.status = "pending"
+        message.error_code = None
+        message.processed_at = None
+        await self.session.flush()
+        return proposal
+
     async def update_supplier(self, supplier_id: Any, data: SupplierInput) -> Supplier:
         result = await self.session.execute(
             select(Supplier).where(
@@ -82,6 +168,9 @@ class SupplierQuoteService:
         supplier.sender_domains = data.sender_domains
         supplier.is_active = data.is_active
         await self.session.flush()
+        # `updated_at` is server-generated; reload it so callers outside the
+        # async context (GraphQL serialization) never trigger a lazy load.
+        await self.session.refresh(supplier)
         return supplier
 
     async def save_mapping(
@@ -217,6 +306,7 @@ class SupplierQuoteService:
         sender_email: str,
         received_at: datetime | None,
         attachment_ids: list[dict[str, Any]],
+        force_reprocess: bool = False,
     ) -> tuple[SupplierMessage, bool]:
         result = await self.session.execute(
             select(SupplierMessage).where(
@@ -227,11 +317,15 @@ class SupplierQuoteService:
         )
         message = result.scalar_one_or_none()
         if message is not None:
-            should_process = message.status not in {
+            should_process = force_reprocess or message.status not in {
                 "ignored",
                 "review_required",
                 "processed",
             }
+            if force_reprocess:
+                message.status = "processing"
+                message.error_code = None
+                message.processed_at = None
             return message, should_process
         message = SupplierMessage(
             organization_id=self.tenant.organization_id,
@@ -290,6 +384,22 @@ class SupplierQuoteService:
             if mapping.supplier_id != supplier.id:
                 raise NotFoundError("supplier mapping not found")
         message.supplier_id = supplier.id
+
+        # Reprocessing after a confirmed layout may produce fewer rows. Drop
+        # only the rows absent from this parse, so reports cannot retain stale
+        # offers while surviving rows keep their identity.
+        stale = delete(SupplierQuote).where(
+            SupplierQuote.organization_id == self.tenant.organization_id,
+            SupplierQuote.supplier_message_id == message.id,
+            SupplierQuote.attachment_id == attachment_id,
+        )
+        if rows:
+            stale = stale.where(
+                tuple_(SupplierQuote.worksheet_name, SupplierQuote.source_row_number).not_in(
+                    [(quote.worksheet_name, quote.source_row_number) for quote in rows]
+                )
+            )
+        await self.session.execute(stale)
 
         values = [
             self._quote_values(

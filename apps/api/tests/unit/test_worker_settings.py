@@ -107,19 +107,22 @@ def test_import_products_task_is_registered() -> None:
 
 
 def test_gmail_sync_and_maintenance_tasks_are_registered() -> None:
-    from app.workers.tasks import renew_gmail_watches_task, sync_gmail_mailbox_task
+    from app.workers.tasks import (
+        renew_gmail_watches_task,
+        reprocess_supplier_message_task,
+        sync_gmail_mailbox_task,
+    )
 
     assert sync_gmail_mailbox_task in WorkerSettings.functions
     assert renew_gmail_watches_task in WorkerSettings.functions
+    assert reprocess_supplier_message_task in WorkerSettings.functions
 
 
 def test_gmail_watch_renewal_is_scheduled_daily() -> None:
     from app.workers.tasks import renew_gmail_watches_task
 
     registered = [
-        job
-        for job in WorkerSettings.cron_jobs
-        if job.coroutine is renew_gmail_watches_task
+        job for job in WorkerSettings.cron_jobs if job.coroutine is renew_gmail_watches_task
     ]
     assert len(registered) == 1
     assert registered[0].hour == 3

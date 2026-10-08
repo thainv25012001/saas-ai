@@ -103,6 +103,56 @@ query Products(
   }
 }
 
+query SupplierQuoteOverview {
+  gmailConnection {
+    connected email status watchExpiresAt lastHistorySyncAt lastErrorCode
+  }
+  suppliers {
+    id name senderEmails senderDomains isActive createdAt updatedAt
+  }
+  pendingSupplierMessages(limit: 50, offset: 0) {
+    id supplierId senderEmail receivedAt status classification
+    classificationConfidence errorCode attachmentCount
+  }
+  pendingSupplierMappings(limit: 50, offset: 0) {
+    id supplierId sourceMessageId version worksheetName headerRow
+    columns { field label } columnLabels defaultCurrency defaultPurchaseUnit isConfirmed createdAt
+  }
+  supplierReports(limit: 50, offset: 0) {
+    id supplierMessageId profitStatus bestProfit bestMarginPercent summaryJson createdAt
+  }
+}
+
+query SupplierReport($id: UUID!) {
+  supplierReport(id: $id) {
+    report { id supplierMessageId profitStatus bestProfit bestMarginPercent summaryJson createdAt }
+    quotes {
+      id supplierId productId supplierSku productName specification unitPrice currency
+      purchaseUnit profitStatus unitGrossProfit marginPercent purchasePriceRank
+      rankingBasis comparabilityReasons
+    }
+  }
+}
+
+mutation CreateSupplier($input: SupplierInput!) {
+  createSupplier(input: $input) {
+    id name senderEmails senderDomains isActive createdAt updatedAt
+  }
+}
+
+mutation UpdateSupplier($id: UUID!, $input: SupplierInput!) {
+  updateSupplier(id: $id, input: $input) {
+    id name senderEmails senderDomains isActive createdAt updatedAt
+  }
+}
+
+mutation ConfirmSupplierMapping($id: UUID!, $input: ConfirmSupplierMappingInput!) {
+  confirmSupplierMapping(id: $id, input: $input) {
+    id supplierId sourceMessageId version worksheetName headerRow
+    columns { field label } columnLabels defaultCurrency defaultPurchaseUnit isConfirmed createdAt
+  }
+}
+
 query ProductCategories {
   productCategories
 }

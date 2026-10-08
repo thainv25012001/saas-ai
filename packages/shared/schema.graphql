@@ -50,6 +50,14 @@ type ApiKey {
   createdByName: String
 }
 
+input ConfirmSupplierMappingInput {
+  worksheetName: String!
+  headerRow: Int!
+  columns: [SupplierMappingColumnInput!]!
+  defaultCurrency: String = null
+  defaultPurchaseUnit: String = null
+}
+
 type Conversation {
   id: UUID!
   agentId: UUID!
@@ -105,6 +113,9 @@ type CreatedApiKey {
 
 """Date with time (isoformat)"""
 scalar DateTime
+
+"""Decimal (fixed-point)"""
+scalar Decimal
 
 type Document {
   id: UUID!
@@ -241,6 +252,20 @@ type EvaluationToolCall {
   excerpt: String!
 }
 
+type GmailConnection {
+  connected: Boolean!
+  email: String
+  status: String
+  watchExpiresAt: DateTime
+  lastHistorySyncAt: DateTime
+  lastErrorCode: String
+}
+
+"""
+The `JSON` scalar type represents JSON values as specified by [ECMA-404](https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf).
+"""
+scalar JSON @specifiedBy(url: "https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf")
+
 type Lead {
   id: UUID!
   agentId: UUID!
@@ -318,6 +343,9 @@ type ModelOption {
 }
 
 type Mutation {
+  createSupplier(input: SupplierInput!): Supplier!
+  updateSupplier(id: UUID!, input: SupplierInput!): Supplier!
+  confirmSupplierMapping(id: UUID!, input: ConfirmSupplierMappingInput!): SupplierMappingReview!
   createAgent(input: CreateAgentInput!): Agent!
   updateAgent(id: UUID!, input: UpdateAgentInput!): Agent!
   updateAgentConfig(agentId: UUID!, input: UpdateAgentConfigInput!): AgentConfig!
@@ -436,6 +464,12 @@ type ProviderInfo {
 type Query {
   me: Me!
   organization: Organization!
+  gmailConnection: GmailConnection!
+  suppliers: [Supplier!]!
+  pendingSupplierMessages(limit: Int! = 50, offset: Int! = 0): [SupplierMessageReview!]!
+  pendingSupplierMappings(limit: Int! = 50, offset: Int! = 0): [SupplierMappingReview!]!
+  supplierReports(limit: Int! = 50, offset: Int! = 0): [SupplierReport!]!
+  supplierReport(id: UUID!): SupplierReportDetail!
   agents: [Agent!]!
   agent(id: UUID!): Agent!
   providerModels(provider: String!): [ModelOption!]!
@@ -460,6 +494,106 @@ type Query {
   apiKeys(agentId: UUID!): [ApiKey!]!
   agentMcpInfo(agentId: UUID!): McpInfo!
   widgetSettings(agentId: UUID!): WidgetSettings!
+}
+
+type Supplier {
+  id: UUID!
+  name: String!
+  senderEmails: [String!]!
+  senderDomains: [String!]!
+  isActive: Boolean!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+input SupplierInput {
+  name: String!
+  senderEmails: [String!]! = []
+  senderDomains: [String!]! = []
+  isActive: Boolean! = true
+}
+
+type SupplierMappingColumn {
+  field: SupplierQuoteField!
+  label: String!
+}
+
+input SupplierMappingColumnInput {
+  field: SupplierQuoteField!
+  label: String!
+}
+
+type SupplierMappingReview {
+  id: UUID!
+  supplierId: UUID!
+  sourceMessageId: UUID
+  version: Int!
+  worksheetName: String!
+  headerRow: Int!
+  columns: [SupplierMappingColumn!]!
+  columnLabels: [String!]!
+  defaultCurrency: String
+  defaultPurchaseUnit: String
+  isConfirmed: Boolean!
+  createdAt: DateTime!
+}
+
+type SupplierMessageReview {
+  id: UUID!
+  supplierId: UUID
+  senderEmail: String!
+  receivedAt: DateTime
+  status: String!
+  classification: String
+  classificationConfidence: Float
+  errorCode: String
+  attachmentCount: Int!
+}
+
+type SupplierQuote {
+  id: UUID!
+  supplierId: UUID!
+  productId: UUID
+  supplierSku: String
+  productName: String
+  specification: String
+  unitPrice: Decimal
+  currency: String
+  purchaseUnit: String
+  profitStatus: String!
+  unitGrossProfit: Decimal
+  marginPercent: Decimal
+  purchasePriceRank: Int
+  rankingBasis: String!
+  comparabilityReasons: [String!]!
+}
+
+enum SupplierQuoteField {
+  SUPPLIER_SKU
+  PRODUCT_NAME
+  SPECIFICATION
+  UNIT_PRICE
+  CURRENCY
+  UNIT
+  MINIMUM_ORDER_QUANTITY
+  QUANTITY_TIERS
+  LEAD_TIME
+  VALID_UNTIL
+}
+
+type SupplierReport {
+  id: UUID!
+  supplierMessageId: UUID!
+  profitStatus: String!
+  bestProfit: Decimal
+  bestMarginPercent: Decimal
+  summaryJson: JSON!
+  createdAt: DateTime!
+}
+
+type SupplierReportDetail {
+  report: SupplierReport!
+  quotes: [SupplierQuote!]!
 }
 
 scalar UUID

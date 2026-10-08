@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Annotated
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from arq import create_pool
+from arq.connections import RedisSettings
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -13,12 +16,15 @@ from app.auth.dependencies import get_current_tenant
 from app.core.config import get_settings
 from app.core.errors import (
     AuthenticationError,
+    NotFoundError,
     PermissionDeniedError,
     ValidationError,
 )
 from app.core.redis import get_redis
 from app.core.tenancy import TenantContext, tenant_session, untenanted_session
 from app.db.models import GmailConnection, Membership, MembershipRole, User
+from app.db.models.supplier import SupplierMapping
+from app.db.models.supplier_quote import SupplierMessage
 from app.gmail.client import GmailClient
 from app.gmail.oauth import (
     GmailOAuthClient,
@@ -43,11 +49,29 @@ def _require_owner(tenant: TenantContext) -> None:
         raise PermissionDeniedError("only the organization owner can manage Gmail")
 
 
+async def enqueue_supplier_message_reprocess(
+    organization_id: str,
+    supplier_message_id: str,
+    mapping_id: str,
+) -> None:
+    from app.workers.tasks import reprocess_supplier_message_task
+
+    pool = await create_pool(RedisSettings.from_dsn(get_settings().redis_url))
+    try:
+        await pool.enqueue_job(
+            reprocess_supplier_message_task.__name__,
+            organization_id=organization_id,
+            supplier_message_id=supplier_message_id,
+            mapping_id=mapping_id,
+            _job_id=f"gmail-reprocess:{supplier_message_id}:{mapping_id}",
+        )
+    finally:
+        await pool.aclose()
+
+
 def _oauth_state_store() -> OAuthStateStore:
     settings = get_settings()
-    return OAuthStateStore(
-        get_redis(), ttl_seconds=settings.gmail_oauth_state_ttl_seconds
-    )
+    return OAuthStateStore(get_redis(), ttl_seconds=settings.gmail_oauth_state_ttl_seconds)
 
 
 def _web_redirect(gmail_status: str, reason: str | None = None) -> RedirectResponse:
@@ -85,9 +109,7 @@ async def gmail_connection_status(
     _require_owner(tenant)
     async with tenant_session(tenant) as session:
         result = await session.execute(
-            select(GmailConnection).where(
-                GmailConnection.organization_id == tenant.organization_id
-            )
+            select(GmailConnection).where(GmailConnection.organization_id == tenant.organization_id)
         )
         connection = result.scalar_one_or_none()
         if connection is None:
@@ -98,6 +120,62 @@ async def gmail_connection_status(
             status=connection.status,
             watch_expires_at=connection.watch_expires_at,
         )
+
+
+@router.post("/supplier-messages/{message_id}/reprocess", status_code=status.HTTP_202_ACCEPTED)
+async def reprocess_supplier_message(
+    message_id: uuid.UUID,
+    tenant: Annotated[TenantContext, Depends(get_current_tenant)],
+) -> dict[str, str]:
+    """Queue a Gmail re-fetch after the mapping confirmation transaction commits."""
+    async with tenant_session(tenant) as session:
+        message_result = await session.execute(
+            select(SupplierMessage).where(
+                SupplierMessage.id == message_id,
+                SupplierMessage.organization_id == tenant.organization_id,
+            )
+        )
+        message = message_result.scalar_one_or_none()
+        if message is None or message.supplier_id is None:
+            raise NotFoundError("supplier message not found")
+        mapping_id = await session.scalar(
+            select(SupplierMapping.id)
+            .where(
+                SupplierMapping.organization_id == tenant.organization_id,
+                SupplierMapping.supplier_id == message.supplier_id,
+                SupplierMapping.source_message_id == message.id,
+                SupplierMapping.is_confirmed.is_(True),
+            )
+            .order_by(SupplierMapping.version.desc(), SupplierMapping.id.desc())
+            .limit(1)
+        )
+        if mapping_id is None:
+            raise ValidationError("confirm a supplier workbook mapping before reprocessing")
+        connection = await session.scalar(
+            select(GmailConnection).where(
+                GmailConnection.id == message.gmail_connection_id,
+                GmailConnection.organization_id == tenant.organization_id,
+                GmailConnection.status == "connected",
+            )
+        )
+        if connection is None:
+            raise ValidationError("connect Gmail before reprocessing this message")
+        organization_id = str(tenant.organization_id)
+        message_id_value = str(message.id)
+        mapping_id_value = str(mapping_id)
+
+    try:
+        await enqueue_supplier_message_reprocess(
+            organization_id,
+            message_id_value,
+            mapping_id_value,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="supplier message could not be queued for reprocessing",
+        ) from exc
+    return {"status": "queued"}
 
 
 @router.get("/oauth/start")
@@ -172,15 +250,11 @@ async def gmail_oauth_callback(
 
     async with tenant_session(tenant) as session:
         result = await session.execute(
-            select(GmailConnection).where(
-                GmailConnection.organization_id == tenant.organization_id
-            )
+            select(GmailConnection).where(GmailConnection.organization_id == tenant.organization_id)
         )
         existing = result.scalar_one_or_none()
         existing_email = existing.email if existing is not None else None
-        previous_ciphertext = (
-            existing.refresh_token_ciphertext if existing is not None else None
-        )
+        previous_ciphertext = existing.refresh_token_ciphertext if existing is not None else None
         previous_refresh_token: str | None = None
         if existing is not None and existing.email == mailbox_email:
             previous_refresh_token = decrypt_token(existing.refresh_token_ciphertext)
@@ -247,9 +321,7 @@ async def disconnect_gmail(
     _require_owner(tenant)
     async with tenant_session(tenant) as session:
         result = await session.execute(
-            select(GmailConnection).where(
-                GmailConnection.organization_id == tenant.organization_id
-            )
+            select(GmailConnection).where(GmailConnection.organization_id == tenant.organization_id)
         )
         connection = result.scalar_one_or_none()
         if connection is None:
