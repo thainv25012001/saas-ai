@@ -39,9 +39,7 @@ class _CaptureProvider:
     def stream(self, _request: Any) -> Any:
         raise AssertionError("classification must not stream")
 
-    async def generate_structured(
-        self, request: Any, schema: type[BaseModel]
-    ) -> BaseModel:
+    async def generate_structured(self, request: Any, schema: type[BaseModel]) -> BaseModel:
         self.request = request
         self.schema = schema
         return self.response

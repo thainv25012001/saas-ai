@@ -42,9 +42,7 @@ class _MissingMessageClient:
 
 
 class _MissingAttachmentClient:
-    async def get_attachment(
-        self, _token: str, _message_id: str, _attachment_id: str
-    ) -> bytes:
+    async def get_attachment(self, _token: str, _message_id: str, _attachment_id: str) -> bytes:
         raise GmailAPIError("attachment not found", status_code=404)
 
 

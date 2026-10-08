@@ -5,7 +5,6 @@ Revises: 0018_supplier_mapping_reviews
 """
 
 from alembic import op
-
 from app.db.base import runtime_role
 
 revision = "0019_gmail_maintenance_resolver"
@@ -43,12 +42,9 @@ $$;
 
 def upgrade() -> None:
     op.execute(_LIST_GMAIL_CONNECTIONS_FUNCTION)
+    op.execute("REVOKE ALL ON FUNCTION list_gmail_connections_for_maintenance() FROM PUBLIC")
     op.execute(
-        "REVOKE ALL ON FUNCTION list_gmail_connections_for_maintenance() FROM PUBLIC"
-    )
-    op.execute(
-        "GRANT EXECUTE ON FUNCTION list_gmail_connections_for_maintenance() "
-        f"TO {runtime_role()}"
+        f"GRANT EXECUTE ON FUNCTION list_gmail_connections_for_maintenance() TO {runtime_role()}"
     )
 
 

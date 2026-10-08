@@ -228,9 +228,7 @@ async def suggest_product_match(
     provider: LLMProvider | None = None,
     model: str | None = None,
 ) -> ProductMatchResult:
-    exact: MatchResult = match_catalog_product(
-        quote, products, confirmed_supplier_sku_map or {}
-    )
+    exact: MatchResult = match_catalog_product(quote, products, confirmed_supplier_sku_map or {})
     if exact.status == "confirmed":
         return ProductMatchResult(
             status=exact.status,
