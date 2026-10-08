@@ -1,7 +1,15 @@
 import uuid
 from typing import Any
 
-from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -28,6 +36,11 @@ class SupplierMapping(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
         UniqueConstraint("supplier_id", "version", name="uq_supplier_mappings_supplier_version"),
         Index("ix_supplier_mappings_organization_id", "organization_id"),
         Index("ix_supplier_mappings_supplier_id", "supplier_id"),
+        Index("ix_supplier_mappings_source_message_id", "source_message_id"),
+        CheckConstraint(
+            "(source_message_id IS NULL) = (source_attachment_id IS NULL)",
+            name="ck_supplier_mappings_source_identifiers_together",
+        ),
     )
 
     supplier_id: Mapped[uuid.UUID] = mapped_column(
@@ -37,6 +50,13 @@ class SupplierMapping(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
     worksheet_name: Mapped[str] = mapped_column(String(128), nullable=False)
     header_row: Mapped[int] = mapped_column(Integer, nullable=False)
     column_mapping: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    column_labels: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    source_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("supplier_messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_attachment_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     default_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
     default_purchase_unit: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

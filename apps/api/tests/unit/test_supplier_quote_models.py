@@ -57,3 +57,12 @@ def test_every_quote_entity_is_tenant_owned() -> None:
         SupplierReport,
     ):
         assert model.__table__.c.organization_id.nullable is False
+
+
+def test_mapping_review_persists_header_labels_and_source_ids_without_sample_cells() -> None:
+    columns = SupplierMapping.__table__.c
+
+    assert columns.column_labels.nullable is False
+    assert columns.source_message_id.nullable is True
+    assert columns.source_attachment_id.nullable is True
+    assert "sample_rows" not in columns

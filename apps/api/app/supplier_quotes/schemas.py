@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import date
 from decimal import Decimal
 from typing import Literal
@@ -59,6 +60,75 @@ class WorkbookMapping(BaseModel):
             raise ValueError("map currency or configure an explicit default_currency")
         if "unit" not in self.columns and not self.default_purchase_unit:
             raise ValueError("map unit or configure an explicit default_purchase_unit")
+        return self
+
+
+class SupplierInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=255)
+    sender_emails: list[str] = Field(default_factory=list, max_length=100)
+    sender_domains: list[str] = Field(default_factory=list, max_length=100)
+    is_active: bool = True
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("sender_emails", mode="before")
+    @classmethod
+    def normalize_sender_emails(cls, values: object) -> object:
+        if not isinstance(values, list):
+            return values
+        return sorted(
+            {
+                value.strip().casefold()
+                for value in values
+                if isinstance(value, str) and value.strip()
+            }
+        )
+
+    @field_validator("sender_domains", mode="before")
+    @classmethod
+    def normalize_sender_domains(cls, values: object) -> object:
+        if not isinstance(values, list):
+            return values
+        return sorted(
+            {
+                value.strip().casefold().removeprefix("@")
+                for value in values
+                if isinstance(value, str) and value.strip()
+            }
+        )
+
+
+class SaveSupplierMappingInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mapping: WorkbookMapping
+    column_labels: list[str] = Field(min_length=1, max_length=100)
+    source_message_id: uuid.UUID | None = None
+    source_attachment_id: str | None = Field(default=None, max_length=255)
+    is_confirmed: bool = False
+
+    @field_validator("column_labels")
+    @classmethod
+    def normalize_column_labels(cls, values: list[str]) -> list[str]:
+        labels = [label.strip()[:128] for label in values if label.strip()]
+        if not labels:
+            raise ValueError("at least one non-blank column label is required")
+        return labels
+
+    @field_validator("source_attachment_id", mode="before")
+    @classmethod
+    def strip_attachment_id(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def require_source_identifiers_together(self) -> SaveSupplierMappingInput:
+        if (self.source_message_id is None) != (self.source_attachment_id is None):
+            raise ValueError("source message and attachment identifiers must be supplied together")
         return self
 
 
