@@ -230,10 +230,10 @@
 - Modify: `README.md`
 - Create: `docs/PHASE-9.md`
 
-- [ ] **Step 1: Add blank settings to `.env.example`** for Google OAuth client ID/secret, OAuth redirect URL, web dashboard redirect URL, AES key, Pub/Sub topic, push audience, and expected push service-account email. Keep the existing LLM defaults and keys unchanged.
-- [ ] **Step 2: Document Google Cloud setup**: enable Gmail API and Pub/Sub, create the topic, grant Gmail publish permission, configure authenticated push subscription audience/service-account identity, configure OAuth consent/scopes/redirect URI, and generate the encryption key.
-- [ ] **Step 3: Document local development with fake Gmail/Pub/Sub transport fixtures**, the environment variables, OAuth verification considerations, watch renewal/reconciliation behavior, mapping confirmation, and report access in the dashboard.
-- [ ] **Step 4: Link `docs/PHASE-9.md` from `README.md`, then run `git diff --check`**.
+- [x] **Step 1: Add blank settings to `.env.example`** for Google OAuth client ID/secret, OAuth redirect URL, web dashboard redirect URL, AES key, Pub/Sub topic, push audience, and expected push service-account email. Keep the existing LLM defaults and keys unchanged.
+- [x] **Step 2: Document Google Cloud setup**: enable Gmail API and Pub/Sub, create the topic, grant Gmail publish permission, configure authenticated push subscription audience/service-account identity, configure OAuth consent/scopes/redirect URI, and generate the encryption key.
+- [x] **Step 3: Document local development with fake Gmail/Pub/Sub transport fixtures**, the environment variables, OAuth verification considerations, watch renewal/reconciliation behavior, mapping confirmation, and report access in the dashboard.
+- [x] **Step 4: Link `docs/PHASE-9.md` from `README.md`, then run `git diff --check`**.
 
 ### Task 10: Full verification and branch review
 
