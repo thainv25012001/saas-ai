@@ -33,6 +33,8 @@ from app.gmail.oauth import (
     build_authorization_url,
 )
 from app.gmail.token_crypto import decrypt_token, encrypt_token
+from app.supplier_quotes.schemas import WorkbookMapping
+from app.supplier_quotes.service import SupplierQuoteService
 
 router = APIRouter(prefix="/api/v1/gmail", tags=["gmail"])
 
@@ -63,7 +65,10 @@ async def enqueue_supplier_message_reprocess(
             organization_id=organization_id,
             supplier_message_id=supplier_message_id,
             mapping_id=mapping_id,
-            _job_id=f"gmail-reprocess:{supplier_message_id}:{mapping_id}",
+            # No `_job_id`: arq keeps a finished job's result for an hour, and
+            # a fixed id would make every "queue it again" inside that hour a
+            # silent no-op. A duplicate run is harmless; the reprocess is
+            # idempotent per message and attachment.
         )
     finally:
         await pool.aclose()
@@ -122,12 +127,52 @@ async def gmail_connection_status(
         )
 
 
+class ConfirmedMapping(BaseModel):
+    mapping_id: uuid.UUID
+    queued: bool
+
+
+@router.post("/supplier-mappings/{mapping_id}/confirm", response_model=ConfirmedMapping)
+async def confirm_supplier_mapping(
+    mapping_id: uuid.UUID,
+    mapping: WorkbookMapping,
+    tenant: Annotated[TenantContext, Depends(get_current_tenant)],
+) -> ConfirmedMapping:
+    """Confirm a proposed workbook layout, then queue its email's re-fetch.
+
+    REST rather than a GraphQL mutation for the ordering alone: GraphQL's
+    transaction commits after the response is sent (`build_context` is a
+    request-scoped dependency), so a worker queued from a resolver -- or by
+    the browser right after one -- could read the proposal unconfirmed. Here
+    the confirmation commits when its block ends, and only then is the job
+    queued: the `app/api/evaluations.py` pattern.
+    """
+    _require_owner(tenant)
+    async with tenant_session(tenant) as session:
+        confirmed = await SupplierQuoteService(session, tenant).confirm_mapping(
+            mapping_id, mapping=mapping
+        )
+        source_message_id = confirmed.source_message_id
+    queued = False
+    if source_message_id is not None:
+        try:
+            await enqueue_supplier_message_reprocess(
+                str(tenant.organization_id), str(source_message_id), str(mapping_id)
+            )
+            queued = True
+        except Exception:
+            # The confirmation stands; the dashboard offers to queue it again.
+            queued = False
+    return ConfirmedMapping(mapping_id=mapping_id, queued=queued)
+
+
 @router.post("/supplier-messages/{message_id}/reprocess", status_code=status.HTTP_202_ACCEPTED)
 async def reprocess_supplier_message(
     message_id: uuid.UUID,
     tenant: Annotated[TenantContext, Depends(get_current_tenant)],
 ) -> dict[str, str]:
-    """Queue a Gmail re-fetch after the mapping confirmation transaction commits."""
+    """Queue a Gmail re-fetch for a message whose mapping is already confirmed."""
+    _require_owner(tenant)
     async with tenant_session(tenant) as session:
         message_result = await session.execute(
             select(SupplierMessage).where(

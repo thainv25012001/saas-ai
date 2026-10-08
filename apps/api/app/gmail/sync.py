@@ -76,9 +76,15 @@ class HistoryBatch(BaseModel):
 
 
 class GmailAttachment(BaseModel):
+    """`attachment_id` is the stored identity: the MIME `partId`, stable
+    within a message. Gmail's own `attachmentId` (`download_id`) is only a
+    download handle and is reissued between `messages.get` calls, so it can
+    never identify a stored quote or proposal."""
+
     model_config = ConfigDict(extra="forbid")
 
     attachment_id: str = Field(min_length=1, max_length=255)
+    download_id: str | None = Field(default=None, max_length=4096)
     filename: str = Field(min_length=1, max_length=255)
     mime_type: str | None = None
     size: int | None = Field(default=None, ge=0)
@@ -165,7 +171,12 @@ def extract_xlsx_attachments(message: dict[str, Any]) -> list[GmailAttachment]:
             if isinstance(attachment_id, str) and attachment_id:
                 found.append(
                     GmailAttachment(
-                        attachment_id=attachment_id,
+                        attachment_id=(
+                            f"part:{part_id}"
+                            if isinstance(part_id, (str, int)) and str(part_id)
+                            else attachment_id[:255]
+                        ),
+                        download_id=attachment_id,
                         filename=normalized_filename,
                         mime_type=mime_type if isinstance(mime_type, str) else None,
                         size=body.get("size") if isinstance(body.get("size"), int) else None,
@@ -198,7 +209,9 @@ async def fetch_attachment_bytes(
     attachment: GmailAttachment,
 ) -> bytes:
     if attachment.inline_data is None:
-        return await gmail.get_attachment(access_token, message_id, attachment.attachment_id)
+        return await gmail.get_attachment(
+            access_token, message_id, attachment.download_id or attachment.attachment_id
+        )
     encoded = attachment.inline_data
     max_bytes = gmail.max_attachment_bytes
     max_encoded = ((max_bytes + 2) // 3) * 4 + 4

@@ -77,10 +77,16 @@ def decode_pubsub_envelope(payload: bytes) -> GmailPushMessage:
         encoded_data = message["data"]
         if not isinstance(message_id, str) or not isinstance(encoded_data, str):
             raise ValueError
-        decoded = base64.b64decode(encoded_data, validate=True)
+        # Pub/Sub sends standard base64; Gmail's guide calls the payload
+        # base64url. Accept either alphabet, still rejecting anything else.
+        normalized = encoded_data.replace("-", "+").replace("_", "/")
+        decoded = base64.b64decode(normalized + "=" * (-len(normalized) % 4), validate=True)
         notification = json.loads(decoded)
         mailbox_email = notification["emailAddress"]
         history_id = notification["historyId"]
+        if isinstance(history_id, int) and not isinstance(history_id, bool) and history_id >= 0:
+            # Documented as a string, seen as a JSON number in live pushes.
+            history_id = str(history_id)
         if (
             not isinstance(mailbox_email, str)
             or not _EMAIL_RE.fullmatch(mailbox_email.strip())

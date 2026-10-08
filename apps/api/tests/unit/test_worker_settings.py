@@ -114,9 +114,7 @@ def test_gmail_sync_and_maintenance_tasks_are_registered() -> None:
         sync_gmail_mailbox_task,
     )
 
-    registered = {
-        getattr(item, "coroutine", item): item for item in WorkerSettings.functions
-    }
+    registered = {getattr(item, "coroutine", item): item for item in WorkerSettings.functions}
     assert renew_gmail_watches_task in registered
     # A busy mailbox is retried every 30s rather than dropped, so these two
     # need a budget that outlasts one long sync holding the mailbox lock.

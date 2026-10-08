@@ -85,6 +85,7 @@ def test_extracts_multiple_nested_xlsx_attachments_and_ignores_other_files() -> 
         "payload": {
             "parts": [
                 {
+                    "partId": "1",
                     "filename": "quote-one.xlsx",
                     "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     "body": {"attachmentId": "attachment-one", "size": 12},
@@ -98,6 +99,7 @@ def test_extracts_multiple_nested_xlsx_attachments_and_ignores_other_files() -> 
                             "body": {"attachmentId": "pdf-attachment"},
                         },
                         {
+                            "partId": "2.2",
                             "filename": "quote-two.XLSX",
                             "mimeType": "application/octet-stream",
                             "body": {"attachmentId": "attachment-two", "size": 24},
@@ -110,7 +112,10 @@ def test_extracts_multiple_nested_xlsx_attachments_and_ignores_other_files() -> 
 
     attachments = extract_xlsx_attachments(message)
 
-    assert [item.attachment_id for item in attachments] == ["attachment-one", "attachment-two"]
+    # Identity is the MIME part, stable within a message; Gmail's
+    # attachmentId is only a download handle and can change between fetches.
+    assert [item.attachment_id for item in attachments] == ["part:1", "part:2.2"]
+    assert [item.download_id for item in attachments] == ["attachment-one", "attachment-two"]
     assert [item.filename for item in attachments] == ["quote-one.xlsx", "quote-two.XLSX"]
 
 

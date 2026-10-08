@@ -121,6 +121,26 @@ def test_pubsub_envelope_decodes_only_mailbox_and_history_id() -> None:
     assert message.history_id == "42"
 
 
+def test_pubsub_envelope_accepts_a_numeric_history_id() -> None:
+    payload = _envelope(b'{"emailAddress":"quotes@example.com","historyId":9876543210}')
+
+    assert decode_pubsub_envelope(payload).history_id == "9876543210"
+
+
+def test_pubsub_envelope_accepts_url_safe_base64_data() -> None:
+    import base64
+    import json
+
+    # Chosen so the standard alphabet would need "+" or "/": the URL-safe
+    # encoding of this payload contains "-" or "_" instead.
+    data = json.dumps({"emailAddress": "quotes@example.com", "historyId": "42", "pad": "~~~>"})
+    encoded = base64.urlsafe_b64encode(data.encode()).decode()
+    assert "-" in encoded or "_" in encoded
+    payload = json.dumps({"message": {"messageId": "message-1", "data": encoded}}).encode()
+
+    assert decode_pubsub_envelope(payload).history_id == "42"
+
+
 def test_job_identity_is_stable_for_duplicate_and_case_variant_notifications() -> None:
     assert gmail_sync_job_id("Quotes@example.com", "42") == gmail_sync_job_id(
         "quotes@example.com", "42"

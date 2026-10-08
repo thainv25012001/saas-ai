@@ -155,8 +155,11 @@ def fake_gmail(monkeypatch: pytest.MonkeyPatch) -> FakeGmail:
     return fake
 
 
-async def seed_mailbox(owner_connection: Any, tenant: TenantContext) -> uuid.UUID:
-    """A connected mailbox, a supplier with a confirmed layout, and a priced product."""
+async def seed_mailbox(
+    owner_connection: Any, tenant: TenantContext, *, confirmed_layout: bool = True
+) -> uuid.UUID:
+    """A connected mailbox, a supplier (with a confirmed layout unless told
+    otherwise), and a priced product."""
     from app.gmail.token_crypto import encrypt_token
 
     connection_id = uuid7()
@@ -179,20 +182,25 @@ async def seed_mailbox(owner_connection: Any, tenant: TenantContext) -> uuid.UUI
         supplier = await service.create_supplier(
             SupplierInput(name="Acme", sender_emails=[_SENDER])
         )
-        await service.save_mapping(
-            supplier.id,
-            SaveSupplierMappingInput(
-                mapping=WorkbookMapping(
-                    worksheet_name="Offers",
-                    header_row=1,
-                    columns={"supplier_sku": "SKU", "product_name": "Name", "unit_price": "Price"},
-                    default_currency="USD",
-                    default_purchase_unit="each",
+        if confirmed_layout:
+            await service.save_mapping(
+                supplier.id,
+                SaveSupplierMappingInput(
+                    mapping=WorkbookMapping(
+                        worksheet_name="Offers",
+                        header_row=1,
+                        columns={
+                            "supplier_sku": "SKU",
+                            "product_name": "Name",
+                            "unit_price": "Price",
+                        },
+                        default_currency="USD",
+                        default_purchase_unit="each",
+                    ),
+                    column_labels=["SKU", "Name", "Price"],
+                    is_confirmed=True,
                 ),
-                column_labels=["SKU", "Name", "Price"],
-                is_confirmed=True,
-            ),
-        )
+            )
         session.add(
             Product(
                 organization_id=tenant.organization_id,
@@ -367,3 +375,54 @@ async def test_maintenance_continues_past_a_mailbox_that_fails(
 
     assert sorted(synced) == sorted([_MAILBOX, "other@example.com"])
     assert (await connection_row(tenant_a)).last_error_code == "gmail_maintenance_failed"
+
+
+async def test_a_confirmed_layout_reprocesses_even_when_gmail_reissues_attachment_ids(
+    owner_connection: Any, tenant_a: TenantContext, fake_gmail: FakeGmail
+) -> None:
+    from app.gmail.sync import run_gmail_message_reprocess, run_gmail_sync
+    from app.supplier_quotes.schemas import WorkbookMapping
+
+    await seed_mailbox(owner_connection, tenant_a, confirmed_layout=False)
+    fake_gmail.messages["m-1"] = gmail_message("m-1", attachment_id="att-first-fetch")
+    fake_gmail.attachments["att-first-fetch"] = workbook_bytes([("SKU-1", "Widget", 10)])
+    fake_gmail.history_message_ids = ["m-1"]
+
+    await run_gmail_sync(mailbox_email=_MAILBOX, notification_history_id="200")
+
+    message = (await message_rows(tenant_a))["m-1"]
+    assert message.status == "review_required"
+    async with tenant_session(tenant_a) as session:
+        service = SupplierQuoteService(session, tenant_a)
+        [proposal] = await service.list_pending_mappings()
+        confirmed = await service.confirm_mapping(
+            proposal.id,
+            mapping=WorkbookMapping(
+                worksheet_name="Offers",
+                header_row=1,
+                columns={"supplier_sku": "SKU", "product_name": "Name", "unit_price": "Price"},
+                default_currency="USD",
+                default_purchase_unit="each",
+            ),
+        )
+        mapping_id = confirmed.id
+
+    # Gmail hands out a fresh attachmentId on the next messages.get.
+    fake_gmail.messages["m-1"] = gmail_message("m-1", attachment_id="att-second-fetch")
+    fake_gmail.attachments["att-second-fetch"] = fake_gmail.attachments.pop("att-first-fetch")
+
+    await run_gmail_message_reprocess(
+        organization_id=str(tenant_a.organization_id),
+        supplier_message_id=str(message.id),
+        mapping_id=str(mapping_id),
+    )
+
+    message = (await message_rows(tenant_a))["m-1"]
+    assert message.status == "processed"
+    async with tenant_session(tenant_a) as session:
+        report = await report_for(tenant_a, message)
+        assert report is not None
+        _report, quotes = await SupplierQuoteService(session, tenant_a).get_report(report.id)
+    assert [(quote.supplier_sku, quote.match_status) for quote in quotes] == [
+        ("SKU-1", "confirmed")
+    ]
