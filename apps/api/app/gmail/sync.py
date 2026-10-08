@@ -839,6 +839,10 @@ async def _process_gmail_message(
             return
 
         confirmed_mappings = await service.list_confirmed_mappings(supplier_id)
+        # Supplier SKUs an owner already matched to catalogue products.
+        aliases: dict[str, str] = next(
+            (dict(item.sku_aliases) for item in suppliers if item.id == supplier_id), {}
+        )
         any_review = False
         affected_product_ids: set[uuid.UUID] = set()
         llm_matches_left = _LLM_MATCHES_PER_MESSAGE
@@ -1034,13 +1038,15 @@ async def _process_gmail_message(
             product_by_id = {str(product.id): product for product in products}
             index = _ProductIndex(products)
             for row in parsed_rows:
-                match = deterministic_product_match(row, index.lookup(row))
+                match = deterministic_product_match(row, index.lookup(row, aliases), aliases)
                 if match is None and llm_matches_left > 0:
                     llm_matches_left -= 1
                     # difflib over the catalogue is CPU-bound; keep it off the
                     # event loop the worker's other jobs share.
                     candidates = await asyncio.to_thread(_candidate_products, row, products)
-                    match = await suggest_product_match(row, candidates)
+                    match = await suggest_product_match(
+                        row, candidates, confirmed_supplier_sku_map=aliases
+                    )
                 if match is None:
                     match = ProductMatchResult(
                         status="unmatched",
@@ -1254,6 +1260,7 @@ class _ProductIndex:
     """
 
     def __init__(self, products: list[Product]) -> None:
+        self._by_id = {str(product.id): product for product in products}
         self._by_sku: dict[str, list[Product]] = {}
         self._by_name: dict[str, list[Product]] = {}
         for product in products:
@@ -1262,9 +1269,12 @@ class _ProductIndex:
             if name:
                 self._by_name.setdefault(name, []).append(product)
 
-    def lookup(self, row: CanonicalQuoteRow) -> list[Product]:
+    def lookup(self, row: CanonicalQuoteRow, aliases: dict[str, str]) -> list[Product]:
         found: dict[uuid.UUID, Product] = {}
         sku = (row.supplier_sku or "").strip()
+        aliased = self._by_id.get(aliases.get(sku, "")) if sku else None
+        if aliased is not None:
+            found[aliased.id] = aliased
         for product in self._by_sku.get(sku, []) if sku else []:
             found[product.id] = product
         name = normalize_product_name(row.product_name)

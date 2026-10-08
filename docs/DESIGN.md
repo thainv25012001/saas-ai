@@ -878,17 +878,37 @@ one-lookup shape of "Status as a tone".
   "Not in this sheet" option. `mappingProblems` mirrors the API's
   `WorkbookMapping` rules in the API's own terms, and Confirm stays disabled
   until they are met. The server's check still counts.
-- **Confirm, then queue, as two steps.** The page calls
-  `confirmSupplierMapping` and only after it answers (its transaction has
-  committed) calls the REST reprocess route. If queueing fails, the mapping
-  still stands, so the page shows a `warn` alert that says exactly that,
-  with a "Queue it again" button, not a `danger` alert implying the save was
-  lost.
-- **Gmail controls are owner-only and absent otherwise**, the
-  `McpAccessCard` precedent. A member sees the mailbox and its health but no
-  buttons, plus one line saying who can change it. The OAuth start route
-  answers JSON (`authorization_url`) and the page navigates itself, because a
-  navigation cannot carry the Bearer token.
+- **A proposal can move to another header row.** When the workbook had more
+  than one header-like row, a "Worksheet and header row" `Select` lists them
+  all (labels only), the proposed one first. Moving clears the column
+  choices, because they name labels the other row may not have; moving back
+  restores the proposal's own.
+- **Confirming is one REST call.** `POST .../supplier-mappings/{id}/confirm`
+  commits the confirmation and then queues the email's re-fetch. A GraphQL
+  mutation could not do this: its transaction commits after its response
+  is sent, so a follow-up call could find the mapping still unconfirmed. If
+  the queue was down, the answer says `queued: false`, and the page shows a
+  `warn` alert saying exactly that, with a "Queue it again" button. It is not
+  a `danger` alert, because the confirmation did save.
+- **A suggested product match is confirmed in its row.** The Product cell
+  shows the match state as a badge (`Matched`, `Suggested match`,
+  `No catalogue match`) and the catalogue product it points to. A suggested
+  match gets a "Confirm match" button. Confirming ranks the quote and makes
+  the API remember the supplier's SKU, so the next quote with that SKU
+  matches without review.
+- **Every configuration control is owner-only and absent otherwise**, the
+  `McpAccessCard` precedent: Gmail, suppliers, layouts and matches. A member
+  sees the data plus one line saying who can change it. The OAuth start
+  route answers JSON (`authorization_url`) and the page navigates itself,
+  because a navigation cannot carry the Bearer token.
+- **Disconnect is confirmed in the card's footer**, the Prompts precedent.
+  The question says what happens: new mail stops being read, and existing
+  reports are kept.
+- **Every quote shows where it came from.** A Source column reads
+  `file · sheet · row n`. The profit column is headed "Gross profit / unit",
+  and a line under the table defines it: sale price minus quoted price,
+  before shipping, duties, taxes and selling fees. A report's best profit is
+  shown only with its currency.
 - **No delivery controls.** Reports stay in the dashboard (spec §8);
   `QuoteReports.test.tsx` asserts that no send, share or export button exists.
 

@@ -5,27 +5,26 @@ import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Field } from "@/components/ui/Field";
 import { Input, Select } from "@/components/ui/Input";
-import type { ConfirmSupplierMappingInput, SupplierQuoteField } from "@/graphql/generated";
 import { formatTimestamp } from "@/lib/format";
 import {
-  buildMappingInput,
+  buildMappingBody,
+  chooseSheet,
+  type ConfirmMappingBody,
+  draftLabels,
   emptyMappingDraft,
   MAPPING_FIELDS,
   type MappingDraft,
+  type MappingProposal,
   mappingProblems,
   messageErrorLabel,
   messageStatusLabel,
+  sheetChoices,
+  sheetKey,
 } from "@/lib/supplier-quotes";
 
-export type MappingRow = {
+export type MappingRow = MappingProposal & {
   id: string;
   supplierId: string;
-  worksheetName: string;
-  headerRow: number;
-  columns: { field: SupplierQuoteField; label: string }[];
-  columnLabels: string[];
-  defaultCurrency: string | null;
-  defaultPurchaseUnit: string | null;
 };
 
 export type ReviewMessageRow = {
@@ -39,8 +38,9 @@ export type ReviewMessageRow = {
 
 /**
  * Proposed workbook layouts waiting for an owner, plus the emails that could
- * not be processed. A proposal carries the worksheet's header *labels* and
- * nothing else: no sample cell values are stored, so none can be shown.
+ * not be processed. A proposal carries header *labels* only -- of its own
+ * row and of every other header-like row in the file, so a proposal on the
+ * wrong sheet can be moved -- and never cell values, so none are shown.
  */
 export function MappingReview({
   mappings,
@@ -48,6 +48,7 @@ export function MappingReview({
   supplierNames,
   confirmingId,
   errors,
+  canManage,
   onConfirm,
 }: {
   mappings: MappingRow[];
@@ -55,7 +56,9 @@ export function MappingReview({
   supplierNames: Record<string, string>;
   confirmingId: string | null;
   errors: Record<string, string>;
-  onConfirm: (mapping: MappingRow, input: ConfirmSupplierMappingInput) => void;
+  /** Only the owner configures how supplier files are read. */
+  canManage: boolean;
+  onConfirm: (mapping: MappingRow, body: ConfirmMappingBody) => void;
 }) {
   if (mappings.length === 0 && messages.length === 0) {
     return (
@@ -75,6 +78,7 @@ export function MappingReview({
           supplierName={supplierNames[mapping.supplierId] ?? "Unknown supplier"}
           confirming={confirmingId === mapping.id}
           error={errors[mapping.id] ?? null}
+          canManage={canManage}
           onConfirm={onConfirm}
         />
       ))}
@@ -113,21 +117,49 @@ function MappingForm({
   supplierName,
   confirming,
   error,
+  canManage,
   onConfirm,
 }: {
   mapping: MappingRow;
   supplierName: string;
   confirming: boolean;
   error: string | null;
-  onConfirm: (mapping: MappingRow, input: ConfirmSupplierMappingInput) => void;
+  canManage: boolean;
+  onConfirm: (mapping: MappingRow, body: ConfirmMappingBody) => void;
 }) {
   // Seeded once from the proposal; a refetch that brings a new version of
   // this proposal arrives under a new id and so a new form.
   const [draft, setDraft] = useState<MappingDraft>(() => emptyMappingDraft(mapping));
-  const problems = mappingProblems(draft, mapping.columnLabels);
+  const choices = sheetChoices(mapping);
+  const chosen = choices.find((option) => sheetKey(option) === draft.sheet) ?? choices[0];
+  const labels = draftLabels(draft, mapping);
+  const problems = mappingProblems(draft, labels);
 
-  function setField(field: SupplierQuoteField, label: string) {
+  function setField(field: (typeof MAPPING_FIELDS)[number]["field"], label: string) {
     setDraft((current) => ({ ...current, fields: { ...current.fields, [field]: label } }));
+  }
+
+  const intro = (
+    <div>
+      <h3 className="text-sm font-semibold text-ink">{supplierName}</h3>
+      <p className="mt-1 text-xs text-ink-muted">
+        New spreadsheet layout: worksheet “{chosen.worksheetName}”, header row {chosen.headerRow}.
+        {canManage
+          ? " Check which column holds each value, then confirm to analyse the email with it."
+          : null}
+      </p>
+      <p className="mt-2 text-xs text-ink-subtle">Columns found</p>
+      <p className="text-sm text-ink">{labels.join(", ")}</p>
+    </div>
+  );
+
+  if (!canManage) {
+    return (
+      <div className="space-y-2 px-5 py-4">
+        {intro}
+        <p className="text-xs text-ink-subtle">Only the organization owner can confirm a spreadsheet layout.</p>
+      </div>
+    );
   }
 
   return (
@@ -136,18 +168,31 @@ function MappingForm({
       className="space-y-4 px-5 py-4"
       onSubmit={(event) => {
         event.preventDefault();
-        if (problems.length === 0) onConfirm(mapping, buildMappingInput(mapping, draft));
+        if (problems.length === 0) onConfirm(mapping, buildMappingBody(draft, mapping));
       }}
     >
-      <div>
-        <h3 className="text-sm font-semibold text-ink">{supplierName}</h3>
-        <p className="mt-1 text-xs text-ink-muted">
-          New spreadsheet layout: worksheet “{mapping.worksheetName}”, header row {mapping.headerRow}. Check which
-          column holds each value, then confirm to analyse the email with it.
-        </p>
-        <p className="mt-2 text-xs text-ink-subtle">Columns found</p>
-        <p className="text-sm text-ink">{mapping.columnLabels.join(", ")}</p>
-      </div>
+      {intro}
+
+      {choices.length > 1 ? (
+        <Field
+          label="Worksheet and header row"
+          description="Pick another if the proposal landed on a cover page or a title row."
+        >
+          {(control) => (
+            <Select
+              {...control}
+              value={draft.sheet}
+              onChange={(event) => setDraft((current) => chooseSheet(current, mapping, event.target.value))}
+            >
+              {choices.map((option) => (
+                <option key={sheetKey(option)} value={sheetKey(option)} title={option.labels.join(", ")}>
+                  {option.worksheetName} — row {option.headerRow}
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+      ) : null}
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {MAPPING_FIELDS.map(({ field, label }) => (
@@ -155,7 +200,7 @@ function MappingForm({
             {(control) => (
               <Select {...control} value={draft.fields[field]} onChange={(event) => setField(field, event.target.value)}>
                 <option value="">Not in this sheet</option>
-                {mapping.columnLabels.map((column) => (
+                {labels.map((column) => (
                   <option key={column} value={column} title={column}>
                     {column}
                   </option>
@@ -169,7 +214,7 @@ function MappingForm({
             <Input
               {...control}
               value={draft.defaultCurrency}
-              maxLength={16}
+              maxLength={3}
               placeholder="e.g. USD"
               onChange={(event) => setDraft({ ...draft, defaultCurrency: event.target.value })}
             />

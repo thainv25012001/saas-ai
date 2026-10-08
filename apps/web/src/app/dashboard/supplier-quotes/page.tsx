@@ -13,8 +13,7 @@ import { Card, CardHeader } from "@/components/ui/Card";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { LoadingState } from "@/components/ui/Spinner";
 import {
-  ConfirmSupplierMappingDocument,
-  type ConfirmSupplierMappingInput,
+  ConfirmSupplierQuoteMatchDocument,
   CreateSupplierDocument,
   SupplierQuoteOverviewDocument,
   SupplierReportDocument,
@@ -24,14 +23,16 @@ import { API_URL, type ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { firstGraphQLError } from "@/lib/graphql-errors";
 import {
+  type ConfirmMappingBody,
+  confirmMapping,
   disconnectGmail,
   gmailCallbackNotice,
   reprocessSupplierMessage,
   startGmailConnect,
 } from "@/lib/supplier-quotes";
 
-/** A queued re-fetch that failed after its mapping was already saved. The
- * mapping stands; only the queueing needs another try. */
+/** A confirmed mapping whose email could not be queued for its re-fetch.
+ * The confirmation stands; only the queueing needs another try. */
 type RequeueFailure = { messageId: string; message: string };
 
 function SupplierQuotesPage() {
@@ -47,7 +48,7 @@ function SupplierQuotesPage() {
   const refresh = () => refetchOverview({ requestPolicy: "network-only" });
 
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
-  const [{ data: reportData, fetching: reportFetching, error: reportError }] = useQuery({
+  const [{ data: reportData, fetching: reportFetching, error: reportError }, refetchReport] = useQuery({
     query: SupplierReportDocument,
     variables: { id: selectedReportId ?? "" },
     pause: paused || !selectedReportId,
@@ -55,7 +56,7 @@ function SupplierQuotesPage() {
 
   const [createResult, createSupplier] = useMutation(CreateSupplierDocument);
   const [updateResult, updateSupplier] = useMutation(UpdateSupplierDocument);
-  const [, confirmMapping] = useMutation(ConfirmSupplierMappingDocument);
+  const [, confirmQuoteMatch] = useMutation(ConfirmSupplierQuoteMatchDocument);
 
   const [gmailBusy, setGmailBusy] = useState(false);
   const [gmailError, setGmailError] = useState<string | null>(null);
@@ -64,9 +65,13 @@ function SupplierQuotesPage() {
   const [mappingErrors, setMappingErrors] = useState<Record<string, string>>({});
   const [requeue, setRequeue] = useState<RequeueFailure | null>(null);
   const [requeueing, setRequeueing] = useState(false);
+  const [confirmingQuoteId, setConfirmingQuoteId] = useState<string | null>(null);
+  const [matchError, setMatchError] = useState<string | null>(null);
 
   const auth = accessToken ? { accessToken, apiUrl: API_URL, onAccessToken: setAccessToken } : null;
-  const canManageGmail = user?.role === "owner";
+  // Gmail, sender rules, layouts and matches are the owner's to change; the
+  // API refuses anyone else, so for a member the controls are not shown.
+  const canManage = user?.role === "owner";
 
   const suppliers = useMemo(() => data?.suppliers ?? [], [data]);
   const supplierNames = useMemo(
@@ -122,7 +127,8 @@ function SupplierQuotesPage() {
     }
   }
 
-  async function handleConfirm(mapping: MappingRow & { sourceMessageId: string | null }, input: ConfirmSupplierMappingInput) {
+  async function handleConfirm(mapping: MappingRow & { sourceMessageId: string | null }, body: ConfirmMappingBody) {
+    if (!auth) return;
     setConfirmingId(mapping.id);
     setMappingErrors((current) => {
       const next = { ...current };
@@ -130,20 +136,39 @@ function SupplierQuotesPage() {
       return next;
     });
     try {
-      // The mutation's transaction has committed by the time it answers, so
-      // the worker queued next always reads the confirmed mapping.
-      const result = await confirmMapping({ id: mapping.id, input });
-      if (result.error) {
-        setMappingErrors((current) => ({
-          ...current,
-          [mapping.id]: firstGraphQLError(result.error) ?? "The mapping could not be confirmed.",
-        }));
-        return;
+      // One request: the API commits the confirmation, then queues the
+      // email's re-fetch, so the worker never reads it unconfirmed.
+      const { queued } = await confirmMapping(mapping.id, body, auth);
+      if (!queued && mapping.sourceMessageId) {
+        setRequeue({
+          messageId: mapping.sourceMessageId,
+          message: "The processing queue was unavailable.",
+        });
       }
-      if (mapping.sourceMessageId) await queueReprocess(mapping.sourceMessageId);
       refresh();
+    } catch (err) {
+      setMappingErrors((current) => ({
+        ...current,
+        [mapping.id]: (err as ApiError).message ?? "The mapping could not be confirmed.",
+      }));
     } finally {
       setConfirmingId(null);
+    }
+  }
+
+  async function handleConfirmMatch(quoteId: string, productId: string) {
+    setMatchError(null);
+    setConfirmingQuoteId(quoteId);
+    try {
+      const result = await confirmQuoteMatch({ quoteId, productId });
+      if (result.error) {
+        setMatchError(firstGraphQLError(result.error) ?? "The match could not be confirmed.");
+        return;
+      }
+      refetchReport({ requestPolicy: "network-only" });
+      refresh();
+    } finally {
+      setConfirmingQuoteId(null);
     }
   }
 
@@ -178,7 +203,7 @@ function SupplierQuotesPage() {
         <>
           <GmailConnectionCard
             connection={data.gmailConnection}
-            canManage={canManageGmail}
+            canManage={canManage}
             busy={gmailBusy}
             error={gmailError}
             onConnect={handleConnect}
@@ -213,9 +238,10 @@ function SupplierQuotesPage() {
               supplierNames={supplierNames}
               confirmingId={confirmingId}
               errors={mappingErrors}
-              onConfirm={(row, input) => {
+              canManage={canManage}
+              onConfirm={(row, body) => {
                 const mapping = mappings.find((candidate) => candidate.id === row.id);
-                if (mapping) void handleConfirm(mapping, input);
+                if (mapping) void handleConfirm(mapping, body);
               }}
             />
           </Card>
@@ -225,6 +251,11 @@ function SupplierQuotesPage() {
               title="Reports"
               description="Profit is shown only where a current catalogue sale price exists in the same currency and unit."
             />
+            {matchError ? (
+              <div className="px-5 pt-4">
+                <Alert tone="danger">{matchError}</Alert>
+              </div>
+            ) : null}
             <QuoteReports
               reports={data.supplierReports}
               supplierNames={supplierNames}
@@ -233,6 +264,9 @@ function SupplierQuotesPage() {
               detail={reportData?.supplierReport ?? null}
               detailLoading={reportFetching && !reportData}
               detailError={firstGraphQLError(reportError)}
+              canManage={canManage}
+              confirmingQuoteId={confirmingQuoteId}
+              onConfirmMatch={(quoteId, productId) => void handleConfirmMatch(quoteId, productId)}
             />
           </Card>
 
@@ -245,6 +279,7 @@ function SupplierQuotesPage() {
               suppliers={suppliers}
               saving={createResult.fetching || updateResult.fetching}
               error={supplierError}
+              canManage={canManage}
               onSave={(id, draft) => void handleSaveSupplier(id, draft)}
             />
           </Card>

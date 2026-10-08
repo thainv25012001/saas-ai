@@ -249,10 +249,18 @@ class Query:
         message = (await service.messages_by_id({report.supplier_message_id})).get(
             report.supplier_message_id
         )
+        products = await service.products_by_id(
+            {quote.product_id for quote in quotes if quote.product_id is not None}
+        )
         return gql.SupplierReportDetail(
             report=gql.SupplierReport.from_model(report, message),
             attachments=gql.SupplierAttachment.from_message(message),
-            quotes=[gql.SupplierQuote.from_model(quote) for quote in quotes],
+            quotes=[
+                gql.SupplierQuote.from_model(
+                    quote, products.get(quote.product_id) if quote.product_id else None
+                )
+                for quote in quotes
+            ],
         )
 
     @strawberry.field
@@ -595,31 +603,15 @@ class Mutation:
         return gql.Supplier.from_model(supplier)
 
     @strawberry.mutation
-    async def confirm_supplier_mapping(
-        self,
-        info: Info,
-        id: uuid.UUID,
-        input: gql.ConfirmSupplierMappingInput,
-    ) -> gql.SupplierMappingReview:
-        columns: dict[str, str] = {}
-        for column in input.columns:
-            field = column.field.value
-            if field in columns:
-                raise AppValidationError("a mapping field can be selected only once")
-            columns[field] = column.label
-        mapping_payload = _build(
-            supplier_quote_schemas.WorkbookMapping,
-            worksheet_name=input.worksheet_name,
-            header_row=input.header_row,
-            columns=columns,
-            default_currency=input.default_currency,
-            default_purchase_unit=input.default_purchase_unit,
-        )
-        mapping = await _supplier_quotes(info).confirm_mapping(
-            id,
-            mapping=mapping_payload,
-        )
-        return gql.SupplierMappingReview.from_model(mapping)
+    async def confirm_supplier_quote_match(
+        self, info: Info, quote_id: uuid.UUID, product_id: uuid.UUID
+    ) -> gql.SupplierQuote:
+        """Accept a catalogue product for a quote row. (A workbook mapping is
+        confirmed over REST instead -- see `app/api/gmail.py` for why.)"""
+        service = _supplier_quotes(info)
+        quote = await service.confirm_quote_match(quote_id, product_id)
+        products = await service.products_by_id({quote.product_id})
+        return gql.SupplierQuote.from_model(quote, products.get(quote.product_id))
 
     @strawberry.mutation
     async def create_agent(self, info: Info, input: gql.CreateAgentInput) -> gql.Agent:

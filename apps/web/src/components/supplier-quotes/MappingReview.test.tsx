@@ -14,6 +14,7 @@ function mapping(overrides: Partial<MappingRow> = {}): MappingRow {
       { field: "UNIT_PRICE", label: "Price" },
     ],
     columnLabels: ["Item", "Price", "Cur", "UOM"],
+    sheetOptions: [],
     defaultCurrency: null,
     defaultPurchaseUnit: null,
     ...overrides,
@@ -37,6 +38,7 @@ const base = {
   supplierNames: { s1: "Acme" },
   confirmingId: null,
   errors: {},
+  canManage: true,
   onConfirm: () => {},
 };
 
@@ -71,16 +73,11 @@ describe("MappingReview", () => {
     fireEvent.change(screen.getByLabelText("Supplier SKU"), { target: { value: "Item" } });
     fireEvent.click(screen.getByRole("button", { name: /confirm mapping/i }));
     expect(onConfirm).toHaveBeenCalledWith(mapping(), {
-      worksheetName: "Quote",
-      headerRow: 3,
-      columns: [
-        { field: "SUPPLIER_SKU", label: "Item" },
-        { field: "UNIT_PRICE", label: "Price" },
-        { field: "CURRENCY", label: "Cur" },
-        { field: "UNIT", label: "UOM" },
-      ],
-      defaultCurrency: null,
-      defaultPurchaseUnit: null,
+      worksheet_name: "Quote",
+      header_row: 3,
+      columns: { supplier_sku: "Item", unit_price: "Price", currency: "Cur", unit: "UOM" },
+      default_currency: null,
+      default_purchase_unit: null,
     });
   });
 
@@ -102,5 +99,45 @@ describe("MappingReview", () => {
     expect(screen.getByText("quotes@acme.example")).toBeInTheDocument();
     expect(screen.getByText("Failed")).toBeInTheDocument();
     expect(screen.getByText("The email is no longer in Gmail.")).toBeInTheDocument();
+  });
+});
+
+describe("MappingReview sheet choice and roles", () => {
+  it("lets the owner move a proposal to another header row in the file", () => {
+    const onConfirm = vi.fn();
+    render(
+      <MappingReview
+        {...base}
+        onConfirm={onConfirm}
+        mappings={[
+          mapping({
+            worksheetName: "Cover",
+            headerRow: 1,
+            columns: [],
+            columnLabels: ["Supplier", "ACME"],
+            sheetOptions: [
+              { worksheetName: "Cover", headerRow: 1, labels: ["Supplier", "ACME"] },
+              { worksheetName: "Quote", headerRow: 3, labels: ["Item", "Price", "Cur", "UOM"] },
+            ],
+          }),
+        ]}
+      />,
+    );
+    const sheet = screen.getByLabelText(/worksheet and header row/i);
+    fireEvent.change(sheet, { target: { value: (sheet as HTMLSelectElement).options[1].value } });
+    expect(screen.getByText("Item, Price, Cur, UOM")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Product name"), { target: { value: "Item" } });
+    fireEvent.change(screen.getByLabelText("Unit price"), { target: { value: "Price" } });
+    fireEvent.change(screen.getByLabelText("Currency"), { target: { value: "Cur" } });
+    fireEvent.change(screen.getByLabelText("Purchase unit"), { target: { value: "UOM" } });
+    fireEvent.click(screen.getByRole("button", { name: /confirm mapping/i }));
+    expect(onConfirm.mock.calls[0][1]).toMatchObject({ worksheet_name: "Quote", header_row: 3 });
+  });
+
+  it("shows a member the proposal without a way to confirm it", () => {
+    render(<MappingReview {...base} canManage={false} mappings={[mapping()]} />);
+    expect(screen.getByText("Item, Price, Cur, UOM")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /confirm mapping/i })).toBeNull();
+    expect(screen.getByText(/only the organization owner/i)).toBeInTheDocument();
   });
 });

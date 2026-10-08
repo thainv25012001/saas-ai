@@ -1,7 +1,8 @@
+import { useState } from "react";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Card, CardBody, CardHeader } from "@/components/ui/Card";
+import { Card, CardBody, CardFooter, CardHeader } from "@/components/ui/Card";
 import { formatTimestamp } from "@/lib/format";
 import { messageErrorLabel } from "@/lib/supplier-quotes";
 
@@ -17,6 +18,10 @@ export type GmailConnectionView = {
  * The connected mailbox. Only an owner may connect or disconnect (the API
  * refuses anyone else), so for a member the controls are absent rather than
  * disabled -- the `McpAccessCard` precedent.
+ *
+ * Disconnecting is confirmed in place, in the card's footer (the Prompts
+ * activation precedent): it stops reading new mail, and the question says
+ * what happens to the reports already there.
  */
 export function GmailConnectionCard({
   connection,
@@ -33,11 +38,12 @@ export function GmailConnectionCard({
   onConnect: () => void;
   onDisconnect: () => void;
 }) {
+  const [confirming, setConfirming] = useState(false);
   const healthy = connection.status === "connected";
   let action: React.ReactNode = null;
   if (canManage) {
     action = connection.connected ? (
-      <Button variant="secondary" size="sm" loading={busy} loadingLabel="Disconnecting…" onClick={onDisconnect}>
+      <Button variant="secondary" size="sm" disabled={confirming || busy} onClick={() => setConfirming(true)}>
         Disconnect
       </Button>
     ) : (
@@ -74,6 +80,28 @@ export function GmailConnectionCard({
         )}
         {error ? <Alert tone="danger">{error}</Alert> : null}
       </CardBody>
+      {canManage && connection.connected && confirming ? (
+        <CardFooter className="flex-wrap">
+          <p className="mr-auto text-sm text-ink">
+            Disconnect Gmail? New supplier emails stop being read. Reports you already have are kept.
+          </p>
+          <Button
+            variant="danger"
+            size="sm"
+            loading={busy}
+            loadingLabel="Disconnecting…"
+            onClick={() => {
+              setConfirming(false);
+              onDisconnect();
+            }}
+          >
+            Yes, disconnect
+          </Button>
+          <Button variant="secondary" size="sm" disabled={busy} onClick={() => setConfirming(false)}>
+            Keep connected
+          </Button>
+        </CardFooter>
+      ) : null}
     </Card>
   );
 }

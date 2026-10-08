@@ -8,8 +8,12 @@ function report(overrides: Partial<ReportRow> = {}): ReportRow {
     id: "r1",
     profitStatus: "missing_sale_price",
     bestProfit: null,
+    bestProfitCurrency: null,
     summaryJson: { quote_count: 2, issue_count: 1 },
     createdAt: "2026-10-01T08:00:00Z",
+    supplierId: "s1",
+    senderEmail: "quotes@acme.example",
+    receivedAt: "2026-10-01T07:00:00Z",
     ...overrides,
   };
 }
@@ -28,6 +32,13 @@ function quote(overrides: Partial<QuoteRow> = {}): QuoteRow {
     purchasePriceRank: 1,
     rankingBasis: "purchase_price",
     comparabilityReasons: [],
+    productId: null,
+    attachmentId: "part:1",
+    worksheetName: "Offers",
+    sourceRowNumber: 7,
+    matchStatus: "confirmed",
+    catalogProductName: null,
+    catalogProductSku: null,
     ...overrides,
   };
 }
@@ -39,6 +50,9 @@ const base = {
   detail: null,
   detailLoading: false,
   detailError: null,
+  canManage: true,
+  confirmingQuoteId: null,
+  onConfirmMatch: () => {},
 };
 
 describe("QuoteReports", () => {
@@ -68,7 +82,9 @@ describe("QuoteReports", () => {
     render(
       <QuoteReports
         {...base}
-        reports={[report({ profitStatus: "available", bestProfit: "2.5000" })]}
+        reports={[
+          report({ profitStatus: "available", bestProfit: "2.5000", bestProfitCurrency: "USD" }),
+        ]}
         selectedId="r1"
         detail={{
           quotes: [
@@ -131,5 +147,70 @@ describe("QuoteReports", () => {
   it("offers no way to send a report anywhere", () => {
     render(<QuoteReports {...base} reports={[report()]} selectedId="r1" detail={{ quotes: [quote()] }} />);
     expect(screen.queryByRole("button", { name: /send|email|share|export|deliver/i })).toBeNull();
+  });
+});
+
+describe("QuoteReports audit trail and matches", () => {
+  it("says which email a report is about", () => {
+    render(<QuoteReports {...base} reports={[report()]} />);
+    expect(screen.getByText("Acme")).toBeInTheDocument();
+    expect(screen.getByText(/quotes@acme\.example/)).toBeInTheDocument();
+  });
+
+  it("traces each quote to its file, sheet and row, and labels profit as gross", () => {
+    render(
+      <QuoteReports
+        {...base}
+        reports={[report()]}
+        selectedId="r1"
+        detail={{ quotes: [quote()], attachments: [{ id: "part:1", filename: "prices.xlsx" }] }}
+      />,
+    );
+    expect(screen.getByText("prices.xlsx · Offers · row 7")).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: /gross profit/i })).toBeInTheDocument();
+    expect(screen.getByText(/before shipping, duties, taxes and selling fees/i)).toBeInTheDocument();
+  });
+
+  it("lets the owner accept a suggested catalogue match", () => {
+    const onConfirmMatch = vi.fn();
+    render(
+      <QuoteReports
+        {...base}
+        reports={[report()]}
+        selectedId="r1"
+        onConfirmMatch={onConfirmMatch}
+        detail={{
+          quotes: [
+            quote({
+              matchStatus: "suggested",
+              productId: "p-1",
+              catalogProductName: "Catalogue Widget",
+              catalogProductSku: "CAT-1",
+              purchasePriceRank: null,
+              rankingBasis: "none",
+              profitStatus: "pending",
+            }),
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText(/Catalogue Widget/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /confirm match/i }));
+    expect(onConfirmMatch).toHaveBeenCalledWith("q1", "p-1");
+  });
+
+  it("gives a member no way to confirm a match", () => {
+    render(
+      <QuoteReports
+        {...base}
+        canManage={false}
+        reports={[report()]}
+        selectedId="r1"
+        detail={{
+          quotes: [quote({ matchStatus: "suggested", productId: "p-1", catalogProductName: "W" })],
+        }}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /confirm match/i })).toBeNull();
   });
 });

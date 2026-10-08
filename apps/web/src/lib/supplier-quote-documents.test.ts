@@ -3,7 +3,7 @@ import type { DocumentNode } from "graphql";
 import { print } from "graphql";
 
 import {
-  ConfirmSupplierMappingDocument,
+  ConfirmSupplierQuoteMatchDocument,
   CreateSupplierDocument,
   SupplierQuoteOverviewDocument,
   SupplierReportDocument,
@@ -15,7 +15,7 @@ const SUPPLIER_DOCUMENTS: Record<string, DocumentNode> = {
   SupplierReport: SupplierReportDocument,
   CreateSupplier: CreateSupplierDocument,
   UpdateSupplier: UpdateSupplierDocument,
-  ConfirmSupplierMapping: ConfirmSupplierMappingDocument,
+  ConfirmSupplierQuoteMatch: ConfirmSupplierQuoteMatchDocument,
 };
 
 describe("supplier quote GraphQL documents", () => {

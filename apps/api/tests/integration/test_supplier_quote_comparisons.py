@@ -21,7 +21,9 @@ pytestmark = pytest.mark.anyio
 _NOW = datetime.now(UTC)
 
 
-async def _product(session: AsyncSession, tenant: TenantContext, sku: str, currency: str) -> Product:
+async def _product(
+    session: AsyncSession, tenant: TenantContext, sku: str, currency: str
+) -> Product:
     product = Product(
         organization_id=tenant.organization_id,
         external_id=sku,
@@ -100,16 +102,31 @@ async def test_a_suppliers_newer_quote_replaces_its_older_one_in_the_ranking(
         service, connection, x, y = await _setup(session, tenant_a)
         product = await _product(session, tenant_a, "P-1", "USD")
         _old_msg, old_x = await _offer(
-            service, connection, supplier_id=x.id, gmail_id="x-old",
-            received_at=_NOW - timedelta(days=30), product=product, price="10.00",
+            service,
+            connection,
+            supplier_id=x.id,
+            gmail_id="x-old",
+            received_at=_NOW - timedelta(days=30),
+            product=product,
+            price="10.00",
         )
         new_msg, new_x = await _offer(
-            service, connection, supplier_id=x.id, gmail_id="x-new",
-            received_at=_NOW, product=product, price="12.00",
+            service,
+            connection,
+            supplier_id=x.id,
+            gmail_id="x-new",
+            received_at=_NOW,
+            product=product,
+            price="12.00",
         )
         _y_msg, y_quote = await _offer(
-            service, connection, supplier_id=y.id, gmail_id="y",
-            received_at=_NOW - timedelta(days=1), product=product, price="11.00",
+            service,
+            connection,
+            supplier_id=y.id,
+            gmail_id="y",
+            received_at=_NOW - timedelta(days=1),
+            product=product,
+            price="11.00",
         )
 
         await recalculate_product_comparisons(session, tenant_a, new_msg, {product.id})
@@ -133,21 +150,29 @@ async def test_a_reports_best_profit_comes_from_its_own_email_in_one_currency(
         service, connection, x, y = await _setup(session, tenant_a)
         product = await _product(session, tenant_a, "P-1", "USD")
         this_msg, _ = await _offer(
-            service, connection, supplier_id=x.id, gmail_id="this",
-            received_at=_NOW, product=product, price="12.00",
+            service,
+            connection,
+            supplier_id=x.id,
+            gmail_id="this",
+            received_at=_NOW,
+            product=product,
+            price="12.00",
         )
         # Another supplier's cheaper offer for the same product, from another
         # email: it ranks above, but it is not this email's profit.
         await _offer(
-            service, connection, supplier_id=y.id, gmail_id="other",
-            received_at=_NOW, product=product, price="11.00",
+            service,
+            connection,
+            supplier_id=y.id,
+            gmail_id="other",
+            received_at=_NOW,
+            product=product,
+            price="11.00",
         )
 
         await recalculate_product_comparisons(session, tenant_a, this_msg, {product.id})
         report = await session.scalar(
-            select(SupplierReport).where(
-                SupplierReport.supplier_message_id == this_msg
-            )
+            select(SupplierReport).where(SupplierReport.supplier_message_id == this_msg)
         )
 
     assert report is not None
@@ -176,8 +201,12 @@ async def test_profits_in_different_currencies_have_no_single_best(
             "part:1",
             [
                 CanonicalQuoteRow(
-                    worksheet_name="Offers", source_row_number=row, supplier_sku=p.external_id,
-                    product_name=p.name, unit_price=Decimal("10.00"), currency=p.currency,
+                    worksheet_name="Offers",
+                    source_row_number=row,
+                    supplier_sku=p.external_id,
+                    product_name=p.name,
+                    unit_price=Decimal("10.00"),
+                    currency=p.currency,
                     purchase_unit="each",
                 )
                 for row, p in ((2, usd), (3, vnd))
@@ -190,9 +219,7 @@ async def test_profits_in_different_currencies_have_no_single_best(
 
         await recalculate_product_comparisons(session, tenant_a, message.id, {usd.id, vnd.id})
         report = await session.scalar(
-            select(SupplierReport).where(
-                SupplierReport.supplier_message_id == message.id
-            )
+            select(SupplierReport).where(SupplierReport.supplier_message_id == message.id)
         )
 
     assert report is not None

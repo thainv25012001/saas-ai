@@ -14,7 +14,7 @@ function supplier(overrides: Partial<SupplierRow> = {}): SupplierRow {
   };
 }
 
-const base = { saving: false, error: null, onSave: () => {} };
+const base = { saving: false, error: null, canManage: true, onSave: () => {} };
 
 describe("SupplierList", () => {
   it("explains how suppliers are recognised when there are none", () => {
@@ -67,5 +67,14 @@ describe("SupplierList", () => {
     render(<SupplierList {...base} suppliers={[]} onSave={onSave} error="supplier name already exists" />);
     expect(screen.getByRole("button", { name: /add supplier/i })).toBeDisabled();
     expect(screen.getByRole("alert")).toHaveTextContent("supplier name already exists");
+  });
+});
+
+describe("SupplierList for a member", () => {
+  it("lists suppliers without edit controls", () => {
+    render(<SupplierList {...base} canManage={false} suppliers={[supplier()]} />);
+    expect(screen.getByText("Acme")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.queryByLabelText(/^name/i)).toBeNull();
   });
 });

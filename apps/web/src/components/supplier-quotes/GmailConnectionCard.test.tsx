@@ -22,13 +22,25 @@ describe("GmailConnectionCard", () => {
     expect(onConnect).toHaveBeenCalled();
   });
 
-  it("names the connected mailbox and can disconnect it", () => {
+  it("names the connected mailbox and disconnects only after confirming", () => {
     const onDisconnect = vi.fn();
     render(<GmailConnectionCard {...base} connection={connected} onDisconnect={onDisconnect} />);
     expect(screen.getByText("buyer@example.com")).toBeInTheDocument();
     expect(screen.getByText("Connected")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /disconnect/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^disconnect$/i }));
+    expect(onDisconnect).not.toHaveBeenCalled();
+    expect(screen.getByText(/reports you already have are kept/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /yes, disconnect/i }));
     expect(onDisconnect).toHaveBeenCalled();
+  });
+
+  it("can back out of disconnecting", () => {
+    const onDisconnect = vi.fn();
+    render(<GmailConnectionCard {...base} connection={connected} onDisconnect={onDisconnect} />);
+    fireEvent.click(screen.getByRole("button", { name: /^disconnect$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /keep connected/i }));
+    expect(screen.getByRole("button", { name: /^disconnect$/i })).toBeInTheDocument();
+    expect(onDisconnect).not.toHaveBeenCalled();
   });
 
   it("surfaces a connection the worker marked as failing", () => {

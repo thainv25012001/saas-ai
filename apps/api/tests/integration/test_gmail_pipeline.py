@@ -458,3 +458,31 @@ async def test_a_new_layout_is_proposed_on_the_first_sheet_that_has_headers(
     assert {"worksheet_name": "Offers", "header_row": 1, "labels": ["SKU", "Name", "Price"]} in (
         proposal.sheet_options
     )
+
+
+async def test_a_remembered_supplier_sku_matches_without_review(
+    owner_connection: Any, tenant_a: TenantContext, fake_gmail: FakeGmail
+) -> None:
+    from app.db.models import Supplier
+    from app.gmail.sync import run_gmail_sync
+
+    await seed_mailbox(owner_connection, tenant_a)
+    async with tenant_session(tenant_a) as session:
+        product = await session.scalar(select(Product).where(Product.external_id == "SKU-1"))
+        supplier = await session.scalar(select(Supplier))
+        assert product is not None and supplier is not None
+        supplier.sku_aliases = {"ACME-77": str(product.id)}
+    fake_gmail.messages["m-1"] = gmail_message("m-1")
+    # The supplier's own SKU, not the catalogue's: only the alias links them.
+    fake_gmail.attachments["att-1"] = workbook_bytes([("ACME-77", "Gadget", 10)])
+    fake_gmail.history_message_ids = ["m-1"]
+
+    await run_gmail_sync(mailbox_email=_MAILBOX, notification_history_id="200")
+
+    message = (await message_rows(tenant_a))["m-1"]
+    assert message.status == "processed"
+    async with tenant_session(tenant_a) as session:
+        report = await report_for(tenant_a, message)
+        assert report is not None
+        _report, [quote] = await SupplierQuoteService(session, tenant_a).get_report(report.id)
+    assert (quote.match_status, quote.product_id) == ("confirmed", product.id)

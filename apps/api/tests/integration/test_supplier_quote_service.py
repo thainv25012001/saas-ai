@@ -280,3 +280,46 @@ async def test_a_proposal_on_the_wrong_sheet_can_be_moved_to_another_candidate(t
     assert (confirmed.worksheet_name, confirmed.header_row) == ("Quote", 3)
     assert confirmed.column_labels == ["Item", "Price", "Cur", "UOM"]
     assert confirmed.sheet_options == options
+
+
+async def test_accepting_a_product_match_ranks_the_quote_and_remembers_the_sku(tenant_a):
+    import dataclasses
+    from datetime import UTC, datetime
+
+    from app.core.errors import PermissionDeniedError
+    from app.db.models import MembershipRole, Product, Supplier
+
+    async with tenant_session(tenant_a) as session:
+        service = SupplierQuoteService(session, tenant_a)
+        supplier, message_id = await _setup(service)
+        product = Product(
+            organization_id=tenant_a.organization_id,
+            external_id="CAT-9",
+            name="Widget",
+            slug="widget",
+            price=Decimal("20.00"),
+            currency="USD",
+            price_updated_at=datetime.now(UTC),
+            attributes={"sale_unit": "piece"},
+        )
+        session.add(product)
+        batch = await service.upsert_quote_rows(supplier.id, message_id, "attachment-1", [_quote()])
+        [quote] = batch.quotes
+        quote.product_id = product.id
+        quote.match_status = "suggested"
+        await session.flush()
+
+        member = SupplierQuoteService(
+            session, dataclasses.replace(tenant_a, role=MembershipRole.MEMBER)
+        )
+        with pytest.raises(PermissionDeniedError):
+            await member.confirm_quote_match(quote.id, product.id)
+
+        confirmed = await service.confirm_quote_match(quote.id, product.id)
+        stored_supplier = await session.get(Supplier, supplier.id)
+
+    assert confirmed.match_status == "confirmed"
+    assert confirmed.unit_gross_profit == Decimal("7.5000")
+    assert confirmed.purchase_price_rank == 1
+    assert stored_supplier is not None
+    assert stored_supplier.sku_aliases == {"SUP-1": str(product.id)}

@@ -29,18 +29,29 @@ Gmail (watch) ──publish──▶ Pub/Sub topic ──authenticated push─�
 Delivered:
 
 - Gmail OAuth (read-only scope), with the refresh token encrypted at rest (AES-256-GCM).
-  Owners connect and disconnect, and disconnecting stops the watch and deletes the stored
-  credentials.
+  Owners connect and disconnect. Disconnecting stops the watch and deletes the stored
+  credential, but keeps the mailbox row, so supplier messages, quotes and reports remain.
+  Reconnecting starts from the new watch: mail received while disconnected is not
+  backfilled.
 - Pub/Sub push webhook. Every push is verified (signature, issuer, audience, service
   account and verified email) before any database lookup happens.
 - Mailbox sync from the watch cursor onward. Pub/Sub redelivery and overlapping history
   pages never duplicate a message or a quote row.
+- **Failure handling:**
+  - A message that fails for a reason a retry would not change is recorded as `failed`, and
+    the cursor still advances. One bad email never stops a mailbox.
+  - Transient Gmail errors (429/5xx) and a mailbox busy with another job retry the job
+    (`arq.Retry`, up to 20 tries for Gmail jobs).
+  - The daily maintenance job isolates each mailbox, so one tenant's failure does not stop
+    renewal for the rest.
 - Workbook inspection and parsing (`openpyxl`, read-only and data-only, so formulas are
   never evaluated), with row-level issues that leave valid rows intact.
 - LLM classification and mapping proposals, treated as inert data. Arithmetic and ranking
   are deterministic code.
 - Catalogue matching and comparison, grouped per product and per currency and unit.
-- Dashboard: Gmail status, suppliers and sender rules, mapping review, and reports.
+- Dashboard: Gmail status, suppliers and sender rules, mapping review, product-match
+  confirmation, and reports with their audit trail (sender, received time, file, worksheet,
+  row). Configuration is owner-only, enforced by the API.
 - Daily watch renewal and cursor reconciliation (`renew_gmail_watches_task`, 03:00 UTC).
 
 Not delivered: see §8.
@@ -101,11 +112,20 @@ The operator does this once per deployment. The application creates no cloud res
 3. **Review new layouts.** The first quote with an unfamiliar layout produces a *mapping
    proposal*: the worksheet, the header row, the column labels, and a suggested column for
    each field. Only labels are stored, never cell values. The owner corrects the
-   suggestion and confirms it. Confirming commits first, then the page calls
-   `POST /api/v1/gmail/supplier-messages/{id}/reprocess`, so the worker never reads an
-   uncommitted mapping. Later quotes with the same layout parse without review.
-4. **Read reports.** Each processed email gets a report. A quote row shows its unit profit
-   only when the API could compute it. Otherwise the row names the reason (for example
+   suggestion and confirms it, after moving it to another worksheet or header row if needed.
+   The proposal lists every header-like row in the file, by label.
+   `POST /api/v1/gmail/supplier-mappings/{id}/confirm` commits the confirmation and only
+   then queues the email's re-fetch, so the worker never reads an uncommitted mapping. If
+   the queue is down, the confirmation still stands, and
+   `POST /api/v1/gmail/supplier-messages/{id}/reprocess` queues it again. Later quotes with
+   the same layout parse without review.
+4. **Confirm product matches.** A row whose catalogue product was only suggested (an exact
+   name match, or an LLM suggestion) waits for the owner. Confirming it ranks the quote and
+   remembers the supplier's SKU for that product (`suppliers.sku_aliases`), so the next quote
+   with that SKU matches without review. Each message makes at most 25 LLM match calls;
+   rows beyond that wait for review.
+5. **Read reports.** Each processed email gets a report. A quote row shows its gross unit
+   profit (before shipping, duties, taxes and selling fees) only when the API could compute it. Otherwise the row names the reason (for example
    *Missing sale price* or *Currency differs from catalogue*) and is ranked by purchase
    price within its currency and unit group.
 
@@ -119,6 +139,12 @@ The operator does this once per deployment. The application creates no cloud res
   price.
 - A price that depends on quantity tiers, with no common order quantity, is marked
   incomplete rather than guessed.
+- Only each supplier's latest quote is ranked, per product, currency and unit, judged by
+  the email's received time. Older quotes are marked `superseded` and leave the ranking.
+- A report's best profit comes from its own email's quotes, and only when they share one
+  currency. That currency is stored and shown with it.
+- Profit needs the catalogue product's sale unit, in `attributes.sale_unit` (or
+  `attributes.unit`). Without it, the product's offers are not comparable.
 
 ## 6. Security notes
 

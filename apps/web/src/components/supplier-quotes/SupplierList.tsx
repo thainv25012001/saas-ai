@@ -30,11 +30,14 @@ export function SupplierList({
   suppliers,
   saving,
   error,
+  canManage,
   onSave,
 }: {
   suppliers: SupplierRow[];
   saving: boolean;
   error: string | null;
+  /** Sender rules decide which mail is trusted; only the owner edits them. */
+  canManage: boolean;
   onSave: (id: string | null, draft: SupplierDraft) => void;
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -79,6 +82,7 @@ export function SupplierList({
                 </ul>
               </div>
               {supplier.isActive ? null : <Badge>Paused</Badge>}
+              {canManage ? (
               <Button
                 variant="secondary"
                 size="sm"
@@ -87,11 +91,13 @@ export function SupplierList({
               >
                 Edit
               </Button>
+              ) : null}
             </li>
           ))}
         </ul>
       )}
 
+      {canManage ? (
       <form
         className="space-y-3 border-t border-line px-5 py-4"
         onSubmit={(event) => {
@@ -160,6 +166,11 @@ export function SupplierList({
           ) : null}
         </div>
       </form>
+      ) : (
+        <p className="border-t border-line px-5 py-3 text-xs text-ink-subtle">
+          Only the organization owner can add or change suppliers.
+        </p>
+      )}
     </div>
   );
 }

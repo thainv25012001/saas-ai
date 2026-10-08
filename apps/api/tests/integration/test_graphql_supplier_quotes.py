@@ -85,10 +85,17 @@ async def test_supplier_graphql_schema_has_safe_quote_workflows() -> None:
         "supplierReport",
         "createSupplier",
         "updateSupplier",
-        "confirmSupplierMapping",
+        "confirmSupplierQuoteMatch",
     ):
         assert field in sdl
-    for forbidden in ("refreshToken", "refreshTokenCiphertext", "rawEmailBody", "attachmentBytes"):
+    # Mapping confirmation is REST (commit, then queue); it must not also exist here.
+    for forbidden in (
+        "refreshToken",
+        "refreshTokenCiphertext",
+        "rawEmailBody",
+        "attachmentBytes",
+        "confirmSupplierMapping",
+    ):
         assert forbidden not in sdl
 
 
@@ -165,7 +172,7 @@ async def test_supplier_create_update_and_list_are_tenant_scoped(
     assert org_a != org_b
 
 
-async def test_pending_mapping_can_be_confirmed_for_its_source_message(
+async def test_pending_mapping_lists_every_sheet_it_can_move_to(
     api_client: AsyncClient, clean_users
 ) -> None:
     token = await _register(api_client, "mapping-review@example.com", "Mapping Review Org")
@@ -205,8 +212,7 @@ async def test_pending_mapping_can_be_confirmed_for_its_source_message(
                 {"worksheet_name": "Totals", "header_row": 4, "labels": ["Sum"]},
             ],
         )
-        proposal_id = proposal.id
-        source_message_id = message.id
+        assert proposal.id is not None
 
     pending = await graphql(
         api_client,
@@ -218,39 +224,6 @@ async def test_pending_mapping_can_be_confirmed_for_its_source_message(
         {"worksheetName": "Quote", "headerRow": 1, "labels": ["Item", "Price"]},
         {"worksheetName": "Totals", "headerRow": 4, "labels": ["Sum"]},
     ]
-
-    response = await graphql(
-        api_client,
-        """
-        mutation ConfirmSupplierMapping($id: UUID!, $input: ConfirmSupplierMappingInput!) {
-          confirmSupplierMapping(id: $id, input: $input) {
-            id version isConfirmed sourceMessageId worksheetName headerRow
-            columns { field label }
-          }
-        }
-        """,
-        {
-            "id": str(proposal_id),
-            "input": {
-                "worksheetName": "Quote",
-                "headerRow": 1,
-                "columns": [
-                    {"field": "PRODUCT_NAME", "label": "Item"},
-                    {"field": "UNIT_PRICE", "label": "Price"},
-                    {"field": "CURRENCY", "label": "Currency"},
-                    {"field": "UNIT", "label": "Unit"},
-                ],
-            },
-        },
-        _auth(token),
-    )
-
-    body = response.json()
-    assert "errors" not in body, body
-    mapping = body["data"]["confirmSupplierMapping"]
-    assert mapping["id"] == str(proposal_id)
-    assert mapping["isConfirmed"] is True
-    assert mapping["sourceMessageId"] == str(source_message_id)
 
 
 async def test_supplier_report_detail_contains_ranked_quote_rows(
@@ -302,7 +275,9 @@ async def test_supplier_report_detail_contains_ranked_quote_rows(
         """
         query SupplierReport($id: UUID!) {
           supplierReport(id: $id) {
-            report { id profitStatus summaryJson senderEmail receivedAt supplierId bestProfitCurrency }
+            report {
+              id profitStatus summaryJson senderEmail receivedAt supplierId bestProfitCurrency
+            }
             attachments { id filename }
             quotes {
               id supplierId productName unitPrice currency purchaseUnit rankingBasis
@@ -333,3 +308,98 @@ async def test_supplier_report_detail_contains_ranked_quote_rows(
     assert detail["report"]["senderEmail"] == "quotes@example.com"
     assert detail["report"]["supplierId"] == str(supplier.id)
     assert detail["report"]["receivedAt"] is not None
+
+
+async def test_an_owner_accepts_a_suggested_product_match(
+    api_client: AsyncClient, clean_users
+) -> None:
+    from decimal import Decimal as D
+
+    from app.db.models import Product
+
+    token = await _register(api_client, "match-review@example.com", "Match Review Org")
+    org_id = await _organization_id(api_client, token)
+    tenant = _tenant(org_id)
+    async with tenant_session(tenant) as session:
+        service = SupplierQuoteService(session, tenant)
+        supplier = await service.create_supplier(SupplierInput(name="Acme"))
+        product = Product(
+            organization_id=org_id,
+            external_id="CAT-1",
+            name="Catalogue Widget",
+            slug="catalogue-widget",
+            price=D("20.00"),
+            currency="USD",
+            price_updated_at=datetime.now(UTC),
+            attributes={"sale_unit": "each"},
+        )
+        session.add(product)
+        connection = GmailConnection(
+            organization_id=org_id,
+            email="quotes@example.com",
+            refresh_token_ciphertext="test-only-ciphertext",
+            history_id="50",
+        )
+        session.add(connection)
+        await session.flush()
+        message, _ = await service.get_or_create_message(
+            connection_id=connection.id,
+            gmail_message_id="match-message",
+            history_id="50",
+            sender_email="quotes@example.com",
+            received_at=datetime.now(UTC),
+            attachment_ids=[{"attachment_id": "part:1"}],
+        )
+        upsert = await service.upsert_quote_rows(
+            supplier.id,
+            message.id,
+            "part:1",
+            [
+                CanonicalQuoteRow(
+                    worksheet_name="Quote",
+                    source_row_number=2,
+                    supplier_sku="ACME-1",
+                    product_name="Widget",
+                    unit_price=Decimal("10.00"),
+                    currency="USD",
+                    purchase_unit="each",
+                )
+            ],
+        )
+        [quote] = upsert.quotes
+        quote.product_id = product.id
+        quote.match_status = "suggested"
+        report_id, quote_id, product_id = upsert.report.id, quote.id, product.id
+
+    detail = await graphql(
+        api_client,
+        """
+        query SupplierReport($id: UUID!) {
+          supplierReport(id: $id) { quotes { id catalogProductName catalogProductSku } }
+        }
+        """,
+        {"id": str(report_id)},
+        _auth(token),
+    )
+    [listed] = detail.json()["data"]["supplierReport"]["quotes"]
+    assert (listed["catalogProductName"], listed["catalogProductSku"]) == (
+        "Catalogue Widget",
+        "CAT-1",
+    )
+
+    confirmed = await graphql(
+        api_client,
+        """
+        mutation ConfirmSupplierQuoteMatch($quoteId: UUID!, $productId: UUID!) {
+          confirmSupplierQuoteMatch(quoteId: $quoteId, productId: $productId) {
+            id matchStatus unitGrossProfit purchasePriceRank
+          }
+        }
+        """,
+        {"quoteId": str(quote_id), "productId": str(product_id)},
+        _auth(token),
+    )
+    body = confirmed.json()
+    assert "errors" not in body, body
+    assert body["data"]["confirmSupplierQuoteMatch"]["matchStatus"] == "confirmed"
+    assert body["data"]["confirmSupplierQuoteMatch"]["purchasePriceRank"] == 1

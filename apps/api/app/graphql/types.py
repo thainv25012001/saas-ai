@@ -1323,21 +1323,6 @@ class SupplierMappingColumn:
     label: str
 
 
-@strawberry.input
-class SupplierMappingColumnInput:
-    field: SupplierQuoteField
-    label: str
-
-
-@strawberry.input
-class ConfirmSupplierMappingInput:
-    worksheet_name: str
-    header_row: int
-    columns: list[SupplierMappingColumnInput]
-    default_currency: str | None = None
-    default_purchase_unit: str | None = None
-
-
 @strawberry.type
 class SupplierSheetOption:
     """A worksheet header row the owner may move a proposal to. Labels only."""
@@ -1486,9 +1471,14 @@ class SupplierQuote:
     catalog_sale_currency: str | None
     catalog_sale_unit: str | None
     catalog_sale_price_updated_at: datetime | None
+    #: The catalogue product the row is (or is suggested to be) matched to.
+    catalog_product_name: str | None
+    catalog_product_sku: str | None
 
     @classmethod
-    def from_model(cls, model: SupplierQuoteModel) -> "SupplierQuote":
+    def from_model(
+        cls, model: SupplierQuoteModel, product: ProductModel | None = None
+    ) -> "SupplierQuote":
         return cls(
             id=model.id,
             supplier_id=model.supplier_id,
@@ -1513,6 +1503,8 @@ class SupplierQuote:
             catalog_sale_currency=model.catalog_sale_currency,
             catalog_sale_unit=model.catalog_sale_unit,
             catalog_sale_price_updated_at=model.catalog_sale_price_updated_at,
+            catalog_product_name=product.name if product else None,
+            catalog_product_sku=product.external_id if product else None,
         )
 
 

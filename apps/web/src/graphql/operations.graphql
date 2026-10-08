@@ -117,19 +117,27 @@ query SupplierQuoteOverview {
   pendingSupplierMappings(limit: 50, offset: 0) {
     id supplierId sourceMessageId version worksheetName headerRow
     columns { field label } columnLabels defaultCurrency defaultPurchaseUnit isConfirmed createdAt
+    sheetOptions { worksheetName headerRow labels }
   }
   supplierReports(limit: 50, offset: 0) {
-    id supplierMessageId profitStatus bestProfit bestMarginPercent summaryJson createdAt
+    id supplierMessageId profitStatus bestProfit bestProfitCurrency bestMarginPercent
+    summaryJson createdAt supplierId senderEmail receivedAt
   }
 }
 
 query SupplierReport($id: UUID!) {
   supplierReport(id: $id) {
-    report { id supplierMessageId profitStatus bestProfit bestMarginPercent summaryJson createdAt }
+    report {
+      id supplierMessageId profitStatus bestProfit bestProfitCurrency bestMarginPercent
+      summaryJson createdAt supplierId senderEmail receivedAt
+    }
+    attachments { id filename }
     quotes {
       id supplierId productId supplierSku productName specification unitPrice currency
       purchaseUnit profitStatus unitGrossProfit marginPercent purchasePriceRank
-      rankingBasis comparabilityReasons
+      rankingBasis comparabilityReasons attachmentId worksheetName sourceRowNumber
+      matchStatus catalogProductName catalogProductSku catalogSalePrice
+      catalogSaleCurrency catalogSaleUnit catalogSalePriceUpdatedAt
     }
   }
 }
@@ -146,10 +154,9 @@ mutation UpdateSupplier($id: UUID!, $input: SupplierInput!) {
   }
 }
 
-mutation ConfirmSupplierMapping($id: UUID!, $input: ConfirmSupplierMappingInput!) {
-  confirmSupplierMapping(id: $id, input: $input) {
-    id supplierId sourceMessageId version worksheetName headerRow
-    columns { field label } columnLabels defaultCurrency defaultPurchaseUnit isConfirmed createdAt
+mutation ConfirmSupplierQuoteMatch($quoteId: UUID!, $productId: UUID!) {
+  confirmSupplierQuoteMatch(quoteId: $quoteId, productId: $productId) {
+    id matchStatus
   }
 }
 

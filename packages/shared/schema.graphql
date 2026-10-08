@@ -50,14 +50,6 @@ type ApiKey {
   createdByName: String
 }
 
-input ConfirmSupplierMappingInput {
-  worksheetName: String!
-  headerRow: Int!
-  columns: [SupplierMappingColumnInput!]!
-  defaultCurrency: String = null
-  defaultPurchaseUnit: String = null
-}
-
 type Conversation {
   id: UUID!
   agentId: UUID!
@@ -345,7 +337,7 @@ type ModelOption {
 type Mutation {
   createSupplier(input: SupplierInput!): Supplier!
   updateSupplier(id: UUID!, input: SupplierInput!): Supplier!
-  confirmSupplierMapping(id: UUID!, input: ConfirmSupplierMappingInput!): SupplierMappingReview!
+  confirmSupplierQuoteMatch(quoteId: UUID!, productId: UUID!): SupplierQuote!
   createAgent(input: CreateAgentInput!): Agent!
   updateAgent(id: UUID!, input: UpdateAgentInput!): Agent!
   updateAgentConfig(agentId: UUID!, input: UpdateAgentConfigInput!): AgentConfig!
@@ -523,11 +515,6 @@ type SupplierMappingColumn {
   label: String!
 }
 
-input SupplierMappingColumnInput {
-  field: SupplierQuoteField!
-  label: String!
-}
-
 type SupplierMappingReview {
   id: UUID!
   supplierId: UUID!
@@ -580,6 +567,8 @@ type SupplierQuote {
   catalogSaleCurrency: String
   catalogSaleUnit: String
   catalogSalePriceUpdatedAt: DateTime
+  catalogProductName: String
+  catalogProductSku: String
 }
 
 enum SupplierQuoteField {

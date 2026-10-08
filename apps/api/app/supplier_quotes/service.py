@@ -12,10 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import ConflictError, NotFoundError, PermissionDeniedError, ValidationError
 from app.core.ids import uuid7
 from app.core.tenancy import TenantContext
-from app.db.models import MembershipRole
+from app.db.models import MembershipRole, Product
 from app.db.models.gmail_connection import GmailConnection
 from app.db.models.supplier import Supplier, SupplierMapping
 from app.db.models.supplier_quote import SupplierMessage, SupplierQuote, SupplierReport
+from app.supplier_quotes.comparisons import recalculate_product_comparisons
 from app.supplier_quotes.schemas import (
     CanonicalQuoteRow,
     SaveSupplierMappingInput,
@@ -603,6 +604,106 @@ class SupplierQuoteService:
             .offset(max(offset, 0))
         )
         return list(result.scalars().all())
+
+    async def confirm_quote_match(self, quote_id: Any, product_id: Any) -> SupplierQuote:
+        """Accept a catalogue product for a quote row, rank it, and remember
+        the supplier's SKU so its next quote matches without review."""
+        self._require_owner()
+        quote = await self.session.scalar(
+            select(SupplierQuote).where(
+                SupplierQuote.id == quote_id,
+                SupplierQuote.organization_id == self.tenant.organization_id,
+            )
+        )
+        if quote is None:
+            raise NotFoundError("supplier quote not found")
+        product = await self.session.scalar(
+            select(Product).where(
+                Product.id == product_id,
+                Product.organization_id == self.tenant.organization_id,
+                Product.is_active.is_(True),
+            )
+        )
+        if product is None:
+            raise NotFoundError("catalogue product not found")
+        supplier = await self._get_supplier(quote.supplier_id)
+
+        quote.product_id = product.id
+        quote.match_status = "confirmed"
+        quote.match_confidence = 1.0
+        sku = (quote.supplier_sku or "").strip()
+        if sku:
+            # Reassigned, not mutated: JSONB change tracking sees assignments.
+            supplier.sku_aliases = {**supplier.sku_aliases, sku: str(product.id)}
+        await self._resolve_match_review(quote)
+        await self.session.flush()
+        await recalculate_product_comparisons(
+            self.session, self.tenant, quote.supplier_message_id, {product.id}
+        )
+        await self.session.flush()
+        return quote
+
+    async def products_by_id(self, product_ids: set[Any]) -> dict[Any, Product]:
+        if not product_ids:
+            return {}
+        result = await self.session.execute(
+            select(Product).where(
+                Product.organization_id == self.tenant.organization_id,
+                Product.id.in_(product_ids),
+            )
+        )
+        return {product.id: product for product in result.scalars().all()}
+
+    async def _resolve_match_review(self, quote: SupplierQuote) -> None:
+        """Drop this row's "confirm the match" issue from its report, and
+        settle the email once nothing about it needs review any more."""
+        report = await self.session.scalar(
+            select(SupplierReport).where(
+                SupplierReport.organization_id == self.tenant.organization_id,
+                SupplierReport.supplier_message_id == quote.supplier_message_id,
+            )
+        )
+        if report is None:
+            return
+
+        def keep(issue: object) -> bool:
+            return not (
+                isinstance(issue, dict)
+                and issue.get("code") == "product_match_review"
+                and issue.get("worksheet_name") == quote.worksheet_name
+                and issue.get("source_row_number") == quote.source_row_number
+            )
+
+        summary = dict(report.summary_json)
+        attachments = {
+            key: (
+                {
+                    **value,
+                    "row_issues": [i for i in value.get("row_issues", []) if keep(i)],
+                }
+                if isinstance(value, dict)
+                else value
+            )
+            for key, value in dict(summary.get("attachments", {})).items()
+        }
+        for value in attachments.values():
+            if isinstance(value, dict):
+                value["issue_count"] = len(value["row_issues"])
+        remaining = [i for i in summary.get("row_issues", []) if keep(i)]
+        summary.update(row_issues=remaining, issue_count=len(remaining), attachments=attachments)
+        report.summary_json = summary
+
+        message = await self._get_message(quote.supplier_message_id)
+        unconfirmed = await self.session.scalar(
+            select(func.count(SupplierMapping.id)).where(
+                SupplierMapping.organization_id == self.tenant.organization_id,
+                SupplierMapping.source_message_id == message.id,
+                SupplierMapping.is_confirmed.is_(False),
+            )
+        )
+        if not remaining and not unconfirmed and message.status == "review_required":
+            message.status = "processed"
+            message.error_code = None
 
     async def messages_by_id(self, message_ids: set[Any]) -> dict[Any, SupplierMessage]:
         if not message_ids:

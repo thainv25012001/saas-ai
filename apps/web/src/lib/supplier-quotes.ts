@@ -2,14 +2,15 @@
  * Supplier quote analysis: the REST calls GraphQL cannot make, and the
  * one-lookup labels the dashboard renders statuses through.
  *
- * Gmail's OAuth handshake and the reprocess queue are REST
- * (`apps/api/app/api/gmail.py`); suppliers, mappings and reports are read and
- * written over GraphQL. Profit and rank are computed by the API -- this file
+ * Gmail's OAuth handshake, mapping confirmation and the reprocess queue are
+ * REST (`apps/api/app/api/gmail.py`): confirming must commit before its email
+ * is queued, which a GraphQL mutation cannot guarantee. Suppliers, match
+ * confirmation and reports are GraphQL. Profit and rank are computed by the API -- this file
  * only decides how an absent value is *described*, never what it is.
  */
 
 import type { BadgeTone } from "@/components/ui/Badge";
-import type { ConfirmSupplierMappingInput, SupplierQuoteField } from "@/graphql/generated";
+import type { SupplierQuoteField } from "@/graphql/generated";
 import { type ApiError, fetchWithRefresh, parseErrorEnvelope } from "./api";
 import type { DocumentAuth } from "./documents";
 import { formatPrice } from "./format";
@@ -38,6 +39,7 @@ const PROFIT_STATUS: Record<string, { label: string; tone: BadgeTone }> = {
   review_required: { label: "Needs review", tone: "info" },
   pending: { label: "Waiting for comparison", tone: "neutral" },
   available: { label: "Profit calculated", tone: "success" },
+  superseded: { label: "Replaced by a newer quote", tone: "neutral" },
 };
 
 export function profitStatusLabel(status: string): { label: string; tone: BadgeTone } {
@@ -95,6 +97,7 @@ const REASONS: Record<string, string> = {
   quantity_tier_requires_common_order_quantity: "Price depends on order quantity",
   missing_sale_price: "Missing sale price",
   stale_sale_price: "Sale price older than 90 days",
+  superseded_by_newer_quote: "Replaced by this supplier's newer quote",
 };
 
 export function comparabilityReasonLabel(reason: string): string {
@@ -115,7 +118,33 @@ const MESSAGE_ERRORS: Record<string, string> = {
   gmail_connection_unavailable: "Gmail is disconnected. Reconnect it to reprocess this email.",
   gmail_message_unavailable: "The email is no longer in Gmail.",
   gmail_refresh_failed: "Gmail access expired. Reconnect Gmail.",
+  gmail_access_denied: "Gmail access was revoked. Reconnect Gmail.",
+  gmail_maintenance_failed: "The daily Gmail check failed. Reconnect Gmail if this keeps happening.",
+  processing_failed: "This email could not be processed. Its spreadsheet may be damaged.",
+  supplier_classification_review: "The sender is not one of your suppliers.",
+  xlsx_attachment_missing: "No .xlsx spreadsheet was attached.",
+  items_need_review: "Some rows need review.",
 };
+
+const MATCH_STATUS: Record<string, { label: string; tone: BadgeTone }> = {
+  confirmed: { label: "Matched", tone: "success" },
+  suggested: { label: "Suggested match", tone: "info" },
+  unmatched: { label: "No catalogue match", tone: "warn" },
+};
+
+export function matchStatusLabel(status: string): { label: string; tone: BadgeTone } {
+  return MATCH_STATUS[status] ?? { label: humanize(status), tone: "neutral" };
+}
+
+/** A report's best unit profit, only ever shown with its currency: the API
+ * leaves both empty when the email's profits span several currencies. */
+export function bestProfitText(report: {
+  bestProfit: string | null;
+  bestProfitCurrency: string | null;
+}): string | null {
+  if (report.bestProfit === null || !report.bestProfitCurrency) return null;
+  return formatPrice(report.bestProfit, report.bestProfitCurrency);
+}
 
 export function messageErrorLabel(code: string): string {
   return MESSAGE_ERRORS[code] ?? humanize(code);
@@ -158,28 +187,71 @@ export const MAPPING_FIELDS: { field: SupplierQuoteField; label: string }[] = [
   { field: "VALID_UNTIL", label: "Valid until" },
 ];
 
+export type SheetOption = { worksheetName: string; headerRow: number; labels: string[] };
+
+export type MappingProposal = {
+  worksheetName: string;
+  headerRow: number;
+  columns: { field: SupplierQuoteField; label: string }[];
+  columnLabels: string[];
+  sheetOptions: SheetOption[];
+  defaultCurrency: string | null;
+  defaultPurchaseUnit: string | null;
+};
+
+export function sheetKey(option: { worksheetName: string; headerRow: number }): string {
+  return `${option.worksheetName}\u0000${option.headerRow}`;
+}
+
+/** Every header row the workbook offered, the proposed one first -- also for
+ * a proposal stored before the API recorded the alternatives. */
+export function sheetChoices(proposal: MappingProposal): SheetOption[] {
+  const own: SheetOption = {
+    worksheetName: proposal.worksheetName,
+    headerRow: proposal.headerRow,
+    labels: proposal.columnLabels,
+  };
+  const others = proposal.sheetOptions.filter((option) => sheetKey(option) !== sheetKey(own));
+  return [own, ...others];
+}
+
 export type MappingDraft = {
+  /** `sheetKey` of the chosen worksheet header row. */
+  sheet: string;
   /** Field -> chosen header label, `""` for not mapped. */
   fields: Record<SupplierQuoteField, string>;
   defaultCurrency: string;
   defaultPurchaseUnit: string;
 };
 
-export function emptyMappingDraft(proposal: {
-  columns: { field: SupplierQuoteField; label: string }[];
-  defaultCurrency: string | null;
-  defaultPurchaseUnit: string | null;
-}): MappingDraft {
-  const fields = Object.fromEntries(MAPPING_FIELDS.map(({ field }) => [field, ""])) as Record<
+function blankFields(): Record<SupplierQuoteField, string> {
+  return Object.fromEntries(MAPPING_FIELDS.map(({ field }) => [field, ""])) as Record<
     SupplierQuoteField,
     string
   >;
+}
+
+export function emptyMappingDraft(proposal: MappingProposal): MappingDraft {
+  const fields = blankFields();
   for (const column of proposal.columns) fields[column.field] = column.label;
   return {
+    sheet: sheetKey(proposal),
     fields,
     defaultCurrency: proposal.defaultCurrency ?? "",
     defaultPurchaseUnit: proposal.defaultPurchaseUnit ?? "",
   };
+}
+
+/** Moving to another header row: the old row's column choices name labels
+ * that row may not have, so they are cleared (restored when moving back to
+ * the proposed row). Defaults carry over; they do not depend on the sheet. */
+export function chooseSheet(draft: MappingDraft, proposal: MappingProposal, key: string): MappingDraft {
+  const fields = key === sheetKey(proposal) ? emptyMappingDraft(proposal).fields : blankFields();
+  return { ...draft, sheet: key, fields };
+}
+
+export function draftLabels(draft: MappingDraft, proposal: MappingProposal): string[] {
+  return sheetChoices(proposal).find((option) => sheetKey(option) === draft.sheet)?.labels ?? [];
 }
 
 /** `WorkbookMapping`'s validators, mirrored with the same rules so Confirm is
@@ -208,19 +280,29 @@ export function mappingProblems(draft: MappingDraft, labels: string[]): string[]
   return problems;
 }
 
-export function buildMappingInput(
-  proposal: { worksheetName: string; headerRow: number },
-  draft: MappingDraft,
-): ConfirmSupplierMappingInput {
+/** The body of `POST /api/v1/gmail/supplier-mappings/{id}/confirm`, which
+ * takes the API's `WorkbookMapping` as is: snake_case, fields lower-cased. */
+export type ConfirmMappingBody = {
+  worksheet_name: string;
+  header_row: number;
+  columns: Record<string, string>;
+  default_currency: string | null;
+  default_purchase_unit: string | null;
+};
+
+export function buildMappingBody(draft: MappingDraft, proposal: MappingProposal): ConfirmMappingBody {
+  const sheet = sheetChoices(proposal).find((option) => sheetKey(option) === draft.sheet) ?? proposal;
   return {
-    worksheetName: proposal.worksheetName,
-    headerRow: proposal.headerRow,
-    columns: MAPPING_FIELDS.filter(({ field }) => draft.fields[field]).map(({ field }) => ({
-      field,
-      label: draft.fields[field],
-    })),
-    defaultCurrency: draft.defaultCurrency.trim() || null,
-    defaultPurchaseUnit: draft.defaultPurchaseUnit.trim() || null,
+    worksheet_name: sheet.worksheetName,
+    header_row: sheet.headerRow,
+    columns: Object.fromEntries(
+      MAPPING_FIELDS.filter(({ field }) => draft.fields[field]).map(({ field }) => [
+        field.toLowerCase(),
+        draft.fields[field],
+      ]),
+    ),
+    default_currency: draft.defaultCurrency.trim() || null,
+    default_purchase_unit: draft.defaultPurchaseUnit.trim() || null,
   };
 }
 
@@ -260,10 +342,18 @@ async function send(
   path: string,
   method: "POST" | "DELETE",
   auth: DocumentAuth,
+  body?: unknown,
 ): Promise<Response> {
   const response = await fetchWithRefresh(
     (token) =>
-      fetch(`${auth.apiUrl}${path}`, { method, headers: { Authorization: `Bearer ${token}` } }),
+      fetch(`${auth.apiUrl}${path}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }),
     auth.accessToken,
     auth.onAccessToken,
   );
@@ -286,9 +376,25 @@ export async function disconnectGmail(auth: DocumentAuth): Promise<void> {
   await send("/api/v1/gmail/connection", "DELETE", auth);
 }
 
-/** Queues the Gmail re-fetch for a message whose mapping was just confirmed.
- * Called only after `confirmSupplierMapping` has returned, so the worker
- * always reads a committed mapping. */
+/** Confirms a proposed layout. The API commits it, then queues its email's
+ * re-fetch; `queued: false` means the confirmation stands but the queue was
+ * unavailable, and `reprocessSupplierMessage` can try again. */
+export async function confirmMapping(
+  mappingId: string,
+  body: ConfirmMappingBody,
+  auth: DocumentAuth,
+): Promise<{ queued: boolean }> {
+  const response = await send(
+    `/api/v1/gmail/supplier-mappings/${encodeURIComponent(mappingId)}/confirm`,
+    "POST",
+    auth,
+    body,
+  );
+  const result = (await response.json()) as { queued?: unknown };
+  return { queued: result.queued === true };
+}
+
+/** Queues the Gmail re-fetch again for a message whose mapping is confirmed. */
 export async function reprocessSupplierMessage(messageId: string, auth: DocumentAuth): Promise<void> {
   await send(`/api/v1/gmail/supplier-messages/${encodeURIComponent(messageId)}/reprocess`, "POST", auth);
 }
