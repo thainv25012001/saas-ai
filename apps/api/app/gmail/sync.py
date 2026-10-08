@@ -12,7 +12,7 @@ from typing import Any
 from arq import Retry
 from pydantic import BaseModel, ConfigDict, Field
 from redis.exceptions import LockError
-from sqlalchemy import or_, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -21,19 +21,13 @@ from app.core.tenancy import TenantContext, tenant_session, untenanted_session
 from app.db.models import (
     GmailConnection,
     Product,
-    Supplier,
     SupplierMessage,
-    SupplierQuote,
-    SupplierReport,
 )
 from app.db.models.supplier import SupplierMapping
 from app.gmail.client import GmailAPIError, GmailClient
 from app.gmail.oauth import GmailOAuthClient
 from app.gmail.token_crypto import decrypt_token, encrypt_token
 from app.supplier_quotes.analysis import (
-    SupplierOffer,
-    compare_product_offers,
-    group_offers_by_product,
     normalize_product_name,
 )
 from app.supplier_quotes.classification import (
@@ -43,6 +37,7 @@ from app.supplier_quotes.classification import (
     suggest_mapping,
     suggest_product_match,
 )
+from app.supplier_quotes.comparisons import product_sale_unit, recalculate_product_comparisons
 from app.supplier_quotes.schemas import (
     CanonicalQuoteRow,
     WorkbookMapping,
@@ -1076,13 +1071,13 @@ async def _process_gmail_message(
                 if product is not None:
                     quote.catalog_sale_price = product.price
                     quote.catalog_sale_currency = product.currency
-                    quote.catalog_sale_unit = _product_sale_unit(product)
+                    quote.catalog_sale_unit = product_sale_unit(product)
                     quote.catalog_sale_price_updated_at = product.price_updated_at
                 if stored_match.status == "confirmed" and quote.product_id is not None:
                     affected_product_ids.add(quote.product_id)
 
         if affected_product_ids:
-            await _recalculate_product_comparisons(
+            await recalculate_product_comparisons(
                 session,
                 tenant,
                 supplier_message.id,
@@ -1188,7 +1183,11 @@ async def _load_product_candidates(
 
 def _attachment_identities(attachments: list[GmailAttachment]) -> list[dict[str, Any]]:
     return [
-        {"attachment_id": attachment.attachment_id, "mime_type": attachment.mime_type}
+        {
+            "attachment_id": attachment.attachment_id,
+            "mime_type": attachment.mime_type,
+            "filename": attachment.filename,
+        }
         for attachment in attachments
     ]
 
@@ -1258,126 +1257,3 @@ def _candidate_products(row: CanonicalQuoteRow, products: list[Product]) -> list
         for score, _sku, product in sorted(scored, key=lambda item: (-item[0], item[1]))
         if score > 0
     ][:_PRODUCT_MATCH_CANDIDATES]
-
-
-def _product_sale_unit(product: Product) -> str | None:
-    attributes = product.attributes
-    if not isinstance(attributes, dict):
-        return None
-    value = attributes.get("sale_unit") or attributes.get("unit")
-    return value.strip() if isinstance(value, str) and value.strip() else None
-
-
-async def _recalculate_product_comparisons(
-    session: AsyncSession,
-    tenant: TenantContext,
-    message_id: uuid.UUID,
-    product_ids: set[uuid.UUID],
-) -> None:
-    today = datetime.now(UTC).date()
-    quote_result = await session.execute(
-        select(SupplierQuote, Supplier)
-        .join(
-            Supplier,
-            (Supplier.id == SupplierQuote.supplier_id)
-            & (Supplier.organization_id == SupplierQuote.organization_id),
-        )
-        .where(
-            SupplierQuote.organization_id == tenant.organization_id,
-            SupplierQuote.product_id.in_(product_ids),
-            SupplierQuote.match_status == "confirmed",
-            Supplier.is_active.is_(True),
-            or_(SupplierQuote.valid_until.is_(None), SupplierQuote.valid_until >= today),
-        )
-    )
-    quote_rows = list(quote_result.all())
-    products_result = await session.execute(
-        select(Product).where(
-            Product.organization_id == tenant.organization_id,
-            Product.id.in_(product_ids),
-        )
-    )
-    products_by_id = {product.id: product for product in products_result.scalars().all()}
-    rows_by_id = {str(quote.id): quote for quote, _supplier in quote_rows}
-    offers = [
-        SupplierOffer(
-            product_id=str(quote.product_id),
-            quote_id=str(quote.id),
-            supplier_id=str(supplier.id),
-            supplier_name=supplier.name,
-            unit_price=quote.unit_price,
-            currency=quote.currency,
-            purchase_unit=quote.purchase_unit,
-            quantity_tiers=quote.quantity_tiers,
-        )
-        for quote, supplier in quote_rows
-        if quote.product_id is not None
-    ]
-    comparisons: list[dict[str, Any]] = []
-    offers_by_product = group_offers_by_product(offers)
-    for product_id, product_offers in offers_by_product.items():
-        product = products_by_id.get(uuid.UUID(product_id))
-        if product is None:
-            continue
-        comparison = compare_product_offers(product_offers, product, datetime.now(UTC))
-        groups: list[dict[str, Any]] = []
-        for group in comparison.offer_groups:
-            for ranked in group.offers:
-                quote = rows_by_id.get(ranked.quote_id or "")
-                if quote is None:
-                    continue
-                quote.catalog_sale_price = product.price
-                quote.catalog_sale_currency = product.currency
-                quote.catalog_sale_unit = _product_sale_unit(product)
-                quote.catalog_sale_price_updated_at = product.price_updated_at
-                quote.profit_status = ranked.profit_status
-                quote.unit_gross_profit = ranked.unit_gross_profit
-                quote.margin_percent = ranked.margin
-                quote.purchase_price_rank = ranked.rank
-                quote.ranking_basis = group.ranking_basis
-                quote.comparability_reasons = ranked.comparability_reasons
-            groups.append(group.model_dump(mode="json"))
-        comparisons.append(
-            {
-                "product_id": product_id,
-                "product_name": product.name,
-                "profit_status": comparison.profit_status,
-                "ranking_basis": comparison.ranking_basis,
-                "sale_price_source_timestamp": (
-                    comparison.sale_price_source_timestamp.isoformat()
-                    if comparison.sale_price_source_timestamp
-                    else None
-                ),
-                "offer_groups": groups,
-            }
-        )
-
-    report_result = await session.execute(
-        select(SupplierReport).where(
-            SupplierReport.organization_id == tenant.organization_id,
-            SupplierReport.supplier_message_id == message_id,
-        )
-    )
-    report = report_result.scalar_one_or_none()
-    if report is None:
-        return
-    summary = dict(report.summary_json)
-    summary["product_comparisons"] = comparisons
-    report.summary_json = summary
-    known_profits = [
-        quote.unit_gross_profit
-        for quote, _supplier in quote_rows
-        if quote.unit_gross_profit is not None
-    ]
-    known_margins = [
-        quote.margin_percent for quote, _supplier in quote_rows if quote.margin_percent is not None
-    ]
-    report.best_profit = max(known_profits) if known_profits else None
-    report.best_margin_percent = max(known_margins) if known_margins else None
-    report.profit_status = (
-        "available"
-        if known_profits
-        else comparisons[0]["profit_status"]
-        if comparisons
-        else "review_required"
-    )

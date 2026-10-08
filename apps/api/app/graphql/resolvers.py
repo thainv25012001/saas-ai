@@ -234,14 +234,24 @@ class Query:
     async def supplier_reports(
         self, info: Info, limit: int = 50, offset: int = 0
     ) -> list[gql.SupplierReport]:
-        rows = await _supplier_quotes(info).list_reports(limit=limit, offset=offset)
-        return [gql.SupplierReport.from_model(row) for row in rows]
+        service = _supplier_quotes(info)
+        rows = await service.list_reports(limit=limit, offset=offset)
+        messages = await service.messages_by_id({row.supplier_message_id for row in rows})
+        return [
+            gql.SupplierReport.from_model(row, messages.get(row.supplier_message_id))
+            for row in rows
+        ]
 
     @strawberry.field
     async def supplier_report(self, info: Info, id: uuid.UUID) -> gql.SupplierReportDetail:
-        report, quotes = await _supplier_quotes(info).get_report(id)
+        service = _supplier_quotes(info)
+        report, quotes = await service.get_report(id)
+        message = (await service.messages_by_id({report.supplier_message_id})).get(
+            report.supplier_message_id
+        )
         return gql.SupplierReportDetail(
-            report=gql.SupplierReport.from_model(report),
+            report=gql.SupplierReport.from_model(report, message),
+            attachments=gql.SupplierAttachment.from_message(message),
             quotes=[gql.SupplierQuote.from_model(quote) for quote in quotes],
         )
 

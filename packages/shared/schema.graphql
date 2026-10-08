@@ -506,6 +506,11 @@ type Supplier {
   updatedAt: DateTime!
 }
 
+type SupplierAttachment {
+  id: String!
+  filename: String
+}
+
 input SupplierInput {
   name: String!
   senderEmails: [String!]! = []
@@ -566,6 +571,14 @@ type SupplierQuote {
   purchasePriceRank: Int
   rankingBasis: String!
   comparabilityReasons: [String!]!
+  attachmentId: String!
+  worksheetName: String!
+  sourceRowNumber: Int!
+  matchStatus: String!
+  catalogSalePrice: Decimal
+  catalogSaleCurrency: String
+  catalogSaleUnit: String
+  catalogSalePriceUpdatedAt: DateTime
 }
 
 enum SupplierQuoteField {
@@ -586,13 +599,18 @@ type SupplierReport {
   supplierMessageId: UUID!
   profitStatus: String!
   bestProfit: Decimal
+  bestProfitCurrency: String
   bestMarginPercent: Decimal
   summaryJson: JSON!
   createdAt: DateTime!
+  supplierId: UUID
+  senderEmail: String
+  receivedAt: DateTime
 }
 
 type SupplierReportDetail {
   report: SupplierReport!
+  attachments: [SupplierAttachment!]!
   quotes: [SupplierQuote!]!
 }
 

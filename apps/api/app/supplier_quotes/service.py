@@ -550,6 +550,17 @@ class SupplierQuoteService:
         )
         return list(result.scalars().all())
 
+    async def messages_by_id(self, message_ids: set[Any]) -> dict[Any, SupplierMessage]:
+        if not message_ids:
+            return {}
+        result = await self.session.execute(
+            select(SupplierMessage).where(
+                SupplierMessage.organization_id == self.tenant.organization_id,
+                SupplierMessage.id.in_(message_ids),
+            )
+        )
+        return {message.id: message for message in result.scalars().all()}
+
     async def get_report(self, report_id: Any) -> tuple[SupplierReport, list[SupplierQuote]]:
         report_result = await self.session.execute(
             select(SupplierReport).where(

@@ -261,7 +261,7 @@ async def test_supplier_report_detail_contains_ranked_quote_rows(
             history_id="50",
             sender_email="quotes@example.com",
             received_at=datetime.now(UTC),
-            attachment_ids=[{"attachment_id": "report-attachment"}],
+            attachment_ids=[{"attachment_id": "report-attachment", "filename": "quote.xlsx"}],
         )
         message.supplier_id = supplier.id
         upsert = await service.upsert_quote_rows(
@@ -287,8 +287,13 @@ async def test_supplier_report_detail_contains_ranked_quote_rows(
         """
         query SupplierReport($id: UUID!) {
           supplierReport(id: $id) {
-            report { id profitStatus summaryJson }
-            quotes { id supplierId productName unitPrice currency purchaseUnit rankingBasis }
+            report { id profitStatus summaryJson senderEmail receivedAt supplierId bestProfitCurrency }
+            attachments { id filename }
+            quotes {
+              id supplierId productName unitPrice currency purchaseUnit rankingBasis
+              attachmentId worksheetName sourceRowNumber matchStatus
+              catalogSalePrice catalogSaleCurrency catalogSaleUnit catalogSalePriceUpdatedAt
+            }
           }
         }
         """,
@@ -297,7 +302,19 @@ async def test_supplier_report_detail_contains_ranked_quote_rows(
     )
     body = response.json()
     assert "errors" not in body, body
-    [quote] = body["data"]["supplierReport"]["quotes"]
+    detail = body["data"]["supplierReport"]
+    [quote] = detail["quotes"]
     assert quote["supplierId"] == str(supplier.id)
     assert quote["productName"] == "Widget"
     assert quote["unitPrice"] == "10.0000"
+    # Audit trail back to the source cell (spec §8).
+    assert (quote["attachmentId"], quote["worksheetName"], quote["sourceRowNumber"]) == (
+        "report-attachment",
+        "Quote",
+        2,
+    )
+    assert quote["matchStatus"] == "unmatched"
+    assert detail["attachments"] == [{"id": "report-attachment", "filename": "quote.xlsx"}]
+    assert detail["report"]["senderEmail"] == "quotes@example.com"
+    assert detail["report"]["supplierId"] == str(supplier.id)
+    assert detail["report"]["receivedAt"] is not None

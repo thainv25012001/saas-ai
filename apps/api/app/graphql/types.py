@@ -1409,20 +1409,34 @@ class SupplierReport:
     supplier_message_id: uuid.UUID
     profit_status: str
     best_profit: Decimal | None
+    #: The currency of `best_profit`; `None` with it when this email's
+    #: profits span several currencies and so have no single best figure.
+    best_profit_currency: str | None
     best_margin_percent: Decimal | None
     summary_json: JSON
     created_at: datetime
+    #: Which email the report is about, for the audit trail (spec section 8).
+    supplier_id: uuid.UUID | None
+    sender_email: str | None
+    received_at: datetime | None
 
     @classmethod
-    def from_model(cls, model: SupplierReportModel) -> "SupplierReport":
+    def from_model(
+        cls, model: SupplierReportModel, message: SupplierMessageModel | None
+    ) -> "SupplierReport":
+        currency = model.summary_json.get("best_profit_currency")
         return cls(
             id=model.id,
             supplier_message_id=model.supplier_message_id,
             profit_status=model.profit_status,
             best_profit=model.best_profit,
+            best_profit_currency=currency if isinstance(currency, str) else None,
             best_margin_percent=model.best_margin_percent,
             summary_json=cast(JSON, model.summary_json),
             created_at=model.created_at,
+            supplier_id=message.supplier_id if message else None,
+            sender_email=message.sender_email if message else None,
+            received_at=message.received_at if message else None,
         )
 
 
@@ -1443,6 +1457,14 @@ class SupplierQuote:
     purchase_price_rank: int | None
     ranking_basis: str
     comparability_reasons: list[str]
+    attachment_id: str
+    worksheet_name: str
+    source_row_number: int
+    match_status: str
+    catalog_sale_price: Decimal | None
+    catalog_sale_currency: str | None
+    catalog_sale_unit: str | None
+    catalog_sale_price_updated_at: datetime | None
 
     @classmethod
     def from_model(cls, model: SupplierQuoteModel) -> "SupplierQuote":
@@ -1462,10 +1484,38 @@ class SupplierQuote:
             purchase_price_rank=model.purchase_price_rank,
             ranking_basis=model.ranking_basis,
             comparability_reasons=list(model.comparability_reasons),
+            attachment_id=model.attachment_id,
+            worksheet_name=model.worksheet_name,
+            source_row_number=model.source_row_number,
+            match_status=model.match_status,
+            catalog_sale_price=model.catalog_sale_price,
+            catalog_sale_currency=model.catalog_sale_currency,
+            catalog_sale_unit=model.catalog_sale_unit,
+            catalog_sale_price_updated_at=model.catalog_sale_price_updated_at,
         )
+
+
+@strawberry.type
+class SupplierAttachment:
+    id: str
+    filename: str | None
+
+    @classmethod
+    def from_message(cls, message: SupplierMessageModel | None) -> list["SupplierAttachment"]:
+        if message is None:
+            return []
+        return [
+            cls(
+                id=str(item["attachment_id"]),
+                filename=item.get("filename") if isinstance(item.get("filename"), str) else None,
+            )
+            for item in message.attachment_ids
+            if isinstance(item, dict) and isinstance(item.get("attachment_id"), str)
+        ]
 
 
 @strawberry.type
 class SupplierReportDetail:
     report: SupplierReport
+    attachments: list[SupplierAttachment]
     quotes: list[SupplierQuote]
