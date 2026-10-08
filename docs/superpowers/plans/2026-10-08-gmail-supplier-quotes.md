@@ -97,11 +97,11 @@
 - OAuth token fields store ciphertext only. Message identity is unique per mailbox; quote identity is unique per message, attachment, sheet, and source row.
 - Migration function `resolve_gmail_mailboxes(email)` returns only matching `(organization_id, connection_id)` pairs and is executable only by the configured runtime role. Tenant-scoped workers reload each record in `tenant_session` before reading credentials or touching provider data.
 
-- [ ] **Step 1: Write failing unit tests** for uniqueness, nullable sale-price behavior in stored quote/report projections, and ciphertext-only model fields.
-- [ ] **Step 2: Run `cd apps/api && uv run pytest tests/unit/test_supplier_quote_models.py -q`** and verify the expected missing-model failures.
-- [ ] **Step 3: Add the ORM models and Alembic migration.** Register models for metadata, create explicit indexes/constraints, call `enable_rls` for tenant-owned tables, and create/restrict the minimal mailbox resolver function following the `resolve_widget` migration pattern.
-- [ ] **Step 4: Add integration tests** proving tenant A cannot read tenant B's suppliers, mappings, messages, quotes, or reports; the pre-tenant resolver exposes only mailbox and organization IDs for an exact connected address; and `price_updated_at` changes only when price or currency changes.
-- [ ] **Step 5: Run focused unit and integration tests**, including `cd apps/api && uv run pytest tests/unit/test_supplier_quote_models.py tests/integration/test_supplier_quote_persistence.py -q`.
+- [x] **Step 1: Write failing unit tests** for uniqueness, nullable sale-price behavior in stored quote/report projections, and ciphertext-only model fields.
+- [x] **Step 2: Run `cd apps/api && uv run pytest tests/unit/test_supplier_quote_models.py -q`** and verify the expected missing-model failures.
+- [x] **Step 3: Add the ORM models and Alembic migration.** Register models for metadata, create explicit indexes/constraints, call `enable_rls` for tenant-owned tables, and create/restrict the minimal mailbox resolver function following the `resolve_widget` migration pattern.
+- [x] **Step 4: Add integration tests** proving tenant A cannot read tenant B's suppliers, mappings, messages, quotes, or reports; the pre-tenant resolver exposes only mailbox and organization IDs for an exact connected address; and `price_updated_at` changes only when price or currency changes.
+- [x] **Step 5: Run focused unit and integration tests**, including `cd apps/api && uv run pytest tests/unit/test_supplier_quote_models.py tests/integration/test_supplier_quote_persistence.py -q`.
 
 ### Task 4: Supplier services, mapping confirmation, and report queries
 
@@ -116,11 +116,11 @@
 - A mapping update creates a new version; prior quote rows retain the version used to parse them.
 - When a mapping needs user review, persist only column labels and the proposed field mapping, not sample cell values or attachment bytes. After confirmation, refetch the attachment from Gmail using the saved message/attachment identifiers and process it with the confirmed mapping.
 
-- [ ] **Step 1: Write failing integration tests** for supplier CRUD, mapping version increments, idempotent quote upsert, report retrieval, and cross-tenant not-found behavior.
-- [ ] **Step 2: Run `cd apps/api && uv run pytest tests/integration/test_supplier_quote_service.py -q`** and confirm failures are due to absent service behavior.
-- [ ] **Step 3: Implement the tenant-bound service** with explicit organization filters, one transaction per cohesive write, and bounded status/error fields that never persist raw email bodies.
-- [ ] **Step 4: Add a test** proving a failed row can be recorded for review while valid rows in the same attachment remain persisted.
-- [ ] **Step 5: Run the focused service integration tests** and verify database cleanup leaves no rows for either tenant.
+- [x] **Step 1: Write failing integration tests** for supplier CRUD, mapping version increments, idempotent quote upsert, report retrieval, and cross-tenant not-found behavior.
+- [x] **Step 2: Run `cd apps/api && uv run pytest tests/integration/test_supplier_quote_service.py -q`** and confirm failures are due to absent service behavior.
+- [x] **Step 3: Implement the tenant-bound service** with explicit organization filters, one transaction per cohesive write, and bounded status/error fields that never persist raw email bodies.
+- [x] **Step 4: Add a test** proving a failed row can be recorded for review while valid rows in the same attachment remain persisted.
+- [x] **Step 5: Run the focused service integration tests** and verify database cleanup leaves no rows for either tenant.
 
 ### Task 5: OAuth, encrypted credentials, and Gmail REST client
 
@@ -177,8 +177,8 @@
 - [x] **Step 2: Run the focused tests** and verify failures reflect missing handler/client behavior.
 - [x] **Step 3: Implement Pub/Sub verification and webhook.** Verify signature, issuer, configured audience, service-account email, and verified-email claim. Reject invalid requests before DB resolution. Decode only the Pub/Sub envelope and enqueue work; do not log its contents.
 - [x] **Step 4: Implement sync and worker tasks.** Fetch history pages, serialize cursor advancement per mailbox, advance the saved cursor only after each batch is durably processed, filter to newly added inbox messages, fetch XLSX attachments, classify sender, suggest/confirm mappings, match products, and persist rows/issues/report. Register each job and renewal/reconciliation cron in `WorkerSettings`.
-- [ ] **Step 5: Add and run a tenant integration test** where a valid push for one mailbox cannot enqueue or fetch another tenant's credentials, plus an unauthenticated/incorrect-audience request test that never reaches the resolver. (Auth-route coverage passes; database-backed tenant assertion is pending PostgreSQL availability.)
-- [ ] **Step 6: Run `cd apps/api && uv run pytest tests/unit/test_gmail_pubsub.py tests/unit/test_gmail_sync.py tests/unit/test_supplier_classification.py tests/integration/test_gmail_webhook.py -q`** and `uv run pytest tests/unit/test_worker_settings.py -q`.
+- [x] **Step 5: Add and run a tenant integration test** where a valid push for one mailbox cannot enqueue or fetch another tenant's credentials, plus an unauthenticated/incorrect-audience request test that never reaches the resolver.
+- [x] **Step 6: Run `cd apps/api && uv run pytest tests/unit/test_gmail_pubsub.py tests/unit/test_gmail_sync.py tests/unit/test_supplier_classification.py tests/integration/test_gmail_webhook.py -q`** and `uv run pytest tests/unit/test_worker_settings.py -q`.
 
 ### Task 7: GraphQL supplier setup, mappings, and reports
 
@@ -196,11 +196,11 @@
 - Mutations create/update supplier sender rules and confirm a proposed mapping version. OAuth token values, raw email bodies, and attachment bytes are never GraphQL fields.
 - All resolvers use `Context`, `_require_tenant`, and `SupplierQuoteService` following existing product resolvers.
 
-- [ ] **Step 1: Write failing GraphQL integration tests** for authenticated tenant-only lists, unauthenticated rejection, supplier create/update, mapping confirmation, report detail, and absence of secret/content fields in the schema.
-- [ ] **Step 2: Run `cd apps/api && uv run pytest tests/integration/test_graphql_supplier_quotes.py -q`** and confirm the fields/mutations are not present.
-- [ ] **Step 3: Implement Strawberry types and resolvers** with explicit pagination limits and ownership checks.
-- [ ] **Step 4: Add operations to `operations.graphql`, including mapping-confirmation requeue; run `make schema` then `cd apps/web && npm run codegen`, and add an assertion test for generated query use only through typed documents.
-- [ ] **Step 5: Run the focused GraphQL integration test and `cd apps/web && npm run typecheck`**.
+- [x] **Step 1: Write failing GraphQL integration tests** for authenticated tenant-only lists, unauthenticated rejection, supplier create/update, mapping confirmation, report detail, and absence of secret/content fields in the schema.
+- [x] **Step 2: Run `cd apps/api && uv run pytest tests/integration/test_graphql_supplier_quotes.py -q`** and confirm the fields/mutations are not present.
+- [x] **Step 3: Implement Strawberry types and resolvers** with explicit pagination limits and ownership checks.
+- [x] **Step 4: Add operations to `operations.graphql`, including mapping-confirmation requeue; run `make schema` then `cd apps/web && npm run codegen`, and add an assertion test for generated query use only through typed documents.
+- [x] **Step 5: Run the focused GraphQL integration test and `cd apps/web && npm run typecheck`**.
 
 ### Task 8: Supplier quote dashboard and mapping review
 
