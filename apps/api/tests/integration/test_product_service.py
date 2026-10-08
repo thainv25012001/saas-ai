@@ -50,6 +50,20 @@ async def test_create_returns_a_product_scoped_to_the_tenant(tenant_a):
     assert product.is_active is True
 
 
+async def test_create_and_unpriced_upsert_keep_sale_price_timestamp_nullable(tenant_a):
+    async with tenant_session(tenant_a) as session:
+        service = ProductService(session, tenant_a)
+        priced = await service.create(_input(external_id="priced-timestamp"))
+        unpriced = await service.create(_input(external_id="unpriced-timestamp", price=None))
+        assert priced.price_updated_at is not None
+        assert unpriced.price_updated_at is None
+
+        [cleared] = await service.upsert_many([_input(external_id="priced-timestamp", price=None)])
+
+    assert cleared.price is None
+    assert cleared.price_updated_at is None
+
+
 async def test_get_from_another_tenant_raises_not_found(tenant_a, tenant_b):
     async with tenant_session(tenant_a) as session:
         product = await _product(session, tenant_a)
@@ -117,6 +131,43 @@ async def test_upsert_many_same_external_id_updates_instead_of_duplicating(
     count, name = result.one()
     assert count == 1
     assert name == "Renamed"
+
+
+async def test_price_updated_at_tracks_sale_price_and_currency_changes(tenant_a, owner_connection):
+    from datetime import UTC, datetime
+
+    async with tenant_session(tenant_a) as session:
+        service = ProductService(session, tenant_a)
+        [created] = await service.upsert_many([_input(external_id="price-timestamp")])
+        assert created.price_updated_at is not None
+        product_id = created.id
+
+    known_timestamp = datetime(2020, 1, 1, tzinfo=UTC)
+    await owner_connection.execute(
+        text("UPDATE products SET price_updated_at = :observed WHERE id = :id"),
+        {"observed": known_timestamp, "id": product_id},
+    )
+    await owner_connection.commit()
+
+    async with tenant_session(tenant_a) as session:
+        [unchanged] = await ProductService(session, tenant_a).upsert_many(
+            [_input(external_id="price-timestamp")]
+        )
+    assert unchanged.price_updated_at == known_timestamp
+
+    async with tenant_session(tenant_a) as session:
+        [price_changed] = await ProductService(session, tenant_a).upsert_many(
+            [_input(external_id="price-timestamp", price="33000.00")]
+        )
+    assert price_changed.price_updated_at is not None
+    assert price_changed.price_updated_at > known_timestamp
+
+    async with tenant_session(tenant_a) as session:
+        [currency_changed] = await ProductService(session, tenant_a).upsert_many(
+            [_input(external_id="price-timestamp", price="33000.00", currency="CAD")]
+        )
+    assert currency_changed.price_updated_at is not None
+    assert currency_changed.price_updated_at > price_changed.price_updated_at
 
 
 async def test_upsert_many_price_update_omitting_embedding_preserves_it(tenant_a):

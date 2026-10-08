@@ -1,7 +1,8 @@
 import uuid
+from datetime import UTC, datetime
 from typing import cast
 
-from sqlalchemy import Table, func, or_, select
+from sqlalchemy import Table, case, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -84,6 +85,7 @@ class ProductService:
             description=data.description,
             category=data.category,
             price=data.price,
+            price_updated_at=datetime.now(UTC) if data.price is not None else None,
             currency=data.currency,
             attributes=data.attributes,
             availability=data.availability,
@@ -329,6 +331,7 @@ class ProductService:
                     "description": row.description,
                     "category": row.category,
                     "price": row.price,
+                    "price_updated_at": datetime.now(UTC) if row.price is not None else None,
                     "currency": row.currency,
                     "attributes": row.attributes,
                     "availability": row.availability,
@@ -368,6 +371,17 @@ class ProductService:
             insert_stmt.excluded.embedding_model, table.c.embedding_model
         )
         set_["updated_at"] = func.now()
+        set_["price_updated_at"] = case(
+            (insert_stmt.excluded.price.is_(None), None),
+            (
+                or_(
+                    table.c.price.is_distinct_from(insert_stmt.excluded.price),
+                    table.c.currency.is_distinct_from(insert_stmt.excluded.currency),
+                ),
+                func.now(),
+            ),
+            else_=table.c.price_updated_at,
+        )
         upsert_stmt = insert_stmt.on_conflict_do_update(
             index_elements=[table.c.organization_id, table.c.external_id],
             set_=set_,

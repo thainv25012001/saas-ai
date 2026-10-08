@@ -1,9 +1,10 @@
 import enum
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import CHAR, Boolean, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import CHAR, Boolean, DateTime, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -52,6 +53,9 @@ class Product(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     category: Mapped[str | None] = mapped_column(String(255), nullable=True)
     price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    price_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # ISO 4217, e.g. "USD" -- fixed-width so a truncated or padded code
     # (a common CSV-export artifact) is a load error, not a silent 2- or
     # 4-character value sitting next to correct 3-character ones.
