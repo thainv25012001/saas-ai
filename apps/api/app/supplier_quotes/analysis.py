@@ -223,12 +223,12 @@ def match_catalog_product(
         if len(matches) > 1:
             return MatchResult(status="unmatched", confidence=0.0, reason="duplicate_catalog_sku")
 
-    name = _normalize_name(quote.product_name)
+    name = normalize_product_name(quote.product_name)
     if name:
         matches = [
             product
             for product in products
-            if _normalize_name(getattr(product, "name", None)) == name
+            if normalize_product_name(getattr(product, "name", None)) == name
         ]
         if len(matches) == 1:
             return _match_result(
@@ -465,7 +465,7 @@ def _match_result(
     )
 
 
-def _normalize_name(value: object) -> str:
+def normalize_product_name(value: object) -> str:
     return " ".join(str(value or "").casefold().split())
 
 

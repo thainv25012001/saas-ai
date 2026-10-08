@@ -153,6 +153,21 @@ async def test_quote_upsert_is_idempotent_and_report_is_retrievable(tenant_a):
     assert [row.id for row in quote_rows] == [first.quotes[0].id]
 
 
+async def test_a_large_price_list_is_stored_in_full(tenant_a):
+    # One multi-row INSERT of 2,000 rows would exceed PostgreSQL's 32,767
+    # bind-parameter limit; the parser itself allows 25,000 rows.
+    rows = [
+        _quote().model_copy(update={"source_row_number": number, "supplier_sku": f"SUP-{number}"})
+        for number in range(2, 2002)
+    ]
+    async with tenant_session(tenant_a) as session:
+        service = SupplierQuoteService(session, tenant_a)
+        supplier, message_id = await _setup(service)
+        result = await service.upsert_quote_rows(supplier.id, message_id, "attachment-1", rows)
+
+    assert len(result.quotes) == 2000
+
+
 async def test_reprocessing_drops_rows_missing_from_the_new_parse(tenant_a):
     second_row = _quote().model_copy(update={"source_row_number": 3, "supplier_sku": "SUP-2"})
     async with tenant_session(tenant_a) as session:

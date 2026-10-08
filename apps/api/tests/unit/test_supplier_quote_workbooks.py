@@ -191,3 +191,28 @@ def test_worksheet_over_row_limit_is_rejected() -> None:
 
     assert parsed.rows == []
     assert [issue.code for issue in parsed.issues] == ["row_limit_exceeded"]
+
+
+def _with_broken_sheet_xml(data: bytes) -> bytes:
+    import zipfile
+
+    source = zipfile.ZipFile(BytesIO(data))
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w") as target:
+        for entry in source.infolist():
+            content = source.read(entry.filename)
+            if entry.filename.startswith("xl/worksheets/sheet"):
+                content = content[: len(content) // 2]
+            target.writestr(entry, content)
+    return output.getvalue()
+
+
+def test_malformed_sheet_xml_returns_a_bounded_issue_instead_of_raising() -> None:
+    data = _with_broken_sheet_xml(_quoted_workbook_bytes())
+
+    inspection = inspect_supplier_workbook(data)
+    result = parse_supplier_workbook(data, _mapping())
+
+    assert [issue.code for issue in inspection.issues] == ["invalid_workbook"]
+    assert result.rows == []
+    assert [issue.code for issue in result.issues] == ["invalid_workbook"]

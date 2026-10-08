@@ -107,15 +107,22 @@ def test_import_products_task_is_registered() -> None:
 
 
 def test_gmail_sync_and_maintenance_tasks_are_registered() -> None:
+    from app.workers.settings import GMAIL_JOB_MAX_TRIES
     from app.workers.tasks import (
         renew_gmail_watches_task,
         reprocess_supplier_message_task,
         sync_gmail_mailbox_task,
     )
 
-    assert sync_gmail_mailbox_task in WorkerSettings.functions
-    assert renew_gmail_watches_task in WorkerSettings.functions
-    assert reprocess_supplier_message_task in WorkerSettings.functions
+    registered = {
+        getattr(item, "coroutine", item): item for item in WorkerSettings.functions
+    }
+    assert renew_gmail_watches_task in registered
+    # A busy mailbox is retried every 30s rather than dropped, so these two
+    # need a budget that outlasts one long sync holding the mailbox lock.
+    for task in (sync_gmail_mailbox_task, reprocess_supplier_message_task):
+        function = registered[task]
+        assert getattr(function, "max_tries", None) == GMAIL_JOB_MAX_TRIES
 
 
 def test_gmail_watch_renewal_is_scheduled_daily() -> None:

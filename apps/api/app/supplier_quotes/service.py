@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import Table, delete, func, select, tuple_
+from sqlalchemy import Table, delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +23,7 @@ from app.supplier_quotes.schemas import (
     WorkbookRowIssue,
 )
 
+_UPSERT_CHUNK_ROWS = 500
 _MAX_LIST_LIMIT = 100
 _MAX_STORED_ROW_ISSUES = 100
 _ALLOWED_MESSAGE_STATUSES = {
@@ -388,18 +389,28 @@ class SupplierQuoteService:
         # Reprocessing after a confirmed layout may produce fewer rows. Drop
         # only the rows absent from this parse, so reports cannot retain stale
         # offers while surviving rows keep their identity.
-        stale = delete(SupplierQuote).where(
-            SupplierQuote.organization_id == self.tenant.organization_id,
-            SupplierQuote.supplier_message_id == message.id,
-            SupplierQuote.attachment_id == attachment_id,
+        # The difference is computed here rather than as `NOT IN (...)`, which
+        # would bind two parameters per row and hit the same limit as below.
+        kept = {(quote.worksheet_name, quote.source_row_number) for quote in rows}
+        existing = await self.session.execute(
+            select(
+                SupplierQuote.id, SupplierQuote.worksheet_name, SupplierQuote.source_row_number
+            ).where(
+                SupplierQuote.organization_id == self.tenant.organization_id,
+                SupplierQuote.supplier_message_id == message.id,
+                SupplierQuote.attachment_id == attachment_id,
+            )
         )
-        if rows:
-            stale = stale.where(
-                tuple_(SupplierQuote.worksheet_name, SupplierQuote.source_row_number).not_in(
-                    [(quote.worksheet_name, quote.source_row_number) for quote in rows]
+        stale_ids = [
+            row.id for row in existing if (row.worksheet_name, row.source_row_number) not in kept
+        ]
+        for start in range(0, len(stale_ids), _UPSERT_CHUNK_ROWS):
+            await self.session.execute(
+                delete(SupplierQuote).where(
+                    SupplierQuote.organization_id == self.tenant.organization_id,
+                    SupplierQuote.id.in_(stale_ids[start : start + _UPSERT_CHUNK_ROWS]),
                 )
             )
-        await self.session.execute(stale)
 
         values = [
             self._quote_values(
@@ -411,9 +422,11 @@ class SupplierQuoteService:
             )
             for quote in rows
         ]
-        if values:
-            table = cast(Table, SupplierQuote.__table__)
-            statement = pg_insert(table).values(values)
+        table = cast(Table, SupplierQuote.__table__)
+        # Chunked: PostgreSQL caps one statement at 32,767 bind parameters,
+        # and at ~24 per row a single INSERT fails past ~1,365 rows.
+        for start in range(0, len(values), _UPSERT_CHUNK_ROWS):
+            statement = pg_insert(table).values(values[start : start + _UPSERT_CHUNK_ROWS])
             mutable_columns = {
                 column.name: getattr(statement.excluded, column.name)
                 for column in table.columns

@@ -40,6 +40,9 @@ async def _on_startup(_ctx: dict[str, Any]) -> None:
     configure_logging(get_settings().log_level)
 
 
+GMAIL_JOB_MAX_TRIES = 20
+
+
 class WorkerSettings:
     # Annotated, not inferred: mypy infers a list's type from its first
     # element, so a second job with a different signature is a `list-item`
@@ -48,9 +51,11 @@ class WorkerSettings:
         ingest_document_task,
         title_conversation_task,
         import_products_task,
-        sync_gmail_mailbox_task,
+        # A mailbox busy with another job is retried (30s apart) rather than
+        # dropped; 20 tries outlast one long sync holding the mailbox lock.
+        func(sync_gmail_mailbox_task, max_tries=GMAIL_JOB_MAX_TRIES),
+        func(reprocess_supplier_message_task, max_tries=GMAIL_JOB_MAX_TRIES),
         renew_gmail_watches_task,
-        reprocess_supplier_message_task,
         # Wrapped, for its own timeout: an evaluation runs its cases one
         # after another (docs/PHASE-6.md §5), so up to 200 real provider
         # turns plus judge calls cannot fit `job_timeout` below. `func`

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import difflib
@@ -8,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
 from typing import Any
 
+from arq import Retry
 from pydantic import BaseModel, ConfigDict, Field
 from redis.exceptions import LockError
 from sqlalchemy import or_, select, text
@@ -32,10 +34,12 @@ from app.supplier_quotes.analysis import (
     SupplierOffer,
     compare_product_offers,
     group_offers_by_product,
+    normalize_product_name,
 )
 from app.supplier_quotes.classification import (
     ProductMatchResult,
     classify_supplier_email,
+    deterministic_product_match,
     suggest_mapping,
     suggest_product_match,
 )
@@ -52,6 +56,12 @@ _MAX_RECONCILIATION_PAGES = 100
 _MAILBOX_LOCK_TTL_SECONDS = 900
 _PRODUCT_MATCH_CANDIDATES = 30
 _MAX_PROMPT_TEXT = 12_000
+#: Rows per message that may ask the LLM for a catalogue match. Exact SKU and
+#: remembered matches need no call; past this, rows wait for review rather
+#: than turning one large price list into thousands of sequential LLM calls.
+_LLM_MATCHES_PER_MESSAGE = 25
+_BUSY_RETRY_SECONDS = 30
+_TRANSIENT_RETRY_SECONDS = 60
 
 
 class GmailSyncError(RuntimeError):
@@ -221,6 +231,11 @@ def _history_id_value(value: str) -> int:
     return int(value) if value.isdigit() else 0
 
 
+def _is_transient(exc: GmailAPIError) -> bool:
+    """Rate limits and Google-side failures: worth retrying the whole job."""
+    return exc.status_code is not None and (exc.status_code == 429 or exc.status_code >= 500)
+
+
 async def run_gmail_sync(
     *,
     mailbox_email: str,
@@ -235,6 +250,7 @@ async def run_gmail_sync(
         )
         resolved = [(uuid.UUID(str(row[0])), uuid.UUID(str(row[1]))) for row in result.all()]
 
+    busy = False
     for organization_id, connection_id in resolved:
         lock = get_redis().lock(
             f"gmail:sync:{connection_id}",
@@ -242,6 +258,10 @@ async def run_gmail_sync(
             blocking_timeout=0,
         )
         if not await lock.acquire(blocking=False):
+            # Another job holds this mailbox and may have listed its history
+            # before the change this notification announces, so skipping
+            # would strand that mail until the next notification. Retry.
+            busy = True
             continue
         try:
             await _sync_connection(
@@ -255,6 +275,8 @@ async def run_gmail_sync(
                 await lock.release()
             except LockError:
                 pass
+    if busy:
+        raise Retry(defer=_BUSY_RETRY_SECONDS)
 
 
 async def run_gmail_message_reprocess(
@@ -314,7 +336,7 @@ async def run_gmail_message_reprocess(
         blocking_timeout=0,
     )
     if not await lock.acquire(blocking=False):
-        raise GmailSyncError("Gmail mailbox is already being synchronized")
+        raise Retry(defer=_BUSY_RETRY_SECONDS)
     try:
         try:
             refresh_token = decrypt_token(refresh_ciphertext)
@@ -344,17 +366,23 @@ async def run_gmail_message_reprocess(
                     error_code="gmail_message_unavailable",
                 )
             return
-        await _process_gmail_message(
-            tenant=tenant,
-            connection_id=connection_id,
-            mailbox_email=mailbox_email,
-            history_id=history_id,
-            message_id=gmail_message_id,
-            message=message,
-            gmail=gmail,
-            access_token=tokens.access_token,
-            force_reprocess=True,
-        )
+        try:
+            await _process_isolated(
+                tenant=tenant,
+                connection_id=connection_id,
+                mailbox_email=mailbox_email,
+                history_id=history_id,
+                message_id=gmail_message_id,
+                message=message,
+                gmail=gmail,
+                access_token=tokens.access_token,
+                force_reprocess=True,
+            )
+        except GmailAPIError as exc:
+            if exc.status_code == 401:
+                await _mark_connection_error(tenant, connection_id, "gmail_access_denied")
+                return
+            raise Retry(defer=_TRANSIENT_RETRY_SECONDS) from exc
     finally:
         try:
             await lock.release()
@@ -379,27 +407,45 @@ async def run_gmail_maintenance() -> None:
     now = datetime.now(UTC)
     for organization_id, connection_id, email, cursor in mailboxes:
         tenant = _worker_tenant(organization_id, f"gmail-watch:{connection_id}")
-        async with tenant_session(tenant) as session:
-            result = await session.execute(
-                select(GmailConnection).where(
-                    GmailConnection.id == connection_id,
-                    GmailConnection.organization_id == organization_id,
-                )
+        try:
+            await _maintain_mailbox(tenant, connection_id, email, cursor, now)
+        except Retry:
+            # Another job is syncing this mailbox right now; it is current.
+            continue
+        except Exception:
+            # One tenant's mailbox must not stop renewal for every mailbox
+            # after it in the list. Surface it on that connection instead.
+            await _mark_connection_error(tenant, connection_id, "gmail_maintenance_failed")
+
+
+async def _maintain_mailbox(
+    tenant: TenantContext,
+    connection_id: uuid.UUID,
+    email: str,
+    cursor: str | None,
+    now: datetime,
+) -> None:
+    async with tenant_session(tenant) as session:
+        result = await session.execute(
+            select(GmailConnection).where(
+                GmailConnection.id == connection_id,
+                GmailConnection.organization_id == tenant.organization_id,
             )
-            connection = result.scalar_one_or_none()
-            if connection is None:
-                continue
-            refresh_ciphertext = connection.refresh_token_ciphertext
-            expires_at = connection.watch_expires_at
-            history_id = connection.history_id
-        if expires_at is None or expires_at <= now + timedelta(days=1):
-            await _renew_watch(tenant, connection_id, refresh_ciphertext)
-        if history_id:
-            await run_gmail_sync(
-                mailbox_email=email,
-                notification_history_id=cursor,
-                force_sync=True,
-            )
+        )
+        connection = result.scalar_one_or_none()
+        if connection is None:
+            return
+        refresh_ciphertext = connection.refresh_token_ciphertext
+        expires_at = connection.watch_expires_at
+        history_id = connection.history_id
+    if expires_at is None or expires_at <= now + timedelta(days=1):
+        await _renew_watch(tenant, connection_id, refresh_ciphertext)
+    if history_id:
+        await run_gmail_sync(
+            mailbox_email=email,
+            notification_history_id=cursor,
+            force_sync=True,
+        )
 
 
 async def _renew_watch(
@@ -496,6 +542,8 @@ async def _sync_connection(
         message_ids = batch.message_ids
         next_cursor = batch.history_id
     except GmailAPIError as exc:
+        if _is_transient(exc):
+            raise Retry(defer=_TRANSIENT_RETRY_SECONDS) from exc
         if exc.status_code != 404 or last_sync is None:
             await _mark_connection_error(
                 tenant,
@@ -513,11 +561,9 @@ async def _sync_connection(
     for message_id in message_ids:
         try:
             message = await fetch_message_if_available(gmail, tokens.access_token, message_id)
-            if message is None:
+            if message is None or not _is_inbox_message(message):
                 continue
-            if not _is_inbox_message(message):
-                continue
-            await _process_gmail_message(
+            await _process_isolated(
                 tenant=tenant,
                 connection_id=connection_id,
                 mailbox_email=mailbox_email,
@@ -531,7 +577,13 @@ async def _sync_connection(
             if exc.status_code == 401:
                 await _mark_connection_error(tenant, connection_id, "gmail_access_denied")
                 return
-            raise
+            if _is_transient(exc):
+                # The cursor stays put; messages already processed are
+                # skipped on the retry by their stored status.
+                raise Retry(defer=_TRANSIENT_RETRY_SECONDS) from exc
+            # Any other refusal to fetch this one message (400, 403) will not
+            # change on retry; leave it rather than block the mailbox.
+            continue
 
     async with tenant_session(tenant) as session:
         result = await session.execute(
@@ -545,6 +597,71 @@ async def _sync_connection(
             connection.history_id = next_cursor
             connection.last_history_sync_at = datetime.now(UTC)
             connection.last_error_code = None
+
+
+async def _process_isolated(
+    *,
+    tenant: TenantContext,
+    connection_id: uuid.UUID,
+    mailbox_email: str,
+    history_id: str,
+    message_id: str,
+    message: dict[str, Any],
+    gmail: GmailClient,
+    access_token: str,
+    force_reprocess: bool = False,
+) -> None:
+    """Process one message so that its failure is recorded, not propagated.
+
+    A message that fails for a reason a retry will not change -- a file no
+    parser anticipated, a database limit, an LLM outage -- would otherwise
+    abort the sync before the cursor advances, and every later sync would
+    hit it first: one email permanently stopping the mailbox. Its own
+    transaction has rolled back, so the failure is written in a new one.
+    Only Gmail auth (401) and transient Gmail errors still propagate: the
+    first is the caller's to record, the second is retried as a whole job.
+    """
+    try:
+        await _process_gmail_message(
+            tenant=tenant,
+            connection_id=connection_id,
+            mailbox_email=mailbox_email,
+            history_id=history_id,
+            message_id=message_id,
+            message=message,
+            gmail=gmail,
+            access_token=access_token,
+            force_reprocess=force_reprocess,
+        )
+    except GmailAPIError as exc:
+        if exc.status_code == 401 or _is_transient(exc):
+            raise
+        await _record_message_failure(tenant, connection_id, history_id, message_id, message)
+    except Exception:
+        await _record_message_failure(tenant, connection_id, history_id, message_id, message)
+
+
+async def _record_message_failure(
+    tenant: TenantContext,
+    connection_id: uuid.UUID,
+    history_id: str,
+    message_id: str,
+    message: dict[str, Any],
+) -> None:
+    sender_email, _subject, _snippet, received_at = _message_metadata(message)
+    async with tenant_session(tenant) as session:
+        service = SupplierQuoteService(session, tenant)
+        supplier_message, _ = await service.get_or_create_message(
+            connection_id=connection_id,
+            gmail_message_id=message_id,
+            history_id=history_id,
+            sender_email=sender_email,
+            received_at=received_at,
+            attachment_ids=_attachment_identities(extract_xlsx_attachments(message)),
+        )
+        await service.record_processing_status(
+            supplier_message.id, status="failed", error_code="processing_failed"
+        )
 
 
 async def fetch_message_if_available(
@@ -659,10 +776,7 @@ async def _process_gmail_message(
 ) -> None:
     sender_email, subject, snippet, received_at = _message_metadata(message)
     attachments = extract_xlsx_attachments(message)
-    persisted_attachment_ids = [
-        {"attachment_id": attachment.attachment_id, "mime_type": attachment.mime_type}
-        for attachment in attachments
-    ]
+    persisted_attachment_ids = _attachment_identities(attachments)
 
     async with tenant_session(tenant) as session:
         service = SupplierQuoteService(session, tenant)
@@ -711,10 +825,33 @@ async def _process_gmail_message(
         confirmed_mappings = await service.list_confirmed_mappings(supplier_id)
         any_review = False
         affected_product_ids: set[uuid.UUID] = set()
+        llm_matches_left = _LLM_MATCHES_PER_MESSAGE
         for attachment in attachments:
-            workbook_bytes = await fetch_attachment_if_available(
-                gmail, access_token, message_id, attachment
-            )
+            unreadable = _attachment_size_issue(attachment, gmail.max_attachment_bytes)
+            workbook_bytes: bytes | None = None
+            if unreadable is None:
+                try:
+                    workbook_bytes = await fetch_attachment_if_available(
+                        gmail, access_token, message_id, attachment
+                    )
+                except (GmailSyncError, GmailAPIError) as exc:
+                    if isinstance(exc, GmailAPIError) and exc.status_code is not None:
+                        raise
+                    # No status code: the client itself refused the payload
+                    # (over the limit once decoded, or not valid base64).
+                    unreadable = _file_issue(
+                        "file_too_large" if "size limit" in str(exc) else "invalid_workbook"
+                    )
+            if unreadable is not None:
+                await service.upsert_quote_rows(
+                    supplier_id,
+                    supplier_message.id,
+                    attachment.attachment_id,
+                    [],
+                    row_issues=[unreadable],
+                )
+                any_review = True
+                continue
             if workbook_bytes is None:
                 await service.upsert_quote_rows(
                     supplier_id,
@@ -877,9 +1014,22 @@ async def _process_gmail_message(
             products = await _load_product_candidates(session, tenant, parsed_rows)
             match_results: dict[tuple[str, int], ProductMatchResult] = {}
             product_by_id = {str(product.id): product for product in products}
+            index = _ProductIndex(products)
             for row in parsed_rows:
-                candidates = _candidate_products(row, products)
-                match = await suggest_product_match(row, candidates)
+                match = deterministic_product_match(row, index.lookup(row))
+                if match is None and llm_matches_left > 0:
+                    llm_matches_left -= 1
+                    # difflib over the catalogue is CPU-bound; keep it off the
+                    # event loop the worker's other jobs share.
+                    candidates = await asyncio.to_thread(_candidate_products, row, products)
+                    match = await suggest_product_match(row, candidates)
+                if match is None:
+                    match = ProductMatchResult(
+                        status="unmatched",
+                        confidence=0,
+                        reason="product_match_not_attempted",
+                        review_required=True,
+                    )
                 match_results[(row.worksheet_name, row.source_row_number)] = match
                 if match.review_required:
                     row_issues.append(
@@ -1021,6 +1171,58 @@ async def _load_product_candidates(
         .limit(5000)
     )
     return list(result.scalars().all())
+
+
+def _attachment_identities(attachments: list[GmailAttachment]) -> list[dict[str, Any]]:
+    return [
+        {"attachment_id": attachment.attachment_id, "mime_type": attachment.mime_type}
+        for attachment in attachments
+    ]
+
+
+_FILE_ISSUE_MESSAGES = {
+    "file_too_large": "The attachment exceeds the configured size limit.",
+    "invalid_workbook": "The attachment is not a readable XLSX workbook.",
+}
+
+
+def _file_issue(code: str) -> WorkbookRowIssue:
+    return WorkbookRowIssue(code=code, message=_FILE_ISSUE_MESSAGES[code])
+
+
+def _attachment_size_issue(attachment: GmailAttachment, max_bytes: int) -> WorkbookRowIssue | None:
+    """An attachment Gmail already reports as too large is never downloaded."""
+    if attachment.size is not None and attachment.size > max_bytes:
+        return _file_issue("file_too_large")
+    return None
+
+
+class _ProductIndex:
+    """Catalogue lookups by SKU and normalized name, built once per message.
+
+    `deterministic_product_match` scans what it is given; handing it only the
+    products that share a row's SKU or name keeps its answer identical (every
+    duplicate is still in the bucket) without a whole-catalogue scan per row.
+    """
+
+    def __init__(self, products: list[Product]) -> None:
+        self._by_sku: dict[str, list[Product]] = {}
+        self._by_name: dict[str, list[Product]] = {}
+        for product in products:
+            self._by_sku.setdefault(product.external_id, []).append(product)
+            name = normalize_product_name(product.name)
+            if name:
+                self._by_name.setdefault(name, []).append(product)
+
+    def lookup(self, row: CanonicalQuoteRow) -> list[Product]:
+        found: dict[uuid.UUID, Product] = {}
+        sku = (row.supplier_sku or "").strip()
+        for product in self._by_sku.get(sku, []) if sku else []:
+            found[product.id] = product
+        name = normalize_product_name(row.product_name)
+        for product in self._by_name.get(name, []) if name else []:
+            found[product.id] = product
+        return list(found.values())
 
 
 def _candidate_products(row: CanonicalQuoteRow, products: list[Product]) -> list[Product]:

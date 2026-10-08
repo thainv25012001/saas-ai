@@ -220,6 +220,27 @@ async def suggest_mapping(
     )
 
 
+def deterministic_product_match(
+    quote: CanonicalQuoteRow,
+    products: Sequence[object],
+    confirmed_supplier_sku_map: Mapping[str, str] | None = None,
+) -> ProductMatchResult | None:
+    """The match that needs no LLM: a remembered supplier SKU or an exact
+    catalogue SKU (confirmed), or an exact product name (suggested, reviewed).
+    `None` when only a model could propose one."""
+    exact: MatchResult = match_catalog_product(quote, products, confirmed_supplier_sku_map or {})
+    if exact.status not in {"confirmed", "suggested"}:
+        return None
+    return ProductMatchResult(
+        status=exact.status,
+        product_id=exact.product_id,
+        catalog_sku=exact.catalog_sku,
+        confidence=exact.confidence,
+        reason=exact.reason,
+        review_required=exact.status == "suggested",
+    )
+
+
 async def suggest_product_match(
     quote: CanonicalQuoteRow,
     products: Sequence[object],
@@ -228,25 +249,9 @@ async def suggest_product_match(
     provider: LLMProvider | None = None,
     model: str | None = None,
 ) -> ProductMatchResult:
-    exact: MatchResult = match_catalog_product(quote, products, confirmed_supplier_sku_map or {})
-    if exact.status == "confirmed":
-        return ProductMatchResult(
-            status=exact.status,
-            product_id=exact.product_id,
-            catalog_sku=exact.catalog_sku,
-            confidence=exact.confidence,
-            reason=exact.reason,
-            review_required=False,
-        )
-    if exact.status == "suggested":
-        return ProductMatchResult(
-            status=exact.status,
-            product_id=exact.product_id,
-            catalog_sku=exact.catalog_sku,
-            confidence=exact.confidence,
-            reason=exact.reason,
-            review_required=True,
-        )
+    exact = deterministic_product_match(quote, products, confirmed_supplier_sku_map)
+    if exact is not None:
+        return exact
 
     candidates = [_product_for_prompt(product) for product in products[:50]]
     result = await _generate_structured(

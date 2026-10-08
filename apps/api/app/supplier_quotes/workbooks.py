@@ -11,7 +11,6 @@ from xml.etree import ElementTree
 
 from openpyxl import load_workbook
 from openpyxl.utils.cell import range_boundaries
-from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.worksheet.worksheet import Worksheet
 
 from app.core.config import get_settings
@@ -40,6 +39,17 @@ _QUANTITY_TIER_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*[:=@]\s*(\d+(?:\.\d*)?|\.
 
 def inspect_supplier_workbook(data: bytes) -> WorkbookInspection:
     """Return a bounded, in-memory preview suitable for suggesting a column map."""
+    try:
+        return _inspect_supplier_workbook(data)
+    except Exception:
+        # A supplier's file is arbitrary input, and read-only openpyxl parses
+        # sheet XML lazily while rows are iterated, so a malformed file can
+        # fail far from `_open_workbook`. Whatever it raises, it is a bad
+        # workbook to review, never a reason to stop processing the mailbox.
+        return WorkbookInspection(sheets=[], issues=[_unreadable_workbook_issue()])
+
+
+def _inspect_supplier_workbook(data: bytes) -> WorkbookInspection:
     workbook, issue = _open_workbook(data)
     if issue is not None:
         return WorkbookInspection(sheets=[], issues=[issue])
@@ -99,6 +109,15 @@ def inspect_supplier_workbook(data: bytes) -> WorkbookInspection:
 
 def parse_supplier_workbook(data: bytes, mapping: WorkbookMapping) -> WorkbookParseResult:
     """Parse a supplier workbook using only an explicitly confirmed mapping."""
+    try:
+        return _parse_supplier_workbook(data, mapping)
+    except Exception:
+        # See `inspect_supplier_workbook`: any failure reading the file is an
+        # issue on the file.
+        return WorkbookParseResult(rows=[], issues=[_unreadable_workbook_issue()])
+
+
+def _parse_supplier_workbook(data: bytes, mapping: WorkbookMapping) -> WorkbookParseResult:
     workbook, issue = _open_workbook(data)
     if issue is not None:
         return WorkbookParseResult(rows=[], issues=[issue])
@@ -260,9 +279,13 @@ def _open_workbook(data: bytes) -> tuple[Any | None, WorkbookRowIssue | None]:
             data_only=True,
             keep_links=False,
         )
-    except (zipfile.BadZipFile, InvalidFileException, OSError, ValueError, KeyError):
-        return None, _issue("invalid_workbook", "The attachment is not a readable XLSX workbook.")
+    except Exception:
+        return None, _unreadable_workbook_issue()
     return workbook, None
+
+
+def _unreadable_workbook_issue() -> WorkbookRowIssue:
+    return _issue("invalid_workbook", "The attachment is not a readable XLSX workbook.")
 
 
 def _read_preview_rows(worksheet: Worksheet) -> list[tuple[Any, ...]]:
