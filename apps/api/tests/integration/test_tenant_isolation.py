@@ -46,7 +46,9 @@ async def two_accounts(client, clean_users):
         client,
         """
         mutation {
-          createAgent(input: {name: "Secret A Bot", provider: "fake", model: "fake-1"}) { id }
+          createAgent(input: {
+            name: "Secret A Bot", provider: "openrouter", model: "test/model:free"
+          }) { id }
         }
         """,
         headers=headers_a,

@@ -34,7 +34,6 @@ from app.agents.runner import (
     AgentUsage,
 )
 from app.llm.base import LLMProvider, ModelCapabilities
-from app.llm.fake_provider import FakeProvider, FakeToolCall
 from app.llm.types import (
     CompletionRequest,
     CompletionResponse,
@@ -52,7 +51,7 @@ from app.llm.types import (
 )
 from app.tools.base import AgentTool, ToolContext, ToolResult
 from app.tools.registry import ToolRegistry
-from tests.llm_doubles import FALLBACK_MODEL, AnsweredByAnotherModel
+from tests.llm_doubles import FALLBACK_MODEL, AnsweredByAnotherModel, FakeProvider, FakeToolCall
 
 pytestmark = pytest.mark.anyio
 
@@ -108,7 +107,7 @@ def _runner(provider: LLMProvider, registry: ToolRegistry, *, max_steps: int = 5
     return AgentRunner(
         provider,
         registry,
-        model="fake-1",
+        model="test/model:free",
         max_tokens=100,
         max_steps=max_steps,
     )
@@ -430,7 +429,7 @@ def test_max_steps_below_one_is_rejected() -> None:
         AgentRunner(
             FakeProvider(turns=["unused"]),
             registry,
-            model="fake-1",
+            model="test/model:free",
             max_tokens=100,
             max_steps=0,
         )

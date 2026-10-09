@@ -26,8 +26,6 @@ MODEL_PRICING: dict[str, ModelPrice] = {
     # OpenAI
     "gpt-4o": ModelPrice(Decimal("2.50"), Decimal("10.00")),
     "gpt-4o-mini": ModelPrice(Decimal("0.15"), Decimal("0.60")),
-    # Local/testing
-    "fake-1": ModelPrice(Decimal("0"), Decimal("0")),
 }
 
 

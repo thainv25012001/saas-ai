@@ -50,11 +50,11 @@ from app.documents.schemas import ChunkInput, CreateDocumentInput
 from app.documents.service import DocumentService
 from app.embeddings.hashing import HashingEmbedder
 from app.leads.service import LeadService
-from app.llm.fake_provider import FakeProvider, FakeToolCall
 from app.rag.retrieve import RetrievalService
 from app.tools.retrieve import RetrieveKnowledgeTool
 from tests.conftest import enable_builtin_tool
 from tests.factories import agent_input
+from tests.llm_doubles import FakeProvider, FakeToolCall
 
 pytestmark = pytest.mark.anyio
 

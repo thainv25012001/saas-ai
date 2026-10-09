@@ -16,9 +16,9 @@ from app.conversations.titles import UNTITLED
 from app.core.tenancy import TenantContext, tenant_session
 from app.db.models import ConversationChannel, MembershipRole, MessageRole
 from app.llm.errors import LLMUnavailableError
-from app.llm.fake_provider import FakeProvider
 from app.workers import tasks as worker_tasks
 from tests.factories import agent_input
+from tests.llm_doubles import FakeProvider
 
 pytestmark = pytest.mark.anyio
 
@@ -31,7 +31,7 @@ class _ExplodingProvider:
     check, and nothing else in this suite would notice it going missing.
     """
 
-    name = "fake"
+    name = "openrouter"
 
     async def generate(self, request):  # noqa: ANN001, ANN201
         raise AssertionError("the provider must not be called for an already-titled conversation")

@@ -22,7 +22,6 @@ from app.api import widget as widget_api
 from app.core.security import create_access_token
 from app.core.tenancy import TenantContext, tenant_session
 from app.db.models.widget import WidgetPosition
-from app.llm.fake_provider import FakeProvider, FakeToolCall
 from app.main import create_app
 from app.widget import tokens as widget_tokens
 from app.widget.schemas import UpdateWidgetSettingsInput
@@ -30,6 +29,7 @@ from app.widget.service import WidgetSettingsService
 from app.widget.tokens import decode_visitor_token
 from tests.conftest import _flush_rate_limits, enable_builtin_tool
 from tests.factories import agent_input
+from tests.llm_doubles import FakeProvider, FakeToolCall
 
 pytestmark = pytest.mark.anyio
 

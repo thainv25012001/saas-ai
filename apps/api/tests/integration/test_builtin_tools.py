@@ -54,12 +54,12 @@ from app.db.builtin_tools import (
     default_agent_tools_backfill_sql,
     seed_tools_sql,
 )
-from app.llm.fake_provider import FakeProvider
 from app.tools.leads import CreateLeadTool
 from app.tools.products import GetProductTool, SearchProductsTool
 from app.tools.retrieve import RetrieveKnowledgeTool
 from tests.conftest import enable_builtin_tool
 from tests.factories import agent_input
+from tests.llm_doubles import FakeProvider
 
 pytestmark = pytest.mark.anyio
 
@@ -270,7 +270,8 @@ async def test_a_pre_existing_agent_is_backfilled_onto_the_default_builtin(
             "INSERT INTO agents "
             "(id, organization_id, name, slug, status, provider, model, "
             " temperature, max_tokens, public_key) "
-            "VALUES (:id, :org, 'Legacy Bot', 'legacy-bot', 'draft', 'fake', 'fake-1', "
+            "VALUES (:id, :org, 'Legacy Bot', 'legacy-bot', 'draft', 'openrouter', "
+            "'test/model:free', "
             " 0.3, 1024, :public_key)"
         ),
         {

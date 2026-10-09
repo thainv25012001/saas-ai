@@ -23,7 +23,7 @@ pytestmark = pytest.mark.anyio
 
 
 class _CaptureProvider:
-    name = "fake"
+    name = "openrouter"
 
     def __init__(self, response: BaseModel) -> None:
         self.response = response

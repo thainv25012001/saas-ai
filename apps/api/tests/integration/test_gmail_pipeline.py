@@ -436,7 +436,7 @@ async def test_an_email_the_classifier_is_unsure_about_is_ignored(
     from app.supplier_quotes.classification import EmailClassification
 
     class _UnsureProvider:
-        name = "fake"
+        name = "openrouter"
 
         async def generate_structured(self, _request: Any, _schema: Any) -> EmailClassification:
             return EmailClassification(classification="uncertain", confidence=0.2)

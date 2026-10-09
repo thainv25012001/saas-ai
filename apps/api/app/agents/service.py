@@ -68,9 +68,10 @@ class AgentService:
         # This used to read `data.provider or get_settings().default_llm_provider`
         # with a matching `DEFAULT_MODELS` lookup for the model. The dashboard
         # sent neither field, so that fallback ran for every agent a real user
-        # created and silently put them all on `fake`. The choice belongs to
-        # whoever is creating the agent; `DEFAULT_LLM_PROVIDER` now has exactly
-        # one consumer, the dev seed in `app.db.seed`, which asks for it by name.
+        # created and silently put them all on the offline provider the app
+        # then shipped. The choice belongs to whoever is creating the agent;
+        # `DEFAULT_LLM_PROVIDER` is read only by the dev seed in `app.db.seed`
+        # and by the supplier quote pipeline.
         agent = Agent(
             id=uuid7(),
             organization_id=self.tenant.organization_id,

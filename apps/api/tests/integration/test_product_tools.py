@@ -40,7 +40,6 @@ from app.chat.service import ChatError, ChatMessageStart, ChatService, ChatToolC
 from app.core.tenancy import TenantContext, tenant_session
 from app.db.models import MessageCitation
 from app.embeddings.hashing import HashingEmbedder
-from app.llm.fake_provider import FakeProvider, FakeToolCall
 from app.llm.types import ToolResultBlock
 from app.products.embedding_text import embeddable_text
 from app.products.schemas import ProductInput
@@ -60,6 +59,7 @@ from app.tools.products import (
 )
 from app.tools.registry import ToolRegistry
 from tests.factories import agent_input
+from tests.llm_doubles import FakeProvider, FakeToolCall
 
 pytestmark = pytest.mark.anyio
 

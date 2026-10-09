@@ -16,7 +16,6 @@ from app.db.models import MembershipRole
 from app.db.session import engine
 from app.llm.base import ModelCapabilities
 from app.llm.errors import LLMUnavailableError
-from app.llm.fake_provider import FakeProvider, FakeToolCall
 from app.llm.types import (
     CompletionRequest,
     CompletionResponse,
@@ -30,6 +29,7 @@ from app.llm.types import (
 from app.main import create_app
 from tests.conftest import enable_builtin_tool
 from tests.factories import agent_input
+from tests.llm_doubles import FakeProvider, FakeToolCall
 
 pytestmark = pytest.mark.anyio
 
@@ -106,7 +106,7 @@ class _SlowProvider:
     interval.
     """
 
-    name = "fake"
+    name = "openrouter"
 
     def __init__(self, chunks: list[str], delay: float) -> None:
         self._chunks = chunks
@@ -708,7 +708,7 @@ async def test_disconnect_after_completed_turn_logs_discarded_usage(monkeypatch)
             usage=Usage(input_tokens=10, output_tokens=5),
             cost_usd=Decimal("0.00123"),
             latency_ms=250,
-            model="fake-1",
+            model="test/model:free",
             prompt_version_id=None,
         )
         await asyncio.Event().wait()
@@ -734,7 +734,7 @@ async def test_disconnect_after_completed_turn_logs_discarded_usage(monkeypatch)
     assert len(logged) == 1
     entry = logged[0]
     assert entry["event"] == "chat_stream_discarded_completed_turn_usage"
-    assert entry["model"] == "fake-1"
+    assert entry["model"] == "test/model:free"
     assert entry["input_tokens"] == 10
     assert entry["output_tokens"] == 5
     assert entry["cost_usd"] == "0.00123"
@@ -932,7 +932,7 @@ async def test_a_baseexception_in_the_pump_still_terminates_the_stream(monkeypat
 async def test_model_override_is_what_reaches_the_provider(app, api_client, clean_users):
     token = await _register(api_client, "model-override@example.com")
     org_id = await _organization_id(api_client, token)
-    agent_id = await _make_agent(org_id, model="fake-1")
+    agent_id = await _make_agent(org_id, model="test/model:free")
     provider = FakeProvider(script=["ok"])
     app.dependency_overrides[chat_api.get_chat_provider] = lambda: provider
 
@@ -953,7 +953,7 @@ async def test_model_override_does_not_change_the_agent(app, api_client, clean_u
     other channel this agent answers on."""
     token = await _register(api_client, "override-not-persisted@example.com")
     org_id = await _organization_id(api_client, token)
-    agent_id = await _make_agent(org_id, model="fake-1")
+    agent_id = await _make_agent(org_id, model="test/model:free")
     app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(script=["ok"])
 
     await api_client.post(
@@ -967,7 +967,7 @@ async def test_model_override_does_not_change_the_agent(app, api_client, clean_u
     )
     async with tenant_session(tenant) as session:
         agent = await AgentService(session, tenant).get_agent(agent_id)
-    assert agent.model == "fake-1"
+    assert agent.model == "test/model:free"
 
 
 async def test_message_end_reports_the_model_that_actually_answered(app, api_client, clean_users):
@@ -975,7 +975,7 @@ async def test_message_end_reports_the_model_that_actually_answered(app, api_cli
     estimated from, so it must follow the override rather than the agent."""
     token = await _register(api_client, "override-message-end@example.com")
     org_id = await _organization_id(api_client, token)
-    agent_id = await _make_agent(org_id, model="fake-1")
+    agent_id = await _make_agent(org_id, model="test/model:free")
     app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(script=["ok"])
 
     response = await api_client.post(
@@ -990,14 +990,14 @@ async def test_message_end_reports_the_model_that_actually_answered(app, api_cli
 
 async def test_the_overridden_provider_is_the_one_resolved(api_client, clean_users):
     """Deliberately no `get_chat_provider` override, so the real registry
-    resolves the name. The agent is on `fake`, which always answers -- a 200
+    resolves the name. The agent is on `openrouter`, which the test double answers -- a 200
     here would mean the override never reached provider resolution. This
     environment has no `OPENAI_API_KEY`, so an override that *is* honoured
     fails the same way an agent configured for openai already does, before
     the stream is committed."""
     token = await _register(api_client, "provider-override@example.com")
     org_id = await _organization_id(api_client, token)
-    agent_id = await _make_agent(org_id, provider="fake", model="fake-1")
+    agent_id = await _make_agent(org_id, provider="openrouter", model="test/model:free")
 
     response = await api_client.post(
         CHAT_URL,
@@ -1053,7 +1053,7 @@ async def test_an_empty_model_override_is_rejected(app, api_client, clean_users)
 async def test_without_an_override_the_agents_own_model_still_answers(app, api_client, clean_users):
     token = await _register(api_client, "no-override@example.com")
     org_id = await _organization_id(api_client, token)
-    agent_id = await _make_agent(org_id, model="fake-1")
+    agent_id = await _make_agent(org_id, model="test/model:free")
     provider = FakeProvider(script=["ok"])
     app.dependency_overrides[chat_api.get_chat_provider] = lambda: provider
 
@@ -1063,7 +1063,7 @@ async def test_without_an_override_the_agents_own_model_still_answers(app, api_c
 
     assert response.status_code == 200, response.text
     assert provider.last_request is not None
-    assert provider.last_request.model == "fake-1"
+    assert provider.last_request.model == "test/model:free"
 
 
 async def test_usage_event_records_the_model_that_answered(app, api_client, clean_users):
@@ -1072,7 +1072,7 @@ async def test_usage_event_records_the_model_that_answered(app, api_client, clea
     attribute real spend to the wrong model."""
     token = await _register(api_client, "override-usage@example.com")
     org_id = await _organization_id(api_client, token)
-    agent_id = await _make_agent(org_id, model="fake-1")
+    agent_id = await _make_agent(org_id, model="test/model:free")
     app.dependency_overrides[chat_api.get_chat_provider] = lambda: FakeProvider(script=["ok"])
 
     await api_client.post(
@@ -1248,7 +1248,7 @@ async def test_a_rolled_back_turn_queues_nothing(app, api_client, clean_users, t
     agent_id = await _make_agent(org_id)
 
     class _BrokenProvider:
-        name = "fake"
+        name = "openrouter"
 
         def capabilities(self, model: str) -> ModelCapabilities:
             return ModelCapabilities(

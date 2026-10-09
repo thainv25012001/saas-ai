@@ -4,7 +4,7 @@ The streaming body itself (`stream_body`, `_pump`, `_queue_title`, the event
 payload shape, the SSE headers) moved to `app/api/streaming.py` in Phase 8
 Task 2 so the widget's public chat route (`app/api/widget.py`, Task 3) can
 share it. This module keeps only what is specific to the authenticated,
-per-user route: the request schema, the fake-provider test seam, the rate
+per-user route: the request schema, the provider test seam, the rate
 limit, and the route itself -- including the first-event pre-read pattern
 that keeps a pre-stream failure a plain JSON error rather than an in-band
 `error` event (see `app/api/streaming.py`'s module docstring for why that

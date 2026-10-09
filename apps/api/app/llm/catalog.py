@@ -25,7 +25,6 @@ _STATIC_MODELS: dict[str, tuple[ModelOption, ...]] = {
         ModelOption("claude-sonnet-5", "Claude Sonnet 5", 200_000),
         ModelOption("claude-opus-5", "Claude Opus 5", 200_000),
     ),
-    "fake": (ModelOption("fake-1", "Fake (offline)", 8_000),),
 }
 
 # Providers that publish a roster worth fetching at request time. A lookup

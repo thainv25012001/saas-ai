@@ -779,8 +779,9 @@ class CreateAgentInput:
     Both used to be nullable and were resolved server-side from
     `DEFAULT_LLM_PROVIDER` when omitted. This is the only path a real user
     creates an agent through, and the dashboard sent neither — so every agent
-    anyone made landed on `fake`, the offline provider that answers with a
-    canned reply, and they had to find that out and fix it afterwards.
+    anyone made landed on the offline provider the app then shipped, which
+    answered with a canned reply, and they had to find that out and fix it
+    afterwards.
 
     Non-null here rather than only in the pydantic schema because this is what
     the dashboard's codegen reads: nullable fields let the web app compile a

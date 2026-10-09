@@ -274,7 +274,7 @@ class AgentRunner:
         finally yields a `_StepOutcome` summarizing what the step produced.
 
         Deliberately does not switch on positional indexing into
-        `response.content` -- a provider (the fake included, for tool-only
+        `response.content` -- a provider (the test double included, for tool-only
         turns) is not required to emit a filler `TextBlock` alongside tool
         calls, so every block is identified by its event *type*, never by
         position. `ErrorEvent` is unhandled here for the same reason

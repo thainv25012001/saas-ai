@@ -132,9 +132,11 @@ class Settings(BaseSettings):
     # match the owner still confirms, so a low cap costs convenience, not
     # correctness, and keeps one large workbook from spending the free tier.
     gmail_llm_matches_per_message: int = Field(default=5, ge=0, le=25)
-    # `fake` keeps the playground working with no key configured. Set to
-    # `openai` or `anthropic` once a key is present.
-    default_llm_provider: str = "fake"
+    # The provider the dev seed's demo agent and the supplier quote pipeline
+    # use; agents a user creates always name their own. OpenRouter's `:free`
+    # models need a key but no credits. The names repeat
+    # `app.llm.registry.KNOWN_PROVIDERS`, which this module cannot import.
+    default_llm_provider: Literal["openai", "anthropic", "openrouter"] = "openrouter"
     # `hashing` keeps ingestion and retrieval working with no key configured.
     # Set to `openai` once a key is present.
     embedding_provider: str = "hashing"

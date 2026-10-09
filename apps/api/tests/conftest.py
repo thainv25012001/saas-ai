@@ -1,5 +1,5 @@
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from typing import TYPE_CHECKING
 
 import pytest
@@ -20,11 +20,35 @@ os.environ.setdefault(
     "postgresql+asyncpg://app_owner:app_owner_password@localhost:5432/saas_ai",
 )
 os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production-please")
+# Forced, not defaulted: the repo-root `.env` may hold real provider keys, and
+# no test may spend real requests. OpenRouter gets a dummy key so it counts as
+# configured; `_offline_openrouter` below serves its requests.
+os.environ["OPENROUTER_API_KEY"] = "test-openrouter-key"
+os.environ["OPENAI_API_KEY"] = ""
+os.environ["ANTHROPIC_API_KEY"] = ""
+os.environ["DEFAULT_LLM_PROVIDER"] = "openrouter"
 
 
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def _offline_openrouter() -> Iterator[None]:
+    """Serve `get_provider("openrouter")` from the `FakeProvider` test double.
+
+    Placed in the registry's cache, so the registry itself needs no test hook.
+    A test that clears the cache (`reset_providers()`) exercises the real build
+    path, against the dummy key above.
+    """
+    from app.llm import registry
+    from tests.llm_doubles import FakeProvider
+
+    registry.reset_providers()
+    registry._PROVIDERS["openrouter"] = FakeProvider(name="openrouter")
+    yield
+    registry.reset_providers()
 
 
 @pytest.fixture

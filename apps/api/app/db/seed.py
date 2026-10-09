@@ -148,16 +148,15 @@ def demo_agent_input() -> CreateAgentInput:
     """The demo agent's create input.
 
     Split out of `_get_or_create_agent` so it can be tested without a database,
-    and because it is the one place `DEFAULT_LLM_PROVIDER` is still read.
-    `CreateAgentInput` requires a provider and a model — deliberately, so a
-    user creating an agent in the dashboard has to choose one instead of
-    silently inheriting this — and the seed is the caller that genuinely wants
-    the configured default: a fresh clone has no API key, so the demo agent has
-    to be one that answers offline.
+    and because it reads `DEFAULT_LLM_PROVIDER`. `CreateAgentInput` requires a
+    provider and a model — deliberately, so a user creating an agent in the
+    dashboard has to choose one instead of silently inheriting this — and the
+    seed is the caller that genuinely wants the configured default: OpenRouter
+    unless configured otherwise, which answers once its key is set.
 
     The model comes from the chosen provider's own entry in `DEFAULT_MODELS`,
-    never a literal: pairing `fake` with an OpenAI model id would seed a demo
-    agent that cannot answer.
+    never a literal: pairing `anthropic` with an OpenAI model id would seed a
+    demo agent that cannot answer.
     """
     provider = get_settings().default_llm_provider
     return CreateAgentInput(

@@ -8,9 +8,9 @@ from app.chat.service import ChatService
 from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.core.tenancy import tenant_session
 from app.db.models import AgentToolLink, Tool
-from app.llm.fake_provider import FakeProvider
 from tests.conftest import enable_builtin_tool
 from tests.factories import agent_input
+from tests.llm_doubles import FakeProvider
 
 pytestmark = pytest.mark.anyio
 
