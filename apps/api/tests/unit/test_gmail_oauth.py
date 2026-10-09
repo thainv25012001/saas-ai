@@ -12,6 +12,7 @@ import pytest
 
 from app.gmail.oauth import (
     GmailOAuthClient,
+    GmailOAuthTransientError,
     OAuthStateError,
     OAuthStateStore,
     build_authorization_url,
@@ -171,3 +172,43 @@ async def test_oauth_provider_error_does_not_echo_response_body() -> None:
 
     assert "private-token-echo" not in str(error.value)
     assert "secret-code" not in str(error.value)
+
+
+async def _refresh_with(handler: httpx.MockTransport) -> None:
+    async with httpx.AsyncClient(
+        transport=handler, base_url="https://oauth2.googleapis.com"
+    ) as http_client:
+        oauth = GmailOAuthClient(
+            client_id="client-id",
+            client_secret="client-secret",
+            http_client=http_client,
+        )
+        await oauth.refresh_access_token("stored-refresh")
+
+
+async def test_a_network_error_during_refresh_is_transient() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("network down", request=request)
+
+    with pytest.raises(GmailOAuthTransientError):
+        await _refresh_with(httpx.MockTransport(handler))
+
+
+@pytest.mark.parametrize("status_code", [429, 500, 503])
+async def test_a_throttled_or_failing_google_is_transient(status_code: int) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, json={"error": "try_later"})
+
+    with pytest.raises(GmailOAuthTransientError):
+        await _refresh_with(httpx.MockTransport(handler))
+
+
+@pytest.mark.parametrize("status_code", [400, 401])
+async def test_a_rejected_refresh_token_is_not_transient(status_code: int) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, json={"error": "invalid_grant"})
+
+    with pytest.raises(RuntimeError) as error:
+        await _refresh_with(httpx.MockTransport(handler))
+
+    assert not isinstance(error.value, GmailOAuthTransientError)

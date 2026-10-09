@@ -26,7 +26,7 @@ from app.db.models import (
 )
 from app.db.models.supplier import SupplierMapping
 from app.gmail.client import GmailAPIError, GmailClient
-from app.gmail.oauth import GmailOAuthClient
+from app.gmail.oauth import GmailOAuthClient, GmailOAuthTransientError
 from app.gmail.token_crypto import decrypt_token, encrypt_token
 from app.supplier_quotes.analysis import (
     normalize_product_name,
@@ -371,6 +371,8 @@ async def run_gmail_message_reprocess(
         try:
             refresh_token = decrypt_token(refresh_ciphertext)
             tokens = await GmailOAuthClient().refresh_access_token(refresh_token)
+        except GmailOAuthTransientError as exc:
+            raise Retry(defer=_TRANSIENT_RETRY_SECONDS) from exc
         except (RuntimeError, ValueError):
             await _mark_connection_error(tenant, connection_id, "gmail_refresh_failed")
             return
@@ -568,6 +570,8 @@ async def _sync_connection(
     try:
         refresh_token = decrypt_token(refresh_ciphertext)
         tokens = await GmailOAuthClient().refresh_access_token(refresh_token)
+    except GmailOAuthTransientError as exc:
+        raise Retry(defer=_TRANSIENT_RETRY_SECONDS) from exc
     except (RuntimeError, ValueError):
         await _mark_connection_error(tenant, connection_id, "gmail_refresh_failed")
         return

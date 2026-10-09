@@ -26,6 +26,12 @@ _CONSUME_STATE_SCRIPT = (
 )
 
 
+class GmailOAuthTransientError(RuntimeError):
+    """Google could not be reached or asked us to back off (network error,
+    HTTP 429 or 5xx). Not a verdict on the credential, so callers retry
+    instead of marking the mailbox for reauthorization."""
+
+
 class OAuthStateError(ValueError):
     """OAuth state is missing, expired, replayed, or bound to another user."""
 
@@ -196,8 +202,12 @@ class GmailOAuthClient:
                 async with httpx.AsyncClient(timeout=10) as client:
                     response = await client.post(self.token_url, data=form)
         except httpx.RequestError as exc:
-            raise RuntimeError("Google OAuth request failed") from exc
+            raise GmailOAuthTransientError("Google OAuth request failed") from exc
         if response.is_error:
+            if response.status_code == 429 or response.status_code >= 500:
+                raise GmailOAuthTransientError(
+                    f"Google OAuth request failed with HTTP {response.status_code}"
+                )
             raise RuntimeError(f"Google OAuth request failed with HTTP {response.status_code}")
         try:
             body = response.json()

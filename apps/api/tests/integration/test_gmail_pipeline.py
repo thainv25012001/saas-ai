@@ -294,6 +294,55 @@ async def test_a_transient_gmail_error_keeps_the_cursor_for_a_retry(
     assert (await connection_row(tenant_a)).history_id == "100"
 
 
+async def test_a_transient_token_refresh_failure_retries_and_keeps_the_mailbox_connected(
+    owner_connection: Any,
+    tenant_a: TenantContext,
+    fake_gmail: FakeGmail,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from arq import Retry
+
+    from app.gmail.oauth import GmailOAuthTransientError
+    from app.gmail.sync import run_gmail_sync
+
+    await seed_mailbox(owner_connection, tenant_a)
+
+    async def refresh(_self: GmailOAuthClient, _token: str, **_k: object) -> OAuthTokens:
+        raise GmailOAuthTransientError("Google OAuth request failed with HTTP 503")
+
+    monkeypatch.setattr(GmailOAuthClient, "refresh_access_token", refresh)
+
+    with pytest.raises(Retry):
+        await run_gmail_sync(mailbox_email=_MAILBOX, notification_history_id="200")
+
+    connection = await connection_row(tenant_a)
+    assert connection.status == "connected"
+    assert connection.last_error_code is None
+    assert connection.history_id == "100"
+
+
+async def test_a_rejected_refresh_token_sends_the_mailbox_to_reauthorization(
+    owner_connection: Any,
+    tenant_a: TenantContext,
+    fake_gmail: FakeGmail,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.gmail.sync import run_gmail_sync
+
+    await seed_mailbox(owner_connection, tenant_a)
+
+    async def refresh(_self: GmailOAuthClient, _token: str, **_k: object) -> OAuthTokens:
+        raise RuntimeError("Google OAuth request failed with HTTP 400")
+
+    monkeypatch.setattr(GmailOAuthClient, "refresh_access_token", refresh)
+
+    await run_gmail_sync(mailbox_email=_MAILBOX, notification_history_id="200")
+
+    connection = await connection_row(tenant_a)
+    assert connection.status == "needs_reauth"
+    assert connection.last_error_code == "gmail_refresh_failed"
+
+
 async def test_an_oversized_attachment_is_reported_without_downloading_it(
     owner_connection: Any, tenant_a: TenantContext, fake_gmail: FakeGmail
 ) -> None:
