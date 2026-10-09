@@ -455,10 +455,17 @@ async def test_a_tool_stop_with_no_text_is_not_an_empty_response():
     assert [e.type for e in events] == ["message_start", "usage", "message_end"]
 
 
-async def test_generate_structured_is_not_implemented_yet():
-    provider = OpenAIProvider(api_key="k")
-    with pytest.raises(NotImplementedError):
-        await provider.generate_structured(_request(), Message)
+async def test_generate_structured_validates_the_streamed_reply():
+    from pydantic import BaseModel
+
+    class _Answer(BaseModel):
+        label: str
+
+    provider = _provider_with(
+        [_chunk('{"label": '), _chunk('"other"}', finish_reason="stop"), _chunk(usage=(10, 4))]
+    )
+
+    assert await provider.generate_structured(_request(), _Answer) == _Answer(label="other")
 
 
 async def test_openai_is_sent_no_vendor_extras():

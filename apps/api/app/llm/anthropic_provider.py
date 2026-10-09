@@ -13,6 +13,7 @@ from anthropic.types import (
 from anthropic.types import ToolUseBlock as AnthropicToolUseBlock
 
 from app.core.logging import get_logger
+from app.llm import structured
 from app.llm.base import ModelCapabilities, SchemaT
 from app.llm.errors import (
     LLMConfigurationError,
@@ -448,4 +449,6 @@ class AnthropicProvider:
     async def generate_structured(
         self, request: CompletionRequest, schema: type[SchemaT]
     ) -> SchemaT:
-        raise NotImplementedError("structured output arrives with Phase 4 tool calling")
+        # JSON asked for in the prompt and validated by Pydantic; see
+        # `app/llm/structured.py` for why not `response_format`.
+        return await structured.generate_structured(self, request, schema)

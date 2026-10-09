@@ -73,7 +73,7 @@ class _StubProvider:
         raise NotImplementedError("Judge only calls generate()")
 
     async def generate_structured(self, request: CompletionRequest, schema: Any) -> Any:
-        raise NotImplementedError("providers do not implement this yet -- see judge.py")
+        raise NotImplementedError("Judge only calls generate()")
 
 
 def _verdict_json(

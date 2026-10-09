@@ -9,19 +9,15 @@ reference, and whether it is *grounded* in the evidence rather than
 invented, which is what lets a run catch a hallucinated price that happens
 to still match the required phrases.
 
-Decision: `generate`, not `generate_structured`. Both `OpenAIProvider.
-generate_structured` and `AnthropicProvider.generate_structured` are
-`raise NotImplementedError(...)` today (Phase 4 only wired up `generate`/
-`stream`; structured output was never built) -- so calling it here would
-make the judge a `NotImplementedError` away from working with either real
-provider. Structured output is also documented (docs/PHASE-6.md §4) to
-return only the parsed schema with no usage attached, and the judge's usage
-must be real and billable (its own `usage_events` row, priced like any
-other call), so there is nothing to gain by waiting for it even once it
-exists. This module instead calls `generate()` with an explicit
-JSON-only instruction in the system prompt, reads `CompletionResponse.
-usage` (the real, provider-reported figure `generate()` already exposes),
-strips a ```json fence if the model wrapped its answer in one anyway, and
+Decision: `generate`, not `generate_structured`. Structured output
+(`app/llm/structured.py`) returns only the parsed schema with no usage
+attached, and the judge's usage must be real and billable (its own
+`usage_events` row, priced like any other call). This module instead calls
+`generate()` with an explicit JSON-only instruction in the system prompt,
+reads `CompletionResponse.usage` (the real, provider-reported figure
+`generate()` already exposes), strips a ```json fence if the model wrapped
+its answer in one anyway (`app.llm.structured.strip_json_fence`, shared with
+structured output), and
 validates the result with `JudgeVerdict.model_validate_json` -- which is
 also what turns "the model didn't return valid JSON" into a `pydantic.
 ValidationError` (pydantic v2's JSON parser reports invalid JSON as a
@@ -51,6 +47,7 @@ from pydantic import BaseModel
 from app.core.logging import get_logger
 from app.evaluations.scorers import Observation, ObservedToolCall, ScoreResult
 from app.llm.base import LLMProvider
+from app.llm.structured import strip_json_fence
 from app.llm.types import CompletionRequest, CompletionResponse, Message, Usage
 
 logger = get_logger(__name__)
@@ -134,23 +131,6 @@ def _build_evidence(tool_calls: list[ObservedToolCall]) -> str:
     return "\n\n".join(labelled)[:EVIDENCE_MAX_CHARS]
 
 
-def _strip_json_fence(text: str) -> str:
-    """Undo a ```json ... ``` (or bare ``` ... ```) wrapper some models add
-    despite being told not to. Text that does not start with a fence is
-    returned unchanged; `JudgeVerdict.model_validate_json` is left to reject
-    (as a `pydantic.ValidationError`) anything that still isn't valid JSON.
-    """
-    stripped = text.strip()
-    if not stripped.startswith("```"):
-        return stripped
-    lines = stripped.splitlines()
-    if lines:
-        lines = lines[1:]  # drop the opening ``` or ```json line
-    if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-    return "\n".join(lines).strip()
-
-
 class Judge:
     def __init__(self, provider: LLMProvider, model: str) -> None:
         self._provider = provider
@@ -173,7 +153,7 @@ class Judge:
         except Exception as exc:
             return _error(exc, Usage())
         try:
-            verdict = JudgeVerdict.model_validate_json(_strip_json_fence(response.text))
+            verdict = JudgeVerdict.model_validate_json(strip_json_fence(response.text))
         except Exception as exc:  # a `ValidationError`, in practice
             return _error(exc, response.usage)
 

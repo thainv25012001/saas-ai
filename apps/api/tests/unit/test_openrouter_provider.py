@@ -228,3 +228,23 @@ async def test_with_no_other_model_available_the_original_error_surfaces():
     assert _sent_models(provider) == ["z-ai/glm-5.2:free"]
     kwargs = provider._client.chat.completions.create.call_args.kwargs  # noqa: SLF001
     assert kwargs["extra_body"]["models"] == ["z-ai/glm-5.2:free"]
+
+
+async def test_structured_output_runs_through_the_inherited_stream_loop():
+    """The supplier pipeline's classification, mapping and product matching all
+    call this. Before it existed they silently fell back to "no suggestion"."""
+    from pydantic import BaseModel
+
+    class _Answer(BaseModel):
+        label: str
+
+    provider = _provider_with(
+        [_chunk('{"label": '), _chunk('"supplier"}', finish_reason="stop"), _chunk(usage=(20, 6))]
+    )
+
+    result = await provider.generate_structured(_request(), _Answer)
+
+    assert result == _Answer(label="supplier")
+    sent = provider._client.chat.completions.create.call_args.kwargs  # noqa: SLF001
+    assert sent["messages"][0]["role"] == "system"
+    assert "JSON Schema" in sent["messages"][0]["content"]
