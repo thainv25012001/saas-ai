@@ -25,7 +25,7 @@ from app.core.tenancy import TenantContext, tenant_session, untenanted_session
 from app.db.models import GmailConnection, Membership, MembershipRole, User
 from app.db.models.supplier import SupplierMapping
 from app.db.models.supplier_quote import SupplierMessage
-from app.gmail.client import GmailClient
+from app.gmail.client import GmailClient, GmailProfile
 from app.gmail.oauth import (
     GmailOAuthClient,
     OAuthStateError,
@@ -96,7 +96,7 @@ def _require_oauth_settings() -> tuple[str, str]:
         raise ValidationError("Gmail OAuth is not configured")
     if not settings.gmail_oauth_redirect_uri:
         raise ValidationError("Gmail OAuth callback URL is not configured")
-    if not settings.gmail_pubsub_topic:
+    if settings.gmail_sync_mode == "pubsub" and not settings.gmail_pubsub_topic:
         raise ValidationError("Gmail Pub/Sub topic is not configured")
     if not settings.gmail_web_redirect_uri:
         raise ValidationError("Gmail dashboard redirect URL is not configured")
@@ -105,6 +105,25 @@ def _require_oauth_settings() -> tuple[str, str]:
     except (RuntimeError, ValueError) as exc:
         raise ValidationError("Gmail token encryption is not configured") from exc
     return settings.gmail_oauth_client_id, settings.gmail_oauth_redirect_uri
+
+
+async def _start_mailbox_cursor(
+    gmail: GmailClient, access_token: str, profile: GmailProfile
+) -> tuple[str, datetime | None]:
+    """A new connection's history cursor and watch expiry, per sync mode.
+
+    `pubsub` starts a watch so Gmail publishes changes, and the cursor is the
+    watch's. `polling` starts nothing: the profile fetched a moment ago holds
+    the mailbox's current `historyId`, and a topic still configured from
+    Pub/Sub days is ignored.
+    """
+    settings = get_settings()
+    if settings.gmail_sync_mode == "polling":
+        return profile.history_id, None
+    if not settings.gmail_pubsub_topic:
+        raise ValidationError("Gmail Pub/Sub topic is not configured")
+    watch = await gmail.watch(access_token, settings.gmail_pubsub_topic)
+    return watch.history_id, watch.expiration
 
 
 @router.get("/connection", response_model=GmailConnectionStatus)
@@ -299,7 +318,7 @@ async def gmail_oauth_callback(
     mailbox_email = profile.email_address.strip().casefold()
 
     settings = get_settings()
-    if not settings.gmail_pubsub_topic:
+    if settings.gmail_sync_mode == "pubsub" and not settings.gmail_pubsub_topic:
         return _web_redirect("error", "gmail_notifications_not_configured")
 
     async with tenant_session(tenant) as session:
@@ -324,7 +343,9 @@ async def gmail_oauth_callback(
 
     gmail = GmailClient()
     try:
-        watch = await gmail.watch(tokens.access_token, settings.gmail_pubsub_topic)
+        start_history_id, watch_expires_at = await _start_mailbox_cursor(
+            gmail, tokens.access_token, profile
+        )
     except RuntimeError:
         return _web_redirect("error", "gmail_notifications_unavailable")
 
@@ -341,8 +362,8 @@ async def gmail_oauth_callback(
                     organization_id=tenant.organization_id,
                     email=mailbox_email,
                     refresh_token_ciphertext=encrypt_token(refresh_token),
-                    history_id=watch.history_id,
-                    watch_expires_at=watch.expiration,
+                    history_id=start_history_id,
+                    watch_expires_at=watch_expires_at,
                     status="connected",
                     last_error_code=None,
                 )
@@ -353,15 +374,18 @@ async def gmail_oauth_callback(
                 # Reconnecting starts from now, like a first connection:
                 # mail that arrived while disconnected is not backfilled.
                 if existing_email != mailbox_email or not connection.history_id or was_disconnected:
-                    connection.history_id = watch.history_id
-                connection.watch_expires_at = watch.expiration
+                    connection.history_id = start_history_id
+                connection.watch_expires_at = watch_expires_at
                 connection.status = "connected"
                 connection.last_error_code = None
     except Exception:
-        try:
-            await gmail.stop_watch(tokens.access_token)
-        except RuntimeError:
-            pass
+        # Only a watch this callback started is stopped. Polling mode starts
+        # none, and a watch on this mailbox from Pub/Sub days is not ours.
+        if watch_expires_at is not None:
+            try:
+                await gmail.stop_watch(tokens.access_token)
+            except RuntimeError:
+                pass
         raise
     if existing_email and existing_email != mailbox_email and previous_ciphertext:
         try:

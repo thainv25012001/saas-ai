@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import httpx
@@ -183,6 +184,7 @@ async def test_valid_callback_saves_only_encrypted_refresh_token(
         gmail_web_redirect_uri="https://app.example.com/dashboard/supplier-quotes",
         gmail_token_encryption_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         gmail_pubsub_topic="projects/test/topics/gmail",
+        gmail_sync_mode="pubsub",
     )
     redis = _FakeRedis()
     monkeypatch.setattr(gmail_api, "get_settings", lambda: settings)
@@ -342,6 +344,7 @@ async def test_reconnecting_a_disconnected_mailbox_starts_from_the_new_watch(
         gmail_web_redirect_uri="https://app.example.com/dashboard/supplier-quotes",
         gmail_token_encryption_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         gmail_pubsub_topic="projects/test/topics/gmail",
+        gmail_sync_mode="pubsub",
     )
     redis = _FakeRedis()
     monkeypatch.setattr(gmail_api, "get_settings", lambda: settings)
@@ -414,3 +417,226 @@ async def test_reconnecting_a_disconnected_mailbox_starts_from_the_new_watch(
     assert existing.status == "connected"
     assert existing.refresh_token_ciphertext is not None
     assert decrypt_token(existing.refresh_token_ciphertext) == "secret-refresh"
+
+
+def _gmail_settings(**overrides: object):
+    from app.core.config import Settings
+
+    values: dict[str, object] = {
+        "_env_file": None,
+        "database_url": "postgresql+asyncpg://app_user:password@localhost:5432/app",
+        "migration_database_url": "postgresql+asyncpg://app_owner:password@localhost:5432/app",
+        "jwt_secret": "unit-test-secret-that-is-long-enough",
+        "gmail_oauth_client_id": "client-id",
+        "gmail_oauth_client_secret": "client-secret",
+        "gmail_oauth_redirect_uri": "https://api.example.com/api/v1/gmail/oauth/callback",
+        "gmail_web_redirect_uri": "https://app.example.com/dashboard/supplier-quotes",
+        "gmail_token_encryption_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
+@dataclass
+class _CallbackRun:
+    response: httpx.Response | None
+    added: list[object]
+    watch_calls: list[str]
+    stop_calls: list[str]
+
+
+async def _run_callback(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: object,
+    *,
+    existing: object | None = None,
+    fail_save: bool = False,
+) -> _CallbackRun:
+    """Drive the OAuth callback with Google and the database faked.
+
+    The profile reports `historyId` 17 and a watch would report 18, so a
+    test can tell which one became the cursor. With `fail_save` the row
+    write raises and `response` is None.
+    """
+    from app.api import gmail as gmail_api
+    from app.gmail.client import GmailClient, GmailProfile, GmailWatchResult
+    from app.gmail.oauth import GmailOAuthClient, OAuthStateStore, OAuthTokens
+
+    redis = _FakeRedis()
+    monkeypatch.setattr(gmail_api, "get_settings", lambda: settings)
+    monkeypatch.setattr(gmail_api, "get_redis", lambda: redis)
+    monkeypatch.setattr("app.gmail.token_crypto.get_settings", lambda: settings)
+    organization_id, user_id = uuid.uuid4(), uuid.uuid4()
+    await OAuthStateStore(redis).issue(organization_id, user_id)
+    state = next(iter(redis.values)).removeprefix("gmail:oauth:state:")
+    added: list[object] = []
+    watch_calls: list[str] = []
+    stop_calls: list[str] = []
+
+    class _Result:
+        def first(self) -> tuple[str]:
+            return ("owner",)
+
+        def scalar_one_or_none(self) -> object | None:
+            return existing
+
+    class _Session:
+        async def execute(self, _statement: object) -> _Result:
+            return _Result()
+
+        def add(self, record: object) -> None:
+            if fail_save:
+                raise RuntimeError("database unavailable")
+            added.append(record)
+
+    @asynccontextmanager
+    async def fake_session():
+        yield _Session()
+
+    monkeypatch.setattr(gmail_api, "untenanted_session", fake_session)
+    monkeypatch.setattr(gmail_api, "tenant_session", lambda _tenant: fake_session())
+
+    async def exchange(*_args: object, **_kwargs: object) -> OAuthTokens:
+        return OAuthTokens(access_token="secret-access", refresh_token="secret-refresh")
+
+    async def profile(_self: GmailClient, _token: str) -> GmailProfile:
+        return GmailProfile(emailAddress="SupplierInbox@example.com", historyId="17")
+
+    async def watch(_self: GmailClient, _token: str, topic: str) -> GmailWatchResult:
+        watch_calls.append(topic)
+        return GmailWatchResult(
+            history_id="18", expiration=datetime.fromtimestamp(1_900_000_000, tz=UTC)
+        )
+
+    async def stop_watch(_self: GmailClient, token: str) -> None:
+        stop_calls.append(token)
+
+    monkeypatch.setattr(GmailOAuthClient, "exchange_code", exchange)
+    monkeypatch.setattr(GmailClient, "get_profile", profile)
+    monkeypatch.setattr(GmailClient, "watch", watch)
+    monkeypatch.setattr(GmailClient, "stop_watch", stop_watch)
+    tenant = TenantContext(
+        organization_id=organization_id,
+        user_id=user_id,
+        role=MembershipRole.OWNER,
+        request_id="test",
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_test_app(tenant)),
+        base_url="http://test",
+        follow_redirects=False,
+    ) as client:
+        try:
+            response: httpx.Response | None = await client.get(
+                "/api/v1/gmail/oauth/callback", params={"code": "oauth-code", "state": state}
+            )
+        except RuntimeError:
+            if not fail_save:
+                raise
+            response = None
+    return _CallbackRun(response, added, watch_calls, stop_calls)
+
+
+@pytest.mark.parametrize(
+    ("mode", "topic", "expected_status"),
+    [
+        ("polling", None, 200),
+        ("pubsub", None, 422),
+        ("pubsub", "projects/test/topics/gmail", 200),
+    ],
+)
+async def test_oauth_start_needs_a_topic_only_in_pubsub_mode(
+    monkeypatch: pytest.MonkeyPatch, mode: str, topic: str | None, expected_status: int
+) -> None:
+    from app.api import gmail as gmail_api
+
+    settings = _gmail_settings(gmail_sync_mode=mode, gmail_pubsub_topic=topic)
+    monkeypatch.setattr(gmail_api, "get_settings", lambda: settings)
+    monkeypatch.setattr("app.core.config.get_settings", lambda: settings)
+    monkeypatch.setattr("app.gmail.token_crypto.get_settings", lambda: settings)
+    monkeypatch.setattr(gmail_api, "get_redis", lambda: _FakeRedis())
+    tenant = TenantContext(
+        organization_id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        role=MembershipRole.OWNER,
+        request_id="test",
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_test_app(tenant)), base_url="http://test"
+    ) as client:
+        response = await client.post("/api/v1/gmail/oauth/start")
+
+    assert response.status_code == expected_status, response.text
+
+
+@pytest.mark.parametrize("topic", [None, "projects/test/topics/gmail"])
+async def test_polling_connect_starts_from_the_profile_cursor_without_a_watch(
+    monkeypatch: pytest.MonkeyPatch, topic: str | None
+) -> None:
+    settings = _gmail_settings(gmail_sync_mode="polling", gmail_pubsub_topic=topic)
+
+    run = await _run_callback(monkeypatch, settings)
+
+    assert run.response is not None
+    assert "gmail=connected" in run.response.headers["location"]
+    # A topic left in .env from Pub/Sub days must not start a watch.
+    assert run.watch_calls == []
+    (saved,) = run.added
+    assert saved.history_id == "17"
+    assert saved.watch_expires_at is None
+    assert saved.status == "connected"
+
+
+async def test_polling_reconnect_after_needs_reauth_keeps_the_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.db.models import GmailConnection
+
+    existing = GmailConnection(
+        email="supplierinbox@example.com",
+        refresh_token_ciphertext=None,
+        history_id="5",
+        status="needs_reauth",
+        last_error_code="gmail_refresh_failed",
+    )
+
+    run = await _run_callback(
+        monkeypatch, _gmail_settings(gmail_sync_mode="polling"), existing=existing
+    )
+
+    assert run.response is not None
+    assert "gmail=connected" in run.response.headers["location"]
+    # Mail that arrived while the token was broken is still ahead of cursor 5;
+    # resetting to the profile's 17 would skip it.
+    assert existing.history_id == "5"
+    assert existing.status == "connected"
+    assert existing.last_error_code is None
+    assert existing.watch_expires_at is None
+    assert run.watch_calls == []
+
+
+async def test_a_failed_polling_connect_never_stops_a_watch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = await _run_callback(
+        monkeypatch, _gmail_settings(gmail_sync_mode="polling"), fail_save=True
+    )
+
+    assert run.response is None
+    # This callback started no watch; one on this mailbox from Pub/Sub days
+    # is not this callback's to stop.
+    assert run.stop_calls == []
+
+
+async def test_a_failed_pubsub_connect_stops_the_watch_it_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _gmail_settings(
+        gmail_sync_mode="pubsub", gmail_pubsub_topic="projects/test/topics/gmail"
+    )
+
+    run = await _run_callback(monkeypatch, settings, fail_save=True)
+
+    assert run.response is None
+    assert run.watch_calls == ["projects/test/topics/gmail"]
+    assert run.stop_calls == ["secret-access"]
