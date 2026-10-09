@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from arq import create_pool
 from arq.connections import ArqRedis, RedisSettings
-from arq.constants import job_key_prefix
+from arq.constants import job_key_prefix, result_key_prefix
 from sqlalchemy import text
 
 from app.core.config import get_settings
@@ -74,7 +74,7 @@ def queue() -> str:
 async def _forget(pool: ArqRedis, email: str, queue: str) -> None:
     job_id = gmail_poll_job_id(email)
     await pool.zrem(queue, job_id)
-    await pool.delete(job_key_prefix + job_id)
+    await pool.delete(job_key_prefix + job_id, result_key_prefix + job_id)
 
 
 async def test_a_mailbox_connected_by_two_organizations_is_polled_once(
@@ -113,13 +113,16 @@ async def test_a_mailbox_with_a_poll_pending_is_not_queued_again(
     assert second == PollFanOut(enqueued=0, already_pending=1)
 
 
-@pytest.mark.parametrize("outcome", ["succeeds", "fails"])
+@pytest.mark.parametrize("outcome", ["succeeds", "fails", "retries_exhausted"])
 async def test_a_finished_poll_frees_its_mailbox_for_the_next_interval(
     arq_pool: ArqRedis, queue: str, outcome: str
 ) -> None:
     """A real arq worker runs a poll registered exactly as production
     registers it. If the job key outlived the job, the fixed job ID would
-    block that mailbox's polls forever, with nothing anywhere saying so."""
+    block that mailbox's polls forever, with nothing anywhere saying so. A
+    poll that exhausts its retries leaves a result key instead (arq stores it
+    for the worker-wide `keep_result_s`, ignoring the per-function value)."""
+    from arq import Retry
     from arq.worker import Worker, func
 
     from app.workers.settings import WorkerSettings
@@ -137,6 +140,8 @@ async def test_a_finished_poll_frees_its_mailbox_for_the_next_interval(
         ran.append(mailbox_email)
         if outcome == "fails":
             raise RuntimeError("Gmail is down")
+        if outcome == "retries_exhausted":
+            raise Retry(defer=0.01)
 
     worker = Worker(
         functions=[
@@ -162,5 +167,6 @@ async def test_a_finished_poll_frees_its_mailbox_for_the_next_interval(
     finally:
         await _forget(arq_pool, email, queue)
 
-    assert ran == [email]
+    expected_runs = registered.max_tries if outcome == "retries_exhausted" else 1
+    assert ran == [email] * expected_runs
     assert again == PollFanOut(enqueued=1, already_pending=0)

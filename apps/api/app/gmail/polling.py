@@ -10,6 +10,7 @@ import hashlib
 from dataclasses import dataclass
 
 from arq.connections import ArqRedis
+from arq.constants import result_key_prefix
 from sqlalchemy import text
 
 from app.core.tenancy import untenanted_session
@@ -24,11 +25,15 @@ class PollFanOut:
 def gmail_poll_job_id(mailbox_email: str) -> str:
     """One fixed job ID per mailbox.
 
-    With the poll task registered `keep_result=0`, arq refuses a second
-    enqueue while this mailbox's poll is queued, running or waiting to retry,
-    and accepts the next one once it ends (arq 0.28 `Worker.finish_job`
-    deletes the job key when no result is kept). Hashed like
-    `gmail_sync_job_id`, so the address is not a Redis key in clear.
+    arq refuses an enqueue while either `arq:job:<id>` or `arq:result:<id>`
+    exists. The job key marks a poll that is queued, running or waiting to
+    retry. With the task registered `keep_result=0`, arq 0.28
+    `Worker.finish_job` deletes it when the poll ends. A poll that exhausts
+    its retries goes through `finish_failed_job` instead, which stores a
+    result for the worker-wide `keep_result_s` (an hour by default) and
+    ignores the per-function value, so `enqueue_mailbox_polls` clears the
+    result key before each enqueue. Hashed like `gmail_sync_job_id`, so the
+    address is not a Redis key in clear.
     """
     normalized = mailbox_email.strip().casefold()
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:40]
@@ -67,10 +72,14 @@ async def enqueue_mailbox_polls(
     """
     enqueued = 0
     for email in mailbox_emails:
+        job_id = gmail_poll_job_id(email)
+        # A poll that ran out of retries leaves a result key that would block
+        # this ID for an hour. The job key, not this one, marks a pending poll.
+        await redis.delete(result_key_prefix + job_id)
         job = await redis.enqueue_job(
             job_name,
             mailbox_email=email,
-            _job_id=gmail_poll_job_id(email),
+            _job_id=job_id,
             _queue_name=queue_name,
         )
         if job is not None:

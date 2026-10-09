@@ -136,7 +136,10 @@ skip_if_busy=True)`.
 The fixed job ID with `keep_result=0` gives at most one poll per mailbox queued
 or running. arq refuses an enqueue while the job key or result key exists. With
 no result kept, arq 0.28 `Worker.finish_job` deletes the job key when the job
-ends, so the next interval can enqueue again. A retry (`Retry`) keeps the job
+ends, so the next interval can enqueue again. A poll that exhausts its retries
+goes through `finish_failed_job`, which stores a result for the worker-wide
+`keep_result_s` (an hour) regardless of the per-function setting, so the fan-out
+deletes `arq:result:<job_id>` before each enqueue. A retry (`Retry`) keeps the job
 key, so polls do not pile up behind a struggling mailbox.
 
 **`run_gmail_sync(..., skip_if_busy: bool = False)`.** When the mailbox lock is

@@ -31,7 +31,7 @@
 1. A developer's `.env` still sets `GMAIL_PUBSUB_TOPIC` while the mode is `polling`. Connecting must not start a watch. Pinned in Task 2 (`test_polling_connect_starts_from_the_profile_cursor_without_a_watch`, topic parametrized).
 2. An owner reconnects a `needs_reauth` mailbox in polling mode. The cursor must be kept so mail from the broken period is caught up, not skipped. Pinned in Task 2 (`test_polling_reconnect_after_needs_reauth_keeps_the_cursor`).
 3. Saving a polling-mode connection fails after Google approved it. No `stop_watch` may be sent: this callback started no watch, and a Pub/Sub-era watch on the mailbox may still be serving someone. Pinned in Task 2 (`test_a_failed_polling_connect_never_stops_a_watch`).
-4. A poll job that crashes or exhausts its retries must not hold its mailbox's fixed job ID, or that mailbox would never be polled again. Pinned in Task 5 with a real arq worker (`test_a_finished_poll_frees_its_mailbox_for_the_next_interval`, success and failure).
+4. A poll job that crashes or exhausts its retries must not hold its mailbox's fixed job ID, or that mailbox would never be polled again. Pinned in Task 5 with a real arq worker (`test_a_finished_poll_frees_its_mailbox_for_the_next_interval`, success, failure and retries exhausted). An exhausted poll leaves an hour-long `arq:result:` key, so the fan-out deletes that key before each enqueue.
 5. A fresh deployment boots with no connected mailbox. The cron must run cleanly and queue nothing. Pinned in Task 5 (`test_a_poll_with_no_connected_mailboxes_queues_nothing`).
 
 ---

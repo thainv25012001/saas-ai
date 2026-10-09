@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from arq.constants import result_key_prefix
 
 from app.gmail.polling import PollFanOut, enqueue_mailbox_polls, gmail_poll_job_id
 
@@ -12,16 +13,22 @@ class _FakeArq:
 
     def __init__(self) -> None:
         self.job_ids: set[str] = set()
+        self.result_keys: set[str] = set()
         self.calls: list[tuple[str, str, str | None, dict[str, object]]] = []
 
     async def enqueue_job(
         self, function: str, *, _job_id: str, _queue_name: str | None = None, **kwargs: object
     ) -> object | None:
         self.calls.append((function, _job_id, _queue_name, kwargs))
-        if _job_id in self.job_ids:
+        if _job_id in self.job_ids or result_key_prefix + _job_id in self.result_keys:
             return None
         self.job_ids.add(_job_id)
         return object()
+
+    async def delete(self, *keys: str) -> int:
+        removed = self.result_keys.intersection(keys)
+        self.result_keys -= removed
+        return len(removed)
 
 
 def test_poll_job_id_is_one_per_mailbox_whatever_the_spelling() -> None:
@@ -55,6 +62,19 @@ async def test_fan_out_queues_new_polls_and_counts_pending_ones() -> None:
         None,
         {"mailbox_email": "new@example.com"},
     )
+
+
+async def test_a_result_left_by_an_exhausted_poll_does_not_block_the_mailbox() -> None:
+    redis = _FakeArq()
+    redis.result_keys.add(result_key_prefix + gmail_poll_job_id("stuck@example.com"))
+
+    result = await enqueue_mailbox_polls(
+        redis,  # type: ignore[arg-type]
+        ["stuck@example.com"],
+        job_name="poll_gmail_mailbox_task",
+    )
+
+    assert result == PollFanOut(enqueued=1, already_pending=0)
 
 
 async def test_the_poll_cron_queues_the_registered_poll_task(
