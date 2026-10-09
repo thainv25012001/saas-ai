@@ -896,7 +896,9 @@ async def _process_gmail_message(
         )
         supplier_message.classification = classification.classification
         supplier_message.classification_confidence = classification.confidence
-        if classification.classification == "non_supplier" and not classification.review_required:
+        # Nothing to review and no supplier: a non-supplier, or an email the
+        # classifier was unsure about.
+        if not classification.review_required and classification.supplier_id is None:
             await service.record_processing_status(supplier_message.id, status="ignored")
             return
         if classification.review_required or classification.supplier_id is None:

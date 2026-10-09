@@ -121,7 +121,8 @@ const MESSAGE_ERRORS: Record<string, string> = {
   gmail_access_denied: "Gmail access was revoked. Reconnect Gmail.",
   gmail_maintenance_failed: "The daily Gmail check failed. Reconnect Gmail if this keeps happening.",
   processing_failed: "This email could not be processed. Its spreadsheet may be damaged.",
-  supplier_classification_review: "The sender is not one of your suppliers.",
+  supplier_classification_review:
+    "Looks like a supplier, but this address isn't on any supplier yet. Add it to process the email.",
   xlsx_attachment_missing: "No .xlsx spreadsheet was attached.",
   items_need_review: "Some rows need review.",
 };

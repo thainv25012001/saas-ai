@@ -126,6 +126,19 @@ async def classify_supplier_email(
             "snippet": snippet[:_MAX_PROMPT_TEXT],
         },
     )
+    unsure = result.classification == "uncertain" or result.confidence < _CONFIDENCE_THRESHOLD
+    if unsure and not matches:
+        # Skipped, not reviewed: surfacing every email the classifier could
+        # not place buried the few an owner could act on. A provider failure
+        # lands here too, as the empty "uncertain" default. Senders claimed by
+        # several configured suppliers still go to review below: that overlap
+        # is the owner's configuration to fix, not the classifier's doubt.
+        return SupplierClassificationResult(
+            classification=result.classification,
+            confidence=result.confidence,
+            review_required=False,
+            reason="llm_classification_unsure",
+        )
     linked_supplier: object | None = None
     if result.supplier_name:
         named = [
@@ -138,10 +151,7 @@ async def classify_supplier_email(
             linked_supplier = named[0]
     known_supplier = result.classification == "supplier" and linked_supplier is not None
     review_required = (
-        result.confidence < _CONFIDENCE_THRESHOLD
-        or result.classification == "uncertain"
-        or (result.classification == "supplier" and not known_supplier)
-        or len(matches) > 1
+        unsure or (result.classification == "supplier" and not known_supplier) or len(matches) > 1
     )
     # AI classification alone never authenticates an unknown sender as a known supplier.
     supplier_id = str(_value(linked_supplier, "id")) if known_supplier else None
@@ -312,7 +322,9 @@ async def _generate_structured(
     try:
         return await provider.generate_structured(request, schema)
     except Exception:
-        # Provider failures are a review state, never permission to guess.
+        # Provider failures fall back to the empty default, never permission
+        # to guess: an unsure email classification (skipped), or a mapping or
+        # product match that waits for review.
         return schema()
 
 

@@ -426,6 +426,40 @@ async def test_a_poll_processes_new_mail_from_the_saved_cursor(
     assert (await connection_row(tenant_a)).history_id == "200"
 
 
+async def test_an_email_the_classifier_is_unsure_about_is_ignored(
+    owner_connection: Any,
+    tenant_a: TenantContext,
+    fake_gmail: FakeGmail,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.gmail.sync import run_gmail_sync
+    from app.supplier_quotes.classification import EmailClassification
+
+    class _UnsureProvider:
+        name = "fake"
+
+        async def generate_structured(self, _request: Any, _schema: Any) -> EmailClassification:
+            return EmailClassification(classification="uncertain", confidence=0.2)
+
+    monkeypatch.setattr(
+        "app.supplier_quotes.classification.get_provider", lambda _name: _UnsureProvider()
+    )
+    await seed_mailbox(owner_connection, tenant_a)
+    fake_gmail.messages["m-unsure"] = gmail_message("m-unsure", sender="news@unknown.example")
+    fake_gmail.history_message_ids = ["m-unsure"]
+
+    await run_gmail_sync(mailbox_email=_MAILBOX, notification_history_id="200")
+
+    row = (await message_rows(tenant_a))["m-unsure"]
+    assert row.status == "ignored"
+    assert row.error_code is None
+    assert row.classification == "uncertain"
+    assert fake_gmail.downloaded == []
+    async with tenant_session(tenant_a) as session:
+        pending = await SupplierQuoteService(session, tenant_a).list_pending_messages()
+    assert row.id not in {message.id for message in pending}
+
+
 async def test_maintenance_continues_past_a_mailbox_that_fails(
     owner_connection: Any,
     tenant_a: TenantContext,

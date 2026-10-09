@@ -150,7 +150,11 @@ The operator does this once per deployment. The application creates no cloud res
    which a navigation cannot carry. Only mail that arrives after connecting is processed.
    There is no historical backfill.
 2. **Add suppliers** with the sender addresses or domains their quotes come from. Mail from
-   anyone else is ignored before any attachment is fetched.
+   anyone else is classified by the LLM before any attachment is fetched. If the LLM is
+   confident the sender is a supplier (confidence 0.85 or more), the email waits in *Needs
+   review* so the owner can add that address. Otherwise it is ignored, and so is every
+   unknown sender when the provider has no structured output or fails. An ignored email is
+   not re-checked later.
 3. **Review new layouts.** The first quote with an unfamiliar layout produces a *mapping
    proposal*: the worksheet, the header row, the column labels, and a suggested column for
    each field. Only labels are stored, never cell values. The owner corrects the

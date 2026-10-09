@@ -883,6 +883,11 @@ one-lookup shape of "Status as a tone".
   all (labels only), the proposed one first. Moving clears the column
   choices, because they name labels the other row may not have; moving back
   restores the proposal's own.
+- **Needs review lists only emails an owner can act on.** An email the
+  classifier was unsure about is ignored by the API, not listed. Listing every
+  unsure email buried the few that mattered. What remains under "Emails that
+  need attention" says what to do: add a supplier's new address, reconnect
+  Gmail, or check the rows.
 - **Confirming is one REST call.** `POST .../supplier-mappings/{id}/confirm`
   commits the confirmation and then queues the email's re-fetch. A GraphQL
   mutation could not do this: its transaction commits after its response

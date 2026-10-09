@@ -196,6 +196,11 @@ describe("match and status labels", () => {
       "Replaced by this supplier's newer quote",
     );
     expect(messageErrorLabel("processing_failed")).toMatch(/could not be processed/i);
+    // Unsure classifications are ignored, so what remains looks like a supplier
+    // writing from an address no supplier lists yet.
+    expect(messageErrorLabel("supplier_classification_review")).toBe(
+      "Looks like a supplier, but this address isn't on any supplier yet. Add it to process the email.",
+    );
     expect(matchStatusLabel("suggested")).toEqual({ label: "Suggested match", tone: "info" });
   });
 
