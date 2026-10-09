@@ -105,6 +105,19 @@ services:
       # not of the app -- re-measure them if EMBEDDING_PROVIDER changes.
       RETRIEVAL_MAX_COSINE_DISTANCE: ${RETRIEVAL_MAX_COSINE_DISTANCE:-0.8}
       RETRIEVAL_MIN_KEYWORD_RANK: ${RETRIEVAL_MIN_KEYWORD_RANK:-0.15}
+      # ---- Phase 9 (Gmail supplier quotes) -------------------------------
+      # Same reason as above: without these lines the values in `.env` never
+      # reach this container and every Gmail route answers "Gmail OAuth is not
+      # configured". Blank stays blank -- the feature is off until they are
+      # all set (see docs/PHASE-9.md §3).
+      GMAIL_OAUTH_CLIENT_ID: ${GMAIL_OAUTH_CLIENT_ID:-}
+      GMAIL_OAUTH_CLIENT_SECRET: ${GMAIL_OAUTH_CLIENT_SECRET:-}
+      GMAIL_OAUTH_REDIRECT_URI: ${GMAIL_OAUTH_REDIRECT_URI:-}
+      GMAIL_WEB_REDIRECT_URI: ${GMAIL_WEB_REDIRECT_URI:-}
+      GMAIL_TOKEN_ENCRYPTION_KEY: ${GMAIL_TOKEN_ENCRYPTION_KEY:-}
+      GMAIL_PUBSUB_TOPIC: ${GMAIL_PUBSUB_TOPIC:-}
+      GMAIL_PUBSUB_PUSH_AUDIENCE: ${GMAIL_PUBSUB_PUSH_AUDIENCE:-}
+      GMAIL_PUBSUB_EXPECTED_SERVICE_ACCOUNT: ${GMAIL_PUBSUB_EXPECTED_SERVICE_ACCOUNT:-}
     ports:
       - "8000:8000"
     volumes:
@@ -188,6 +201,17 @@ services:
       # not of the app -- re-measure them if EMBEDDING_PROVIDER changes.
       RETRIEVAL_MAX_COSINE_DISTANCE: ${RETRIEVAL_MAX_COSINE_DISTANCE:-0.8}
       RETRIEVAL_MIN_KEYWORD_RANK: ${RETRIEVAL_MIN_KEYWORD_RANK:-0.15}
+      # ---- Phase 9 (Gmail supplier quotes) -------------------------------
+      # The worker refreshes and decrypts stored Gmail tokens and renews the
+      # Pub/Sub watch, so it needs the same values as `api`.
+      GMAIL_OAUTH_CLIENT_ID: ${GMAIL_OAUTH_CLIENT_ID:-}
+      GMAIL_OAUTH_CLIENT_SECRET: ${GMAIL_OAUTH_CLIENT_SECRET:-}
+      GMAIL_OAUTH_REDIRECT_URI: ${GMAIL_OAUTH_REDIRECT_URI:-}
+      GMAIL_WEB_REDIRECT_URI: ${GMAIL_WEB_REDIRECT_URI:-}
+      GMAIL_TOKEN_ENCRYPTION_KEY: ${GMAIL_TOKEN_ENCRYPTION_KEY:-}
+      GMAIL_PUBSUB_TOPIC: ${GMAIL_PUBSUB_TOPIC:-}
+      GMAIL_PUBSUB_PUSH_AUDIENCE: ${GMAIL_PUBSUB_PUSH_AUDIENCE:-}
+      GMAIL_PUBSUB_EXPECTED_SERVICE_ACCOUNT: ${GMAIL_PUBSUB_EXPECTED_SERVICE_ACCOUNT:-}
     volumes:
       - ./apps/api:/app
       - /app/.venv

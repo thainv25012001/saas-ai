@@ -16,6 +16,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.logging import get_logger
 from app.core.redis import get_redis
 from app.core.tenancy import TenantContext, tenant_session, untenanted_session
 from app.db.models import (
@@ -57,6 +58,8 @@ _MAX_PROMPT_TEXT = 12_000
 _LLM_MATCHES_PER_MESSAGE = 25
 _BUSY_RETRY_SECONDS = 30
 _TRANSIENT_RETRY_SECONDS = 60
+
+logger = get_logger(__name__)
 
 
 class GmailSyncError(RuntimeError):
@@ -257,6 +260,14 @@ async def run_gmail_sync(
             {"email": normalized_email},
         )
         resolved = [(uuid.UUID(str(row[0])), uuid.UUID(str(row[1]))) for row in result.all()]
+    logger.info(
+        "gmail_sync_started",
+        mailbox_email=normalized_email,
+        notification_history_id=notification_history_id,
+        connections=len(resolved),
+    )
+    if not resolved:
+        logger.warning("gmail_sync_no_connection", mailbox_email=normalized_email)
 
     busy = False
     for organization_id, connection_id in resolved:
@@ -269,6 +280,7 @@ async def run_gmail_sync(
             # Another job holds this mailbox and may have listed its history
             # before the change this notification announces, so skipping
             # would strand that mail until the next notification. Retry.
+            logger.info("gmail_sync_busy_retrying", connection_id=str(connection_id))
             busy = True
             continue
         try:
@@ -518,6 +530,12 @@ async def _sync_connection(
             or connection.status != "connected"
             or connection.refresh_token_ciphertext is None
         ):
+            logger.info(
+                "gmail_sync_skipped",
+                connection_id=str(connection_id),
+                reason="not_connected",
+                status=connection.status if connection is not None else None,
+            )
             return
         cursor = connection.history_id
         last_sync = connection.last_history_sync_at or connection.created_at
@@ -532,6 +550,13 @@ async def _sync_connection(
         and notification_history_id is not None
         and _history_id_value(notification_history_id) <= _history_id_value(cursor)
     ):
+        logger.info(
+            "gmail_sync_skipped",
+            connection_id=str(connection_id),
+            reason="notification_behind_cursor",
+            notification_history_id=notification_history_id,
+            cursor=cursor,
+        )
         return
 
     try:
@@ -569,16 +594,44 @@ async def _sync_connection(
             if exc.status_code == 404 and last_sync is None:
                 return
             raise
+        logger.info(
+            "gmail_history_cursor_expired_reconciling",
+            connection_id=str(connection_id),
+            since=last_sync.isoformat(),
+        )
         profile = await gmail.get_profile(tokens.access_token)
         reconciliation_cursor = profile.history_id
         message_ids = await _list_messages_since(gmail, tokens.access_token, last_sync)
         next_cursor = reconciliation_cursor
 
+    logger.info(
+        "gmail_history_fetched",
+        connection_id=str(connection_id),
+        cursor=cursor,
+        next_cursor=next_cursor,
+        new_messages=len(message_ids),
+    )
     for message_id in message_ids:
         try:
             message = await fetch_message_if_available(gmail, tokens.access_token, message_id)
             if message is None or not _is_inbox_message(message):
+                logger.info(
+                    "gmail_message_skipped",
+                    gmail_message_id=message_id,
+                    reason="not_found" if message is None else "not_in_inbox",
+                )
                 continue
+            sender_email, subject, _snippet, received_at = _message_metadata(message)
+            logger.info(
+                "gmail_message_received",
+                gmail_message_id=message_id,
+                sender_email=sender_email,
+                subject=(subject or "")[:120],
+                received_at=received_at.isoformat() if received_at else None,
+                xlsx_attachments=[
+                    attachment.filename for attachment in extract_xlsx_attachments(message)
+                ],
+            )
             await _process_isolated(
                 tenant=tenant,
                 connection_id=connection_id,
@@ -599,6 +652,11 @@ async def _sync_connection(
                 raise Retry(defer=_TRANSIENT_RETRY_SECONDS) from exc
             # Any other refusal to fetch this one message (400, 403) will not
             # change on retry; leave it rather than block the mailbox.
+            logger.warning(
+                "gmail_message_fetch_refused",
+                gmail_message_id=message_id,
+                http_status=exc.status_code,
+            )
             continue
 
     async with tenant_session(tenant) as session:
@@ -613,6 +671,7 @@ async def _sync_connection(
             connection.history_id = next_cursor
             connection.last_history_sync_at = datetime.now(UTC)
             connection.last_error_code = None
+    logger.info("gmail_sync_finished", connection_id=str(connection_id), cursor=next_cursor)
 
 
 async def _process_isolated(
@@ -652,8 +711,10 @@ async def _process_isolated(
     except GmailAPIError as exc:
         if exc.status_code == 401 or _is_transient(exc):
             raise
+        logger.exception("gmail_message_processing_failed", gmail_message_id=message_id)
         await _record_message_failure(tenant, connection_id, history_id, message_id, message)
     except Exception:
+        logger.exception("gmail_message_processing_failed", gmail_message_id=message_id)
         await _record_message_failure(tenant, connection_id, history_id, message_id, message)
 
 
@@ -738,6 +799,9 @@ async def _mark_connection_error(
     connection_id: uuid.UUID,
     error_code: str,
 ) -> None:
+    logger.warning(
+        "gmail_connection_error", connection_id=str(connection_id), error_code=error_code
+    )
     async with tenant_session(tenant) as session:
         result = await session.execute(
             select(GmailConnection).where(
@@ -806,6 +870,11 @@ async def _process_gmail_message(
             force_reprocess=force_reprocess,
         )
         if not should_process:
+            logger.info(
+                "gmail_message_already_handled",
+                gmail_message_id=message_id,
+                status=supplier_message.status,
+            )
             return
 
         suppliers = await service.list_suppliers()

@@ -42,7 +42,7 @@ def verify_pubsub_request(
         raise PubSubAuthError("Pub/Sub authentication is not configured")
     scheme, _, bearer = (authorization or "").partition(" ")
     if scheme.casefold() != "bearer" or not bearer or " " in bearer:
-        raise PubSubAuthError("Pub/Sub authentication failed")
+        raise PubSubAuthError("Pub/Sub authentication failed: no bearer token")
     try:
         claims = id_token.verify_oauth2_token(
             bearer,
@@ -50,21 +50,35 @@ def verify_pubsub_request(
             audience=expected_audience,
         )  # type: ignore[no-untyped-call]  # google-auth exposes no type for this verifier
     except Exception as exc:
-        raise PubSubAuthError("Pub/Sub authentication failed") from exc
+        raise PubSubAuthError(
+            f"Pub/Sub authentication failed: {_verification_failure(exc, bearer)}"
+        ) from exc
     if not isinstance(claims, dict):
-        raise PubSubAuthError("Pub/Sub authentication failed")
+        raise PubSubAuthError("Pub/Sub authentication failed: claims are not an object")
     issuer = claims.get("iss")
     email = claims.get("email")
     audience = claims.get("aud")
-    if (
-        issuer not in {"accounts.google.com", "https://accounts.google.com"}
-        or audience != expected_audience
-        or not isinstance(email, str)
-        or email.casefold() != expected_email.strip().casefold()
-        or claims.get("email_verified") is not True
-    ):
-        raise PubSubAuthError("Pub/Sub authentication failed")
+    if issuer not in {"accounts.google.com", "https://accounts.google.com"}:
+        raise PubSubAuthError("Pub/Sub authentication failed: unexpected issuer")
+    if audience != expected_audience:
+        raise PubSubAuthError(f"Pub/Sub authentication failed: audience {audience!r}")
+    if not isinstance(email, str) or email.casefold() != expected_email.strip().casefold():
+        raise PubSubAuthError(f"Pub/Sub authentication failed: service account {email!r}")
+    if claims.get("email_verified") is not True:
+        raise PubSubAuthError("Pub/Sub authentication failed: email not verified")
     return claims
+
+
+def _verification_failure(exc: Exception, bearer: str) -> str:
+    """google-auth's reason (expired, wrong audience) for the server log.
+
+    Some of its messages quote the token itself, so any message containing a
+    piece of it is reduced to the exception type.
+    """
+    message = str(exc)
+    if bearer in message or any(len(part) >= 8 and part in message for part in bearer.split(".")):
+        return type(exc).__name__
+    return f"{type(exc).__name__}: {message[:200]}"
 
 
 def decode_pubsub_envelope(payload: bytes) -> GmailPushMessage:

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, NotFoundError, PermissionDeniedError, ValidationError
 from app.core.ids import uuid7
+from app.core.logging import get_logger
 from app.core.tenancy import TenantContext
 from app.db.models import MembershipRole, Product
 from app.db.models.gmail_connection import GmailConnection
@@ -37,6 +38,8 @@ _ALLOWED_MESSAGE_STATUSES = {
     "failed",
 }
 _ERROR_CODE_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+
+logger = get_logger(__name__)
 
 
 @dataclass(slots=True)
@@ -414,6 +417,13 @@ class SupplierQuoteService:
         if status in {"processed", "ignored", "review_required", "failed"}:
             message.processed_at = datetime.now(UTC)
         await self.session.flush()
+        logger.info(
+            "supplier_message_status",
+            gmail_message_id=message.gmail_message_id,
+            supplier_id=str(message.supplier_id) if message.supplier_id else None,
+            status=status,
+            error_code=error_code,
+        )
         return message
 
     async def upsert_quote_rows(

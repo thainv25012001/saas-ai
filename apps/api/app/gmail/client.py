@@ -9,8 +9,11 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.config import get_settings
+from app.core.logging import get_logger
 
 _API_ROOT = "https://gmail.googleapis.com/gmail/v1/users/me"
+
+logger = get_logger(__name__)
 
 
 class GmailAPIError(RuntimeError):
@@ -176,6 +179,7 @@ class GmailClient:
         except httpx.RequestError as exc:
             raise GmailAPIError("Gmail service request failed") from exc
         if response.is_error:
+            _log_provider_error(path, response)
             raise GmailAPIError(
                 f"Gmail API returned HTTP {response.status_code}",
                 status_code=response.status_code,
@@ -191,3 +195,30 @@ class GmailClient:
         if not isinstance(body, dict):
             raise GmailAPIError("Gmail returned an invalid response")
         return body
+
+
+def _log_provider_error(path: str, response: httpx.Response) -> None:
+    """Log Google's reason server-side only; the raised error stays generic.
+
+    A bare "HTTP 403" from `watch` cannot tell a missing Pub/Sub publisher
+    grant from a topic in the wrong project -- Google's message can.
+    """
+    status = reason = message = None
+    try:
+        error = response.json().get("error")
+        if isinstance(error, dict):
+            status = error.get("status")
+            message = str(error.get("message", ""))[:300] or None
+            details = error.get("errors")
+            if isinstance(details, list) and details and isinstance(details[0], dict):
+                reason = details[0].get("reason")
+    except (ValueError, AttributeError):
+        pass
+    logger.warning(
+        "gmail_api_error",
+        endpoint=path.split("/", 1)[0],
+        http_status=response.status_code,
+        google_status=status,
+        google_reason=reason,
+        google_message=message,
+    )
