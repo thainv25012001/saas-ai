@@ -24,6 +24,7 @@ from app.core.tenancy import TenantContext, tenant_session
 from app.db.models import MessageRole
 from app.documents.service import DocumentService
 from app.evaluations.runner import run_evaluation
+from app.gmail.polling import enqueue_mailbox_polls, list_polled_mailboxes
 from app.gmail.sync import (
     run_gmail_maintenance,
     run_gmail_message_reprocess,
@@ -314,6 +315,35 @@ async def sync_gmail_mailbox_task(
         mailbox_email=mailbox_email,
         notification_history_id=notification_history_id,
         force_sync=force_sync,
+    )
+
+
+async def poll_gmail_mailbox_task(ctx: dict[str, Any], *, mailbox_email: str) -> None:
+    """Polling mode: sync one mailbox from its saved cursor.
+
+    A mailbox another job is syncing right now is skipped, not retried: the
+    next poll covers it.
+    """
+    await run_gmail_sync(
+        mailbox_email=mailbox_email,
+        notification_history_id=None,
+        force_sync=True,
+        skip_if_busy=True,
+    )
+
+
+async def poll_gmail_mailboxes_task(ctx: dict[str, Any]) -> None:
+    """Polling mode's cron: queue one `poll_gmail_mailbox_task` per connected
+    mailbox, so one slow mailbox does not hold up the others."""
+    mailboxes = await list_polled_mailboxes()
+    fan_out = await enqueue_mailbox_polls(
+        ctx["redis"], mailboxes, job_name=poll_gmail_mailbox_task.__name__
+    )
+    logger.info(
+        "gmail_poll_started",
+        mailboxes=len(mailboxes),
+        enqueued=fan_out.enqueued,
+        already_pending=fan_out.already_pending,
     )
 
 

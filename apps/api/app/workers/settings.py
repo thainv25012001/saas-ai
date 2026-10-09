@@ -11,14 +11,16 @@ from typing import Any
 
 from arq import cron
 from arq.connections import RedisSettings
+from arq.cron import CronJob
 from arq.worker import Function, func
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.workers.tasks import (
     EVALUATION_MAX_TRIES,
     import_products_task,
     ingest_document_task,
+    poll_gmail_mailbox_task,
     renew_gmail_watches_task,
     reprocess_supplier_message_task,
     run_evaluation_task,
@@ -41,6 +43,39 @@ async def _on_startup(_ctx: dict[str, Any]) -> None:
 
 
 GMAIL_JOB_MAX_TRIES = 20
+#: A poll that keeps failing gives up quickly: the next interval polls again.
+GMAIL_POLL_MAX_TRIES = 3
+
+
+def build_cron_jobs(settings: Settings) -> list[CronJob]:
+    """Cron jobs for the configured Gmail sync mode (docs/PHASE-9.md §2).
+
+    `pubsub` renews watches at 03:00 and reconciles each mailbox. `polling`
+    polls instead and must not renew: its connections have no watch, so
+    renewal would treat every one as expired and mark it
+    `gmail_topic_not_configured`.
+    """
+    if settings.gmail_sync_mode == "polling":
+        return [
+            cron(
+                "app.workers.tasks.poll_gmail_mailboxes_task",
+                minute=set(range(0, 60, settings.gmail_poll_interval_minutes)),
+                # A worker that just started checks right away instead of
+                # waiting for the next slot.
+                run_at_startup=True,
+                timeout=60,
+                max_tries=1,
+            ),
+        ]
+    return [
+        cron(
+            "app.workers.tasks.renew_gmail_watches_task",
+            hour=3,
+            minute=0,
+            timeout=3600,
+            max_tries=1,
+        ),
+    ]
 
 
 class WorkerSettings:
@@ -55,6 +90,10 @@ class WorkerSettings:
         # dropped; 20 tries outlast one long sync holding the mailbox lock.
         func(sync_gmail_mailbox_task, max_tries=GMAIL_JOB_MAX_TRIES),
         func(reprocess_supplier_message_task, max_tries=GMAIL_JOB_MAX_TRIES),
+        # No result kept: arq then deletes the job key when a poll ends, and
+        # that key is what stops a mailbox having two polls in flight
+        # (`gmail_poll_job_id`).
+        func(poll_gmail_mailbox_task, keep_result=0, max_tries=GMAIL_POLL_MAX_TRIES),
         renew_gmail_watches_task,
         # Wrapped, for its own timeout: an evaluation runs its cases one
         # after another (docs/PHASE-6.md §5), so up to 200 real provider
@@ -67,15 +106,7 @@ class WorkerSettings:
         # the run rather than raising a `Retry` arq would never act on.
         func(run_evaluation_task, timeout=3600, max_tries=EVALUATION_MAX_TRIES),
     ]
-    cron_jobs = [
-        cron(
-            "app.workers.tasks.renew_gmail_watches_task",
-            hour=3,
-            minute=0,
-            timeout=3600,
-            max_tries=1,
-        ),
-    ]
+    cron_jobs = build_cron_jobs(get_settings())
     on_startup = _on_startup
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     # Retries at the arq job level, on top of `_embed_all`'s own per-batch

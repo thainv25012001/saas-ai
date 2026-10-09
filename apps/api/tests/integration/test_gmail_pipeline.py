@@ -357,6 +357,26 @@ async def test_a_busy_mailbox_is_left_to_the_next_poll(
     assert (await connection_row(tenant_a)).history_id == "100"
 
 
+async def test_a_poll_processes_new_mail_from_the_saved_cursor(
+    owner_connection: Any, tenant_a: TenantContext, fake_gmail: FakeGmail
+) -> None:
+    from app.workers.tasks import poll_gmail_mailbox_task
+
+    await seed_mailbox(owner_connection, tenant_a)
+    fake_gmail.messages["m-poll"] = gmail_message("m-poll", attachment_id="att-poll")
+    fake_gmail.attachments["att-poll"] = workbook_bytes([("SKU-1", "Widget", 10)])
+    fake_gmail.history_message_ids = ["m-poll"]
+
+    await poll_gmail_mailbox_task({}, mailbox_email=_MAILBOX)
+
+    rows = await message_rows(tenant_a)
+    assert rows["m-poll"].status == "processed"
+    assert await report_for(tenant_a, rows["m-poll"]) is not None
+    # No notification carried a history ID; the cursor still advances to
+    # the newest one history.list reported.
+    assert (await connection_row(tenant_a)).history_id == "200"
+
+
 async def test_maintenance_continues_past_a_mailbox_that_fails(
     owner_connection: Any,
     tenant_a: TenantContext,

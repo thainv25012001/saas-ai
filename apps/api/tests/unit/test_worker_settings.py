@@ -123,15 +123,60 @@ def test_gmail_sync_and_maintenance_tasks_are_registered() -> None:
         assert getattr(function, "max_tries", None) == GMAIL_JOB_MAX_TRIES
 
 
-def test_gmail_watch_renewal_is_scheduled_daily() -> None:
+def _settings(**overrides: object):
+    from app.core.config import Settings
+
+    return Settings(
+        _env_file=None,
+        database_url="postgresql+asyncpg://app_user:password@localhost:5432/app",
+        migration_database_url="postgresql+asyncpg://app_owner:password@localhost:5432/app",
+        jwt_secret="unit-test-secret-that-is-long-enough",
+        **overrides,
+    )
+
+
+def test_gmail_poll_task_keeps_no_result_so_the_next_interval_can_queue_it() -> None:
+    """The poll's fixed job ID only frees up when arq deletes the job key,
+    which it does at the end of a job only when no result is kept."""
+    from app.workers.settings import GMAIL_POLL_MAX_TRIES
+    from app.workers.tasks import poll_gmail_mailbox_task
+
+    registered = {getattr(item, "coroutine", item): item for item in WorkerSettings.functions}
+    function = registered[poll_gmail_mailbox_task]
+    assert function.keep_result_s == 0
+    assert function.max_tries == GMAIL_POLL_MAX_TRIES == 3
+
+
+def test_polling_mode_schedules_the_poll_and_not_the_watch_renewal() -> None:
+    from app.workers.settings import build_cron_jobs
+    from app.workers.tasks import poll_gmail_mailboxes_task
+
+    jobs = build_cron_jobs(_settings(gmail_sync_mode="polling", gmail_poll_interval_minutes=15))
+
+    assert [job.coroutine for job in jobs] == [poll_gmail_mailboxes_task]
+    assert jobs[0].minute == {0, 15, 30, 45}
+    assert jobs[0].run_at_startup is True
+    assert jobs[0].max_tries == 1
+    assert jobs[0].timeout_s == 60
+
+
+def test_pubsub_mode_renews_watches_daily_and_does_not_poll() -> None:
+    from app.workers.settings import build_cron_jobs
     from app.workers.tasks import renew_gmail_watches_task
 
-    registered = [
-        job for job in WorkerSettings.cron_jobs if job.coroutine is renew_gmail_watches_task
-    ]
-    assert len(registered) == 1
-    assert registered[0].hour == 3
-    assert registered[0].minute == 0
+    jobs = build_cron_jobs(_settings(gmail_sync_mode="pubsub"))
+
+    assert [job.coroutine for job in jobs] == [renew_gmail_watches_task]
+    assert jobs[0].hour == 3
+    assert jobs[0].minute == 0
+
+
+def test_worker_cron_jobs_follow_the_configured_mode() -> None:
+    from app.core.config import get_settings
+    from app.workers.settings import build_cron_jobs
+
+    expected = [job.coroutine for job in build_cron_jobs(get_settings())]
+    assert [job.coroutine for job in WorkerSettings.cron_jobs] == expected
 
 
 def test_run_evaluation_task_is_registered_under_its_own_name_with_a_one_hour_timeout() -> None:

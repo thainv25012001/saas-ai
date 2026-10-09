@@ -55,3 +55,61 @@ async def test_fan_out_queues_new_polls_and_counts_pending_ones() -> None:
         None,
         {"mailbox_email": "new@example.com"},
     )
+
+
+async def test_the_poll_cron_queues_the_registered_poll_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.workers.tasks as tasks
+
+    async def mailboxes() -> list[str]:
+        return ["a@example.com"]
+
+    redis = _FakeArq()
+    monkeypatch.setattr(tasks, "list_polled_mailboxes", mailboxes)
+
+    await tasks.poll_gmail_mailboxes_task({"redis": redis})
+
+    assert [(call[0], call[3]) for call in redis.calls] == [
+        (tasks.poll_gmail_mailbox_task.__name__, {"mailbox_email": "a@example.com"})
+    ]
+
+
+async def test_a_poll_with_no_connected_mailboxes_queues_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.workers.tasks as tasks
+
+    async def no_mailboxes() -> list[str]:
+        return []
+
+    redis = _FakeArq()
+    monkeypatch.setattr(tasks, "list_polled_mailboxes", no_mailboxes)
+
+    await tasks.poll_gmail_mailboxes_task({"redis": redis})
+
+    assert redis.calls == []
+
+
+async def test_a_poll_syncs_from_the_cursor_and_skips_a_busy_mailbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.workers.tasks as tasks
+
+    calls: list[dict[str, object]] = []
+
+    async def sync(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(tasks, "run_gmail_sync", sync)
+
+    await tasks.poll_gmail_mailbox_task({}, mailbox_email="a@example.com")
+
+    assert calls == [
+        {
+            "mailbox_email": "a@example.com",
+            "notification_history_id": None,
+            "force_sync": True,
+            "skip_if_busy": True,
+        }
+    ]

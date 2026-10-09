@@ -111,3 +111,56 @@ async def test_a_mailbox_with_a_poll_pending_is_not_queued_again(
 
     assert first == PollFanOut(enqueued=1, already_pending=0)
     assert second == PollFanOut(enqueued=0, already_pending=1)
+
+
+@pytest.mark.parametrize("outcome", ["succeeds", "fails"])
+async def test_a_finished_poll_frees_its_mailbox_for_the_next_interval(
+    arq_pool: ArqRedis, queue: str, outcome: str
+) -> None:
+    """A real arq worker runs a poll registered exactly as production
+    registers it. If the job key outlived the job, the fixed job ID would
+    block that mailbox's polls forever, with nothing anywhere saying so."""
+    from arq.worker import Worker, func
+
+    from app.workers.settings import WorkerSettings
+    from app.workers.tasks import poll_gmail_mailbox_task
+
+    registered = next(
+        item
+        for item in WorkerSettings.functions
+        if getattr(item, "coroutine", None) is poll_gmail_mailbox_task
+    )
+    email = _address()
+    ran: list[str] = []
+
+    async def stand_in(_ctx: dict[str, Any], *, mailbox_email: str) -> None:
+        ran.append(mailbox_email)
+        if outcome == "fails":
+            raise RuntimeError("Gmail is down")
+
+    worker = Worker(
+        functions=[
+            func(
+                stand_in,
+                name=registered.name,
+                keep_result=registered.keep_result_s,
+                max_tries=registered.max_tries,
+            )
+        ],
+        queue_name=queue,
+        redis_pool=arq_pool,
+        burst=True,
+        poll_delay=0.01,
+        handle_signals=False,
+    )
+    try:
+        await enqueue_mailbox_polls(arq_pool, [email], job_name=registered.name, queue_name=queue)
+        await worker.main()
+        again = await enqueue_mailbox_polls(
+            arq_pool, [email], job_name=registered.name, queue_name=queue
+        )
+    finally:
+        await _forget(arq_pool, email, queue)
+
+    assert ran == [email]
+    assert again == PollFanOut(enqueued=1, already_pending=0)
