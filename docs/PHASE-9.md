@@ -9,19 +9,20 @@ reads it, normalizes whatever layout the supplier uses, compares each offer agai
 catalogue, and shows the result in the dashboard. No one forwards or re-types anything.
 
 ```text
-Gmail (watch) ──publish──▶ Pub/Sub topic ──authenticated push──▶ POST /api/v1/gmail/pubsub
-                                                                       │ verify OIDC token,
-                                                                       │ resolve mailbox → tenant
-                                                                       ▼
-                                                     arq: sync_gmail_mailbox_task
-                                                       history pages since the saved cursor
-                                                       → new inbox messages from known suppliers
-                                                       → fetch .xlsx attachments (in memory)
-                                                       → mapping: confirmed? parse : propose + review
-                                                       → match catalogue, rank, persist report
-                                                                       │
-                                                                       ▼
-                                             /dashboard/supplier-quotes (GraphQL)
+polling (default): arq cron every GMAIL_POLL_INTERVAL_MINUTES ─┐  one job per connected mailbox
+pubsub:  Gmail (watch) ──▶ Pub/Sub ──authenticated push──▶ POST /api/v1/gmail/pubsub
+                                                           │ verify OIDC token,
+                                                           │ resolve mailbox → tenant
+                                                           ▼
+                                         arq: poll_gmail_mailbox_task / sync_gmail_mailbox_task
+                                           history pages since the saved cursor
+                                           → new inbox messages from known suppliers
+                                           → fetch .xlsx attachments (in memory)
+                                           → mapping: confirmed? parse : propose + review
+                                           → match catalogue, rank, persist report
+                                                           │
+                                                           ▼
+                                 /dashboard/supplier-quotes (GraphQL)
 ```
 
 ## 1. Scope
@@ -33,8 +34,11 @@ Delivered:
   credential, but keeps the mailbox row, so supplier messages, quotes and reports remain.
   Reconnecting starts from the new watch: mail received while disconnected is not
   backfilled.
-- Pub/Sub push webhook. Every push is verified (signature, issuer, audience, service
-  account and verified email) before any database lookup happens.
+- **Polling (default).** Every `GMAIL_POLL_INTERVAL_MINUTES` (5 by default) an arq cron
+  queues one sync per connected mailbox, with at most one in flight per mailbox. It needs
+  no Google Cloud Pub/Sub and no public URL.
+- **Pub/Sub push (`GMAIL_SYNC_MODE=pubsub`).** Every push is verified (signature, issuer,
+  audience, service account and verified email) before any database lookup happens.
 - Mailbox sync from the watch cursor onward. Pub/Sub redelivery and overlapping history
   pages never duplicate a message or a quote row.
 - **Failure handling:**
@@ -52,13 +56,15 @@ Delivered:
 - Dashboard: Gmail status, suppliers and sender rules, mapping review, product-match
   confirmation, and reports with their audit trail (sender, received time, file, worksheet,
   row). Configuration is owner-only, enforced by the API.
-- Daily watch renewal and cursor reconciliation (`renew_gmail_watches_task`, 03:00 UTC).
+- Pub/Sub mode only: daily watch renewal and cursor reconciliation
+  (`renew_gmail_watches_task`, 03:00 UTC). Polling mode does not schedule it.
 
 Not delivered: see §8.
 
 ## 2. Configuration
 
-Every setting is blank by default, and the feature stays off until all of them are set.
+The OAuth and encryption settings are blank by default, and the feature stays off until
+they are set. The three Pub/Sub settings are needed only when `GMAIL_SYNC_MODE=pubsub`.
 `.env.example` lists them with a short explanation of each:
 
 | Variable | What it is |
@@ -67,14 +73,39 @@ Every setting is blank by default, and the feature stays off until all of them a
 | `GMAIL_OAUTH_REDIRECT_URI` | `https://<api>/api/v1/gmail/oauth/callback`. It must match the client's authorized redirect URI exactly. |
 | `GMAIL_WEB_REDIRECT_URI` | `https://<app>/dashboard/supplier-quotes`. The callback lands the browser here with `?gmail=connected` or `?gmail=error&reason=…`. |
 | `GMAIL_TOKEN_ENCRYPTION_KEY` | 32 random bytes, base64. There is no plaintext fallback. Rotating the key makes stored tokens unreadable, and every owner must reconnect. |
-| `GMAIL_PUBSUB_TOPIC` | `projects/<project>/topics/<topic>`. |
-| `GMAIL_PUBSUB_PUSH_AUDIENCE` | The audience configured on the push subscription. Usually the webhook URL itself. |
-| `GMAIL_PUBSUB_EXPECTED_SERVICE_ACCOUNT` | The service account the push subscription authenticates as. |
+| `GMAIL_SYNC_MODE` | `polling` (default) or `pubsub`. See §2.1. |
+| `GMAIL_POLL_INTERVAL_MINUTES` | Polling mode: minutes between checks, default `5`. Must divide 60. |
+| `GMAIL_PUBSUB_TOPIC` (pubsub only) | `projects/<project>/topics/<topic>`. |
+| `GMAIL_PUBSUB_PUSH_AUDIENCE` (pubsub only) | The audience configured on the push subscription. Usually the webhook URL itself. |
+| `GMAIL_PUBSUB_EXPECTED_SERVICE_ACCOUNT` (pubsub only) | The service account the push subscription authenticates as. |
 
 Tunables with safe defaults: `GMAIL_ATTACHMENT_MAX_BYTES` (20 MiB),
 `GMAIL_WORKBOOK_MAX_ROWS` (25,000) and `GMAIL_SALE_PRICE_MAX_AGE_DAYS` (90).
 
+### 2.1 Choosing a sync mode
+
+- **`polling`** (default). Each connected mailbox's history is read every
+  `GMAIL_POLL_INTERVAL_MINUTES`. New mail reaches the dashboard within one interval plus
+  processing time. Connecting takes the starting cursor from the Gmail profile and creates
+  no watch. A mailbox in `needs_reauth` is not polled until its owner reconnects. A mailbox
+  that another job is still syncing is skipped for that interval.
+- **`pubsub`**. Gmail pushes a notification for each change, so mail arrives within
+  seconds. It needs the Google Cloud setup in §3 and a public HTTPS webhook.
+
+**Upgrading:** polling became the default on 2026-10-09. A deployment that already runs
+Pub/Sub must set `GMAIL_SYNC_MODE=pubsub` to keep it.
+
+**Switching modes:**
+
+- `pubsub` → `polling`: existing watches expire on their own within 7 days. Pushes that
+  arrive until then queue the same idempotent sync and do no harm.
+- `polling` → `pubsub`: connections have no watch until the next 03:00 UTC renewal, so no
+  push arrives for up to a day. Reconnect Gmail to start a watch immediately.
+
 ## 3. Google Cloud setup
+
+Only for `GMAIL_SYNC_MODE=pubsub`. In polling mode, do steps 1 (Gmail API only), 6, 7
+and 8, and skip the Pub/Sub topic and subscription.
 
 The operator does this once per deployment. The application creates no cloud resources.
 
@@ -172,8 +203,15 @@ Nothing here needs a Google account:
   `test_graphql_supplier_quotes.py`) need Postgres and Redis. Run them with the usual
   `localhost` overrides from the README.
 
-A real end-to-end run needs a real Google project (§3) and a public HTTPS URL for the
-push endpoint. Pub/Sub cannot push to `localhost`, so use a tunnel or a deployed API.
+A real end-to-end run needs a Google OAuth client (§3, steps 6–8). In polling mode that is
+all: run the API and the worker locally, connect Gmail, and new mail is picked up within
+one interval. Pub/Sub mode also needs a public HTTPS URL for the push endpoint. Pub/Sub
+cannot push to `localhost`, so use a tunnel or a deployed API.
+
+Polling is covered by `test_gmail_polling.py` (unit: job IDs and the cron task;
+integration: which mailboxes are polled, at most one poll in flight per mailbox, and a
+real arq worker freeing the job ID after a poll ends) and by the poll cases in
+`test_gmail_pipeline.py`.
 
 ## 8. Not delivered
 
