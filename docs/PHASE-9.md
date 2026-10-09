@@ -30,22 +30,26 @@ pubsub:  Gmail (watch) ──▶ Pub/Sub ──authenticated push──▶ POST 
 Delivered:
 
 - Gmail OAuth (read-only scope), with the refresh token encrypted at rest (AES-256-GCM).
-  Owners connect and disconnect. Disconnecting stops the watch and deletes the stored
-  credential, but keeps the mailbox row, so supplier messages, quotes and reports remain.
-  Reconnecting starts from the new watch: mail received while disconnected is not
-  backfilled.
+  Owners connect and disconnect. Disconnecting stops the watch (if one exists) and
+  deletes the stored credential, but keeps the mailbox row, so supplier messages, quotes
+  and reports remain. Reconnecting starts from the mailbox's current position: mail
+  received while disconnected is not backfilled.
 - **Polling (default).** Every `GMAIL_POLL_INTERVAL_MINUTES` (5 by default) an arq cron
   queues one sync per connected mailbox, with at most one in flight per mailbox. It needs
   no Google Cloud Pub/Sub and no public URL.
 - **Pub/Sub push (`GMAIL_SYNC_MODE=pubsub`).** Every push is verified (signature, issuer,
   audience, service account and verified email) before any database lookup happens.
-- Mailbox sync from the watch cursor onward. Pub/Sub redelivery and overlapping history
+- Mailbox sync from the history cursor onward. Pub/Sub redelivery and overlapping history
   pages never duplicate a message or a quote row.
 - **Failure handling:**
   - A message that fails for a reason a retry would not change is recorded as `failed`, and
     the cursor still advances. One bad email never stops a mailbox.
-  - Transient Gmail errors (429/5xx) and a mailbox busy with another job retry the job
-    (`arq.Retry`, up to 20 tries for Gmail jobs).
+  - A push-triggered sync retries transient Gmail errors (429/5xx) and a busy mailbox
+    (`arq.Retry`, up to 20 tries).
+  - A poll skips a busy mailbox and retries transient Gmail or OAuth errors up to 3 times.
+    After that, the next interval resumes from the cursor.
+  - A transient token-refresh failure (network error, 429, 5xx) is retried. Only a
+    rejected refresh token sends the mailbox to `needs_reauth`.
   - The daily maintenance job isolates each mailbox, so one tenant's failure does not stop
     renewal for the rest.
 - Workbook inspection and parsing (`openpyxl`, read-only and data-only, so formulas are
@@ -89,6 +93,9 @@ Tunables with safe defaults: `GMAIL_ATTACHMENT_MAX_BYTES` (20 MiB),
   processing time. Connecting takes the starting cursor from the Gmail profile and creates
   no watch. A mailbox in `needs_reauth` is not polled until its owner reconnects. A mailbox
   that another job is still syncing is skipped for that interval.
+- Polling needs a worker that is always running. A deployment whose worker sleeps when
+  idle, such as the embedded worker on a free Render instance (`render.yaml`), does not
+  poll while it sleeps.
 - **`pubsub`**. Gmail pushes a notification for each change, so mail arrives within
   seconds. It needs the Google Cloud setup in §3 and a public HTTPS webhook.
 
@@ -98,14 +105,18 @@ Pub/Sub must set `GMAIL_SYNC_MODE=pubsub` to keep it.
 **Switching modes:**
 
 - `pubsub` → `polling`: existing watches expire on their own within 7 days. Pushes that
-  arrive until then queue the same idempotent sync and do no harm.
+  arrive until then queue the same idempotent sync and do no harm, but only while
+  `GMAIL_PUBSUB_PUSH_AUDIENCE` and `GMAIL_PUBSUB_EXPECTED_SERVICE_ACCOUNT` stay set. If
+  they are blank, the webhook answers 503 and Pub/Sub keeps redelivering. Keep them until
+  the watches lapse (7 days at most), or delete the push subscription.
 - `polling` → `pubsub`: connections have no watch until the next 03:00 UTC renewal, so no
   push arrives for up to a day. Reconnect Gmail to start a watch immediately.
 
 ## 3. Google Cloud setup
 
-Only for `GMAIL_SYNC_MODE=pubsub`. In polling mode, do steps 1 (Gmail API only), 6, 7
-and 8, and skip the Pub/Sub topic and subscription.
+Steps 2-5 (the Pub/Sub topic, publisher grant, push service account and subscription)
+are only for `GMAIL_SYNC_MODE=pubsub`. Polling mode still needs step 1 (the Gmail API
+only) and steps 6, 7 and 8.
 
 The operator does this once per deployment. The application creates no cloud resources.
 
