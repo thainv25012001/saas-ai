@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from app.core.config import _find_env_file, _normalize_database_url, get_settings
 
 
@@ -197,3 +200,53 @@ class TestNormalizeDatabaseUrl:
             assert settings.migration_database_url == "postgresql+asyncpg://o:p@host/db?ssl=require"
         finally:
             get_settings.cache_clear()
+
+
+def _settings(**overrides: object):
+    from app.core.config import Settings
+
+    return Settings(
+        _env_file=None,
+        database_url="postgresql+asyncpg://app_user:password@localhost:5432/app",
+        migration_database_url="postgresql+asyncpg://app_owner:password@localhost:5432/app",
+        jwt_secret="unit-test-secret-that-is-long-enough",
+        **overrides,
+    )
+
+
+def test_gmail_polls_every_five_minutes_by_default(monkeypatch):
+    monkeypatch.delenv("GMAIL_SYNC_MODE", raising=False)
+    monkeypatch.delenv("GMAIL_POLL_INTERVAL_MINUTES", raising=False)
+
+    settings = _settings()
+
+    assert settings.gmail_sync_mode == "polling"
+    assert settings.gmail_poll_interval_minutes == 5
+
+
+def test_gmail_sync_mode_and_interval_read_the_environment(monkeypatch):
+    monkeypatch.setenv("GMAIL_SYNC_MODE", "pubsub")
+    monkeypatch.setenv("GMAIL_POLL_INTERVAL_MINUTES", "15")
+
+    settings = _settings()
+
+    assert settings.gmail_sync_mode == "pubsub"
+    assert settings.gmail_poll_interval_minutes == 15
+
+
+def test_gmail_sync_mode_rejects_anything_but_pubsub_or_polling():
+    with pytest.raises(ValidationError):
+        _settings(gmail_sync_mode="push")
+
+
+@pytest.mark.parametrize("minutes", [1, 2, 5, 10, 15, 30, 60])
+def test_poll_interval_accepts_divisors_of_an_hour(minutes):
+    assert _settings(gmail_poll_interval_minutes=minutes).gmail_poll_interval_minutes == minutes
+
+
+@pytest.mark.parametrize("minutes", [0, -5, 7, 45, 61, 120])
+def test_poll_interval_rejects_values_that_do_not_divide_an_hour(minutes):
+    # The cron runs at minutes range(0, 60, interval): 7 would leave a
+    # 4-minute gap at every hour (56 -> 0), 45 a 15-minute one.
+    with pytest.raises(ValidationError):
+        _settings(gmail_poll_interval_minutes=minutes)

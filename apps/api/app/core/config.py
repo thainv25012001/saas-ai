@@ -1,6 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -115,6 +115,13 @@ class Settings(BaseSettings):
     gmail_preview_rows: int = Field(default=5, gt=0, le=5)
     gmail_sale_price_max_age_days: int = Field(default=90, gt=0)
     gmail_oauth_state_ttl_seconds: int = Field(default=600, gt=0)
+    # How new mail is noticed (docs/PHASE-9.md §2). `polling` reads each
+    # connected mailbox's history every `gmail_poll_interval_minutes` and
+    # needs no Google Cloud Pub/Sub; `pubsub` waits for authenticated pushes
+    # and renews the Gmail watch nightly. Polling is the default because it
+    # works with nothing but the OAuth client.
+    gmail_sync_mode: Literal["pubsub", "polling"] = "polling"
+    gmail_poll_interval_minutes: int = Field(default=5, ge=1, le=60)
     # `fake` keeps the playground working with no key configured. Set to
     # `openai` or `anthropic` once a key is present.
     default_llm_provider: str = "fake"
@@ -300,6 +307,19 @@ class Settings(BaseSettings):
                 f"not {value.split('://')[0]}://. Upstash calls this the TCP endpoint and it "
                 "looks like rediss://default:<password>@<host>:6379 - the https:// URL on the "
                 "same page is the REST API, which this client cannot speak."
+            )
+        return value
+
+    @field_validator("gmail_poll_interval_minutes", mode="after")
+    @classmethod
+    def poll_interval_divides_the_hour(cls, value: int) -> int:
+        """The poll cron runs at minutes `range(0, 60, interval)`. An interval
+        that does not divide 60 leaves a short gap at every hour (7 polls at
+        :49 and :56, then :00), so it is refused at startup instead."""
+        if 60 % value:
+            raise ValueError(
+                "GMAIL_POLL_INTERVAL_MINUTES must divide 60: "
+                "1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 or 60"
             )
         return value
 
