@@ -73,14 +73,13 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       # Provider credentials. The repo-root `.env` is NOT inside the
       # `./apps/api` mount below, so `Settings`' env-file walk finds nothing in
-      # this container -- without these lines every real provider resolves to
-      # `LLMConfigurationError` here, and only the offline `fake` provider
-      # works. Unset on the host stays unset in the container (no `:-default`),
-      # which is what keeps `fake` the out-of-the-box path.
+      # this container -- without these lines every provider resolves to
+      # `LLMConfigurationError` here. Unset on the host stays unset in the
+      # container (no `:-default`).
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-fake}
+      DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-openrouter}
       # Must resolve to the same path inside both `api` and `worker` -- it
       # is where `worker` looks for the bytes `api` just wrote. The `uploads`
       # volume below is what makes that path actually the same *disk*, not
@@ -120,6 +119,8 @@ services:
       GMAIL_PUBSUB_EXPECTED_SERVICE_ACCOUNT: ${GMAIL_PUBSUB_EXPECTED_SERVICE_ACCOUNT:-}
       GMAIL_SYNC_MODE: ${GMAIL_SYNC_MODE:-polling}
       GMAIL_POLL_INTERVAL_MINUTES: ${GMAIL_POLL_INTERVAL_MINUTES:-5}
+      SUPPLIER_QUOTE_LLM_MODEL: ${SUPPLIER_QUOTE_LLM_MODEL:-}
+      GMAIL_LLM_MATCHES_PER_MESSAGE: ${GMAIL_LLM_MATCHES_PER_MESSAGE:-5}
     ports:
       - "8000:8000"
     volumes:
@@ -182,7 +183,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-fake}
+      DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-openrouter}
       UPLOAD_DIR: ${UPLOAD_DIR:-/data/uploads}
       # ---- Phase 3 (RAG) -------------------------------------------------
       # Passed through explicitly, like every other setting here: the
@@ -216,6 +217,8 @@ services:
       GMAIL_PUBSUB_EXPECTED_SERVICE_ACCOUNT: ${GMAIL_PUBSUB_EXPECTED_SERVICE_ACCOUNT:-}
       GMAIL_SYNC_MODE: ${GMAIL_SYNC_MODE:-polling}
       GMAIL_POLL_INTERVAL_MINUTES: ${GMAIL_POLL_INTERVAL_MINUTES:-5}
+      SUPPLIER_QUOTE_LLM_MODEL: ${SUPPLIER_QUOTE_LLM_MODEL:-}
+      GMAIL_LLM_MATCHES_PER_MESSAGE: ${GMAIL_LLM_MATCHES_PER_MESSAGE:-5}
     volumes:
       - ./apps/api:/app
       - /app/.venv

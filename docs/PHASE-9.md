@@ -153,8 +153,10 @@ The operator does this once per deployment. The application creates no cloud res
    anyone else is classified by the LLM before any attachment is fetched. If the LLM is
    confident the sender is a supplier (confidence 0.85 or more), the email waits in *Needs
    review* so the owner can add that address. Otherwise it is ignored, and so is every
-   unknown sender when the provider has no structured output or fails. An ignored email is
-   not re-checked later.
+   unknown sender when the LLM call fails (no `OPENROUTER_API_KEY`, the free tier's daily
+   limit, or a reply that is not one valid JSON object). An ignored email is not re-checked
+   later. Sender rules need no LLM call, so listing a supplier's addresses also saves
+   requests.
 3. **Review new layouts.** The first quote with an unfamiliar layout produces a *mapping
    proposal*: the worksheet, the header row, the column labels, and a suggested column for
    each field. Only labels are stored, never cell values. The owner corrects the
@@ -168,8 +170,10 @@ The operator does this once per deployment. The application creates no cloud res
 4. **Confirm product matches.** A row whose catalogue product was only suggested (an exact
    name match, or an LLM suggestion) waits for the owner. Confirming it ranks the quote and
    remembers the supplier's SKU for that product (`suppliers.sku_aliases`), so the next quote
-   with that SKU matches without review. Each message makes at most 25 LLM match calls;
-   rows beyond that wait for review.
+   with that SKU matches without review. Each message makes at most
+   `GMAIL_LLM_MATCHES_PER_MESSAGE` LLM match calls (5 by default, up to 25); rows beyond
+   that wait for review. The pipeline's LLM calls use `SUPPLIER_QUOTE_LLM_MODEL` when set,
+   else the default provider's default model, a free OpenRouter one.
 5. **Read reports.** Each processed email gets a report. A quote row shows its gross unit
    profit (before shipping, duties, taxes and selling fees) only when the API could compute it. Otherwise the row names the reason (for example
    *Missing sale price* or *Currency differs from catalogue*) and is ranked by purchase

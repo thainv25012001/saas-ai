@@ -15,7 +15,7 @@ Chat service
       │  resolve agent → config → ACTIVE prompt version → render system prompt
       │  assemble windowed history
       ▼
-LLMProvider  ── openai │ anthropic │ openrouter │ fake
+LLMProvider  ── openai │ anthropic │ openrouter
       ▼
 stream text deltas → persist message + usage + cost
 ```
@@ -113,21 +113,21 @@ misleads its own operator, and it should be closed before anyone relies on the f
 |---|---|---|---|
 | `anthropic` | `claude-opus-5` | `thinking: {"type": "adaptive"}`, depth via `output_config.effort` | not sent |
 | `openai` | `gpt-4o-mini` | n/a | `temperature` sent |
-| `fake` | `fake-1` | n/a | echoed back for assertions |
+| `openrouter` | first entry of `FALLBACK_MODELS` (a `:free` id) | disabled | `temperature` sent |
 
-### 2.5 The fake provider is a first-class citizen
+### 2.5 Tests run against a test double, not a provider
 
-`FakeProvider` is production code under `app/llm/`, not a test fixture. It replays a
-scripted sequence of events deterministically, with no network.
+`FakeProvider` lives in `apps/api/tests/llm_doubles.py`. It replays a scripted sequence of
+events deterministically, with no network, and an autouse fixture registers it as
+`openrouter` in the provider registry for every test.
 
-It exists for three reasons, and the third is the one that matters most: **every test in
-this phase runs against it**, so the suite is fast, deterministic, free, and — critically —
-the chat pipeline is testable by anyone who clones the repo without holding an API key.
-A test suite that only runs for people with billing set up is a test suite that stops
-being run.
+That keeps the suite fast, deterministic and free for anyone who clones the repo without an
+API key. A test suite that only runs for people with billing set up is a test suite that
+stops being run.
 
-It is also what `ENVIRONMENT=local` falls back to when no key is configured, so the
-playground works out of the box.
+The app itself has no offline provider. It used to ship `FakeProvider` as one and fall back
+to it when no key was set; it now defaults to OpenRouter, whose `:free` models need a key
+but no credits. Without a key, chat reports a configuration error instead of a canned reply.
 
 ---
 
@@ -225,7 +225,7 @@ the exact prompt text that produced it. That is what makes Phase 6's evaluation 
 
 | Risk | Mitigation |
 |---|---|
-| No API key in this environment | `FakeProvider` covers the whole pipeline; real providers are unit-tested against mocked SDK clients. Live verification needs the user's key. |
+| No API key in this environment | Tests run against the `FakeProvider` test double; real providers are unit-tested against mocked SDK clients. Live verification needs the user's key. |
 | Sending `temperature` to a model that rejects it | Capability table + a test per provider asserting the parameter is dropped. |
 | SSE buffered by a proxy | Headers documented and set; noted in the README as a deployment prerequisite. |
 | Cost drift as prices change | Pricing table is one file with a `last_verified` date; unknown models fail visibly. |
