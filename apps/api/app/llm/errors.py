@@ -51,6 +51,15 @@ class LLMModelRejectedError(LLMConfigurationError):
     that do not care see an ordinary `LLMConfigurationError`."""
 
 
+class LLMStructuredOutputError(LLMError):
+    """The model answered, but not with one JSON object the schema accepts:
+    an empty reply, prose, or a missing or invalid field. Retrying the same
+    model rarely helps, so callers treat it as "no suggestion"."""
+
+    code = "llm_structured_output_invalid"
+    status_code = 502
+
+
 class LLMEmptyResponseError(LLMError):
     code = "llm_empty_response"
     status_code = 502

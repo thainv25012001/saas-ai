@@ -52,10 +52,6 @@ _MAX_RECONCILIATION_PAGES = 100
 _MAILBOX_LOCK_TTL_SECONDS = 900
 _PRODUCT_MATCH_CANDIDATES = 30
 _MAX_PROMPT_TEXT = 12_000
-#: Rows per message that may ask the LLM for a catalogue match. Exact SKU and
-#: remembered matches need no call; past this, rows wait for review rather
-#: than turning one large price list into thousands of sequential LLM calls.
-_LLM_MATCHES_PER_MESSAGE = 25
 _BUSY_RETRY_SECONDS = 30
 _TRANSIENT_RETRY_SECONDS = 60
 
@@ -893,6 +889,9 @@ async def _process_gmail_message(
             subject=subject,
             snippet=snippet,
             suppliers=suppliers,
+            # Mail without a workbook gives the pipeline nothing to do, so an
+            # unknown sender's is not worth one of the free tier's daily requests.
+            allow_llm=bool(attachments),
         )
         supplier_message.classification = classification.classification
         supplier_message.classification_confidence = classification.confidence
@@ -926,7 +925,9 @@ async def _process_gmail_message(
         )
         any_review = False
         affected_product_ids: set[uuid.UUID] = set()
-        llm_matches_left = _LLM_MATCHES_PER_MESSAGE
+        # Exact SKU and remembered matches need no call; past this cap
+        # (`GMAIL_LLM_MATCHES_PER_MESSAGE`), rows wait for review.
+        llm_matches_left = get_settings().gmail_llm_matches_per_message
         for attachment in attachments:
             unreadable = _attachment_size_issue(attachment, gmail.max_attachment_bytes)
             workbook_bytes: bytes | None = None

@@ -133,8 +133,8 @@ async def test_starting_a_run_returns_202_and_enqueues_after_commit(api_client, 
     assert body["status"] == "pending"
     assert body["case_count"] == 2
     assert body["completed_count"] == 0
-    assert body["provider"] == "fake"
-    assert body["model"] == "fake-1"
+    assert body["provider"] == "openrouter"
+    assert body["model"] == "test/model:free"
     assert body["prompt_version_id"] is None
     assert queue.calls == [(run_id, org_id)]
     assert queue.visible_at_call == [True]
@@ -161,12 +161,12 @@ async def test_the_agents_active_prompt_version_is_pinned_at_start(api_client, c
     response = await api_client.post(
         RUNS_URL,
         headers=_auth(token),
-        json=_body(dataset_id, agent_id, provider="fake", model="fake-2"),
+        json=_body(dataset_id, agent_id, provider="openrouter", model="test/other:free"),
     )
 
     assert response.status_code == 202, response.text
     assert response.json()["prompt_version_id"] == str(version.id)
-    assert response.json()["model"] == "fake-2"
+    assert response.json()["model"] == "test/other:free"
 
 
 async def test_a_second_active_run_of_the_same_dataset_is_409(api_client, clean_users, queue):
@@ -253,7 +253,7 @@ async def test_a_judge_provider_without_a_judge_model_is_422(api_client, clean_u
     response = await api_client.post(
         RUNS_URL,
         headers=_auth(token),
-        json=_body(dataset_id, agent_id, judge_provider="fake"),
+        json=_body(dataset_id, agent_id, judge_provider="openrouter"),
     )
 
     assert response.status_code == 422, response.text
@@ -265,7 +265,7 @@ async def test_a_provider_without_a_model_is_422(api_client, clean_users, queue)
     agent_id, dataset_id = await _agent_and_dataset(org_id)
 
     response = await api_client.post(
-        RUNS_URL, headers=_auth(token), json=_body(dataset_id, agent_id, provider="fake")
+        RUNS_URL, headers=_auth(token), json=_body(dataset_id, agent_id, provider="openrouter")
     )
 
     assert response.status_code == 422, response.text
@@ -371,7 +371,9 @@ async def test_reference_only_cases_without_a_judge_are_422_naming_the_count(
     judged = await api_client.post(
         RUNS_URL,
         headers=_auth(token),
-        json=_body(dataset_id, agent_id, judge_provider="fake", judge_model="fake-1"),
+        json=_body(
+            dataset_id, agent_id, judge_provider="openrouter", judge_model="test/model:free"
+        ),
     )
     assert judged.status_code == 202, judged.text
 

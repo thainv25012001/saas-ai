@@ -122,7 +122,7 @@ export default function AgentDetailPage({
   // Empty until the effect below seeds it from the agent, and explicitly
   // `string` because `PROVIDERS` is a const tuple whose element type would
   // otherwise narrow this and reject the agent's own provider. Seeding it with
-  // `PROVIDERS[0]` instead would make the query below fire once for "fake" and
+  // `PROVIDERS[0]` instead would make the query below fire once for the first provider and
   // throw the answer away before re-firing for the provider the agent is
   // actually on.
   const [provider, setProvider] = useState<string>("");
@@ -365,10 +365,10 @@ export default function AgentDetailPage({
                 <Select {...control} value={provider} onChange={(e) => setProvider(e.target.value)}>
                   {/* Unconfigured providers stay in the list, disabled, rather
                     * than being hidden: a missing option leaves the user
-                    * guessing, a disabled one says why. `fake` appears only
-                    * for an agent already on it — every agent created before
-                    * providers became a required choice is, and a select with
-                    * no option matching its value renders blank. */}
+                    * guessing, a disabled one says why. The agent's own
+                    * provider always appears, even one the API no longer
+                    * lists: a select with no option matching its value
+                    * renders blank. */}
                   {editableProviders(providers, agent.provider).map((option) => (
                     <option key={option.id} value={option.id} disabled={!option.configured}>
                       {option.configured

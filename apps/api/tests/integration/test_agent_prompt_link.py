@@ -5,10 +5,10 @@ from app.chat.service import ChatMessageStart, ChatService
 from app.conversations.service import ConversationService
 from app.core.errors import NotFoundError
 from app.core.tenancy import tenant_session
-from app.llm.fake_provider import FakeProvider
 from app.prompts.schemas import CreatePromptInput
 from app.prompts.service import PromptService
 from tests.factories import agent_input
+from tests.llm_doubles import FakeProvider
 
 pytestmark = pytest.mark.anyio
 

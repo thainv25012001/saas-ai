@@ -53,7 +53,8 @@ async def _insert_run(
             "INSERT INTO eval_runs "
             "(id, organization_id, dataset_id, agent_id, provider, model, status, "
             "case_count, completed_count) "
-            "VALUES (:id, :org, :dataset_id, :agent_id, 'fake', 'fake-1', :status, 1, 1)"
+            "VALUES (:id, :org, :dataset_id, :agent_id, 'openrouter', 'test/model:free', "
+            ":status, 1, 1)"
         ),
         {
             "id": run_id,

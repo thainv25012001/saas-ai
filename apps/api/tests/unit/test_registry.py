@@ -2,7 +2,7 @@ import pytest
 
 from app.core.config import get_settings
 from app.core.errors import ValidationError
-from app.llm.registry import get_provider, reset_providers
+from app.llm.registry import KNOWN_PROVIDERS, get_provider, reset_providers
 
 
 @pytest.fixture(autouse=True)
@@ -14,8 +14,14 @@ def _clean_registry():
     get_settings.cache_clear()
 
 
-def test_fake_provider_resolves_without_any_api_key():
-    assert get_provider("fake").name == "fake"
+def test_the_known_providers_are_the_three_real_ones():
+    assert KNOWN_PROVIDERS == ("openai", "anthropic", "openrouter")
+
+
+def test_fake_is_no_longer_a_provider():
+    """It was an offline stand-in the app shipped; it now lives in the tests."""
+    with pytest.raises(ValidationError):
+        get_provider("fake")
 
 
 def test_unknown_provider_name_is_a_validation_error():
@@ -23,9 +29,12 @@ def test_unknown_provider_name_is_a_validation_error():
         get_provider("definitely-not-a-provider")
 
 
-def test_providers_are_cached_per_name():
+def test_providers_are_cached_per_name(monkeypatch):
     """Constructing an SDK client per request would leak connection pools."""
-    assert get_provider("fake") is get_provider("fake")
+    keyed = get_settings().model_copy(update={"openrouter_api_key": "test-key"})
+    monkeypatch.setattr("app.llm.registry.get_settings", lambda: keyed)
+    reset_providers()
+    assert get_provider("openrouter") is get_provider("openrouter")
 
 
 def test_openai_without_a_key_is_a_configuration_error(monkeypatch):
@@ -49,7 +58,7 @@ def test_openrouter_without_a_key_is_a_configuration_error(monkeypatch):
     no_key_settings = base.model_copy(update={"openrouter_api_key": None})
     monkeypatch.setattr("app.llm.registry.get_settings", lambda: no_key_settings)
     reset_providers()
-    with pytest.raises(LLMConfigurationError):
+    with pytest.raises(LLMConfigurationError, match="OPENROUTER_API_KEY is not set"):
         get_provider("openrouter")
 
 
@@ -76,6 +85,12 @@ def test_the_openrouter_default_model_is_a_free_one():
     assert DEFAULT_MODELS["openrouter"].endswith(":free")
 
 
+def test_every_known_provider_has_a_default_model():
+    from app.llm.registry import DEFAULT_MODELS
+
+    assert set(DEFAULT_MODELS) == set(KNOWN_PROVIDERS)
+
+
 def _settings_with(**overrides):
     """Settings the registry will actually read, with every provider key
     cleared first. Tests that assert on "is this key set" are worthless if
@@ -91,21 +106,17 @@ def _settings_with(**overrides):
     )
 
 
-def test_fake_is_always_configured():
-    """It needs no key at all -- that is the entire point of it."""
-    from app.llm.registry import provider_is_configured
-
-    assert provider_is_configured("fake") is True
-
-
-def test_a_provider_without_its_key_is_not_configured(monkeypatch):
+def test_every_known_provider_needs_a_key(monkeypatch):
+    """No provider answers offline any more, so none is configured by default."""
     from app.llm.registry import provider_is_configured
 
     monkeypatch.setattr("app.llm.registry.get_settings", lambda: _settings_with())
 
-    assert provider_is_configured("openai") is False
-    assert provider_is_configured("anthropic") is False
-    assert provider_is_configured("openrouter") is False
+    assert {name: provider_is_configured(name) for name in KNOWN_PROVIDERS} == {
+        "openai": False,
+        "anthropic": False,
+        "openrouter": False,
+    }
 
 
 def test_a_provider_with_its_key_is_configured(monkeypatch):

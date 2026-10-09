@@ -3,14 +3,12 @@ import { checklistProgress, deriveChecklist, type ChecklistAgent } from "./setup
 import type { ProviderInfo } from "./providers";
 
 const NO_KEYS: ProviderInfo[] = [
-  { id: "fake", configured: true },
   { id: "openai", configured: false },
   { id: "anthropic", configured: false },
   { id: "openrouter", configured: false },
 ];
 
 const OPENAI_KEYED: ProviderInfo[] = [
-  { id: "fake", configured: true },
   { id: "openai", configured: true },
   { id: "anthropic", configured: false },
   { id: "openrouter", configured: false },
@@ -37,17 +35,14 @@ describe("deriveChecklist", () => {
   });
 
   it("reads real-provider from the server's keys, not from the agents", () => {
-    // It used to mean "some agent is not on `fake`". Creating an agent now
-    // requires choosing a configured provider, so that was about to become
-    // trivially true the moment anyone created their first agent -- a tick for
-    // a step they had not done. What it is really asking is whether this
-    // install has an API key at all.
+    // It used to be read from the agents. Creating an agent now requires
+    // choosing a configured provider, so that would be trivially true the
+    // moment anyone created their first agent -- a tick for a step they had
+    // not done. What it is really asking is whether this install has a key.
     expect(stepById([], OPENAI_KEYED, "real-provider").done).toBe(true);
   });
 
-  it("leaves real-provider undone when only the offline provider is available", () => {
-    // `fake` is always `configured` -- it needs no key. It must not satisfy a
-    // step whose entire point is that a real model can answer.
+  it("leaves real-provider undone when no provider has a key", () => {
     expect(stepById([{ status: "ACTIVE" }], NO_KEYS, "real-provider").done).toBe(false);
   });
 

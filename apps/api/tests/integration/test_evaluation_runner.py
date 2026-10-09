@@ -34,13 +34,13 @@ from app.evaluations.runner import run_evaluation
 from app.evaluations.schemas import CaseInput, CreateDatasetInput, StartRunInput
 from app.evaluations.service import EvaluationService
 from app.llm.errors import LLMUnavailableError
-from app.llm.fake_provider import FakeProvider, FakeToolCall, FakeTurn
 from app.llm.types import CompletionRequest, CompletionResponse, StreamEvent, Usage
 from app.prompts.schemas import CreatePromptInput, CreateVersionInput
 from app.prompts.service import PromptService
 from app.workers.tasks import run_evaluation_task
 from tests.conftest import enable_builtin_tool
 from tests.factories import agent_input
+from tests.llm_doubles import FakeProvider, FakeToolCall, FakeTurn
 
 pytestmark = pytest.mark.anyio
 
@@ -213,7 +213,7 @@ async def test_a_three_case_dataset_runs_to_completed_with_a_summary(tenant_a):
     assert summary["scorers"] == {
         "required_phrases": {"mean": pytest.approx(2 / 3), "passed": 2, "applicable": 3}
     }
-    # `fake-1` is priced at zero -- priced, so not null.
+    # `test/model:free` is priced at zero -- priced, so not null.
     assert summary["cost_usd"] is not None
     assert Decimal(summary["cost_usd"]) == 0
     assert isinstance(summary["mean_latency_ms"], int)
@@ -238,8 +238,8 @@ async def test_cost_is_summed_across_cases_as_a_string(tenant_a):
 
 
 async def test_the_arq_task_runs_the_agents_own_provider_end_to_end(tenant_a):
-    """No override anywhere: `get_provider("fake")` answers with its default
-    script, the same one the offline playground shows."""
+    """No override anywhere: `get_provider("openrouter")` answers with its default
+    script: the test double `tests/conftest.py` registers."""
     agent_id, dataset_id, _ = await _setup(tenant_a, [_case(required_phrases=["placeholder"])])
     run_id = await _start(tenant_a, dataset_id, agent_id)
 
@@ -317,7 +317,7 @@ async def test_usage_events_get_one_row_per_case_plus_one_per_judged_case(
         tenant_a,
         dataset_id,
         agent_id,
-        judge_provider="fake",
+        judge_provider="openrouter",
         judge_model="judge-model-x",
     )
     judge = _JudgeProvider()
@@ -338,7 +338,7 @@ async def test_usage_events_get_one_row_per_case_plus_one_per_judged_case(
             owner_connection,
             "usage_events",
             org,
-            f"AND model = 'judge-model-x' AND provider = 'fake' AND agent_id = '{agent_id}'",
+            f"AND model = 'judge-model-x' AND provider = 'openrouter' AND agent_id = '{agent_id}'",
         )
         == 2
     )
@@ -474,7 +474,7 @@ async def test_a_judge_that_raises_fails_only_its_case(tenant_a):
         ],
     )
     run_id = await _start(
-        tenant_a, dataset_id, agent_id, judge_provider="fake", judge_model="fake-1"
+        tenant_a, dataset_id, agent_id, judge_provider="openrouter", judge_model="test/model:free"
     )
 
     await run_evaluation(
@@ -500,7 +500,7 @@ async def test_a_judge_call_that_raised_writes_no_zero_token_usage_row(tenant_a,
         tenant_a, [_case(reference_answer="30 days"), _case(reference_answer="Two years")]
     )
     run_id = await _start(
-        tenant_a, dataset_id, agent_id, judge_provider="fake", judge_model="judge-model-x"
+        tenant_a, dataset_id, agent_id, judge_provider="openrouter", judge_model="judge-model-x"
     )
 
     await run_evaluation(
@@ -522,7 +522,7 @@ async def test_a_garbage_verdict_still_bills_the_judge_call_that_returned_it(
 ):
     agent_id, dataset_id, _ = await _setup(tenant_a, [_case(reference_answer="30 days")])
     run_id = await _start(
-        tenant_a, dataset_id, agent_id, judge_provider="fake", judge_model="judge-model-x"
+        tenant_a, dataset_id, agent_id, judge_provider="openrouter", judge_model="judge-model-x"
     )
 
     await run_evaluation(
@@ -752,7 +752,10 @@ async def test_recording_the_same_case_twice_is_a_no_op_not_an_error(tenant_a, o
             cost_usd=Decimal(0),
             usage=[
                 RecordUsageInput(
-                    agent_id=agent_id, kind=UsageKind.LLM, provider="fake", model="fake-1"
+                    agent_id=agent_id,
+                    kind=UsageKind.LLM,
+                    provider="openrouter",
+                    model="test/model:free",
                 )
             ],
         )

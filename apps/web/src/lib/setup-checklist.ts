@@ -3,8 +3,8 @@ import type { ProviderInfo } from "./providers";
 
 /** Only the field the checklist reads, so the Agents query can change shape
  * without touching this module. `provider` used to be read here too, to tell
- * whether any agent had been moved off `fake`; see `real-provider` below for
- * why that question moved to the server. */
+ * whether any agent had been moved off the offline provider the app once
+ * shipped; see `real-provider` below for why that question moved to the server. */
 export type ChecklistAgent = { status: AgentStatus };
 
 export type ChecklistStepId = "create-agent" | "real-provider" | "activate-agent" | "test-agent";
@@ -17,10 +17,6 @@ export type ChecklistStep = {
   done: boolean | null;
   action: { href: string; label: string };
 };
-
-/** Answers offline with a canned reply, and needs no API key -- so it is
- * always reported as `configured` and can never satisfy the step below. */
-const OFFLINE_PROVIDER = "fake";
 
 export function deriveChecklist(
   agents: readonly ChecklistAgent[],
@@ -39,15 +35,11 @@ export function deriveChecklist(
       title: "Connect a real model provider",
       description:
         "Set OPENAI_API_KEY, ANTHROPIC_API_KEY or OPENROUTER_API_KEY on the API. Until one is set there is no provider to create an agent on.",
-      // Asked of the server, not of the agents. This used to be "some agent is
-      // not on `fake`", which made sense when every agent was created on `fake`
-      // by default. Creating an agent now requires choosing a configured
-      // provider, so that phrasing would tick the moment the first agent
-      // existed -- claiming a step the user had not done. An empty list (the
-      // query has not resolved) is correctly false rather than true.
-      done: providers.some(
-        (provider) => provider.id !== OFFLINE_PROVIDER && provider.configured,
-      ),
+      // Asked of the server, not of the agents: creating an agent requires
+      // choosing a configured provider, so "some agent exists" would tick the
+      // moment the first agent did. An empty list (the query has not resolved)
+      // is correctly false rather than true.
+      done: providers.some((provider) => provider.configured),
       action: { href: "/dashboard/agents", label: "Choose a provider" },
     },
     {

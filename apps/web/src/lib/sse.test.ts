@@ -83,7 +83,7 @@ describe("parseSSEStream", () => {
   });
 
   it("splits a single frame across many single-byte chunks", async () => {
-    const whole = frame({ type: "message_end", usage: { input_tokens: 1, output_tokens: 2 }, cost_usd: "0.01", latency_ms: 5, model: "fake-1", prompt_version_id: null });
+    const whole = frame({ type: "message_end", usage: { input_tokens: 1, output_tokens: 2 }, cost_usd: "0.01", latency_ms: 5, model: "test/model:free", prompt_version_id: null });
     const bytes = encoder.encode(whole);
     async function* byteAtATime(): AsyncGenerator<Uint8Array> {
       for (const b of bytes) yield new Uint8Array([b]);
@@ -95,7 +95,7 @@ describe("parseSSEStream", () => {
         usage: { input_tokens: 1, output_tokens: 2 },
         cost_usd: "0.01",
         latency_ms: 5,
-        model: "fake-1",
+        model: "test/model:free",
         prompt_version_id: null,
       },
     ]);

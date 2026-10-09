@@ -34,8 +34,8 @@ class Agent(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
     )
     # No ORM-level `default=`: `AgentService.create_agent` is the only code
     # that constructs an `Agent`, and it always sets `provider` explicitly
-    # (resolved from the caller's validated choice or `DEFAULT_LLM_PROVIDER`,
-    # which is `fake` out of the box). A Python-side default of "openai" here
+    # (the caller's validated choice, or `DEFAULT_LLM_PROVIDER` for the dev
+    # seed). A Python-side default of "openai" here
     # was therefore never applied, and reading it as "agents default to
     # OpenAI" is actively wrong. The `server_default` in migration 0003 is
     # untouched -- that one does still back a raw SQL INSERT.

@@ -1,7 +1,7 @@
 """`CreateAgentInput` requires a provider and a model.
 
 Creating an agent used to take a name alone and inherit `DEFAULT_LLM_PROVIDER`
-— `fake` out of the box — so every agent a real user made through the
+— an offline provider then — so every agent a real user made through the
 dashboard silently started on the offline provider that answers with a canned
 reply. The choice is the caller's now, and there is no default to fall back to.
 """
@@ -44,7 +44,7 @@ def test_create_rejects_an_empty_model():
 def test_create_rejects_an_unknown_provider():
     with pytest.raises(ValidationError) as exc:
         CreateAgentInput(name="Sales Bot", provider="gpt", model="gpt-4o-mini")
-    assert "fake" in str(exc.value)
+    assert "openrouter" in str(exc.value)
 
 
 def test_create_accepts_a_known_provider_and_model():

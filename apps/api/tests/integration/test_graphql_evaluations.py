@@ -680,8 +680,8 @@ async def test_evaluation_runs_lists_runs_with_agent_name_and_no_prompt_version(
     assert row["agentName"] == "Sales Bot"
     assert row["promptVersionId"] is None
     assert row["promptVersion"] is None
-    assert row["provider"] == "fake"
-    assert row["model"] == "fake-1"
+    assert row["provider"] == "openrouter"
+    assert row["model"] == "test/model:free"
     assert row["status"] == "PENDING"
     assert row["caseCount"] == 1
     assert row["completedCount"] == 0

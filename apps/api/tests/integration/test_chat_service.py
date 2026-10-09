@@ -16,14 +16,13 @@ from app.core.errors import NotFoundError, ValidationError
 from app.core.tenancy import tenant_session
 from app.db.models import ConversationChannel, MessageRole, UsageEvent, UsageKind
 from app.llm.errors import LLMConfigurationError, LLMUnavailableError
-from app.llm.fake_provider import FakeProvider
 from app.llm.pricing import estimate_cost
 from app.llm.registry import reset_providers
 from app.llm.types import Usage
 from app.prompts.schemas import CreatePromptInput, CreateVersionInput
 from app.prompts.service import PromptService
 from tests.factories import agent_input
-from tests.llm_doubles import FALLBACK_MODEL, AnsweredByAnotherModel
+from tests.llm_doubles import FALLBACK_MODEL, AnsweredByAnotherModel, FakeProvider
 
 pytestmark = pytest.mark.anyio
 
@@ -354,13 +353,13 @@ async def test_unpriced_model_records_cost_usd_as_none_not_zero(tenant_a):
 
 
 async def test_without_a_provider_override_it_resolves_the_provider_via_the_registry(tenant_a):
-    """No FakeProvider is injected here -- the agent's own `provider="fake"`
-    (the local default, no API key needed) must be what `send()` resolves via
+    """No FakeProvider is injected here -- the agent's own `provider="openrouter"`
+    (served by the test double in `tests/conftest.py`) must be what `send()` resolves via
     `registry.get_provider`. This is what actually proves the fallback to the
     registry lookup exists and works, rather than merely being unreachable
     code that every other test bypasses with `provider_override`."""
     async with tenant_session(tenant_a) as session:
-        agent = await _agent(session, tenant_a, provider="fake", model="fake-1")
+        agent = await _agent(session, tenant_a, provider="openrouter", model="test/model:free")
         service = ChatService(session, tenant_a)
         events = [event async for event in service.send(agent.id, "Hello")]
 
@@ -450,7 +449,7 @@ async def test_a_successful_turn_writes_exactly_one_usage_event(tenant_a):
     row = rows[0]
     assert row.kind is UsageKind.LLM
     assert row.agent_id == agent_id
-    assert row.provider == "fake"
+    assert row.provider == "openrouter"
     assert row.model == "claude-sonnet-5"
     assert row.input_tokens == 42
     assert row.output_tokens == 17

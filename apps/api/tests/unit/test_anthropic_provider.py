@@ -687,3 +687,23 @@ def test_unknown_model_falls_back_to_the_conservative_capability_set():
     The safe default is to send less."""
     provider = AnthropicProvider(api_key="k")
     assert provider.capabilities("claude-something-new").supports_sampling is False
+
+
+async def test_generate_structured_validates_the_generated_reply(monkeypatch):
+    from pydantic import BaseModel
+
+    from app.llm.types import CompletionResponse, TextBlock, Usage
+
+    class _Answer(BaseModel):
+        label: str
+
+    provider = AnthropicProvider(api_key="test-key")
+
+    async def _generate(request):
+        return CompletionResponse(
+            content=[TextBlock(text='{"label": "other"}')], usage=Usage(), model=request.model
+        )
+
+    monkeypatch.setattr(provider, "generate", _generate)
+
+    assert await provider.generate_structured(_request(), _Answer) == _Answer(label="other")

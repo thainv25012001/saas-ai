@@ -11,15 +11,15 @@ contract.
 import pytest
 
 from app.llm.errors import LLMUnavailableError
-from app.llm.fake_provider import FakeProvider, FakeToolCall
 from app.llm.types import CompletionRequest, Message
+from tests.llm_doubles import FakeProvider, FakeToolCall
 
 pytestmark = pytest.mark.anyio
 
 
 def _request() -> CompletionRequest:
     return CompletionRequest(
-        model="fake-1",
+        model="test/model:free",
         messages=[Message.text("user", "hello")],
         system="you are a test",
         max_tokens=100,

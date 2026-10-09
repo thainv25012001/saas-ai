@@ -36,7 +36,7 @@ async def create_agent(client, headers, name, selection="id", **fields):
     test here cares which. Default to the offline pair, which needs no API
     key; a test that cares passes its own.
     """
-    payload = {"name": name, "provider": "fake", "model": "fake-1", **fields}
+    payload = {"name": name, "provider": "openrouter", "model": "test/model:free", **fields}
     return await graphql(
         client,
         f"mutation C($input: CreateAgentInput!) {{ createAgent(input: $input) {{ {selection} }} }}",
@@ -238,7 +238,7 @@ async def test_create_agent_rejects_an_unknown_provider(client, auth_headers):
     response = await create_agent(client, auth_headers, "Bogus Bot", provider="gpt")
     body = response.json()
     assert body["errors"][0]["extensions"]["code"] == "invalid_input"
-    assert "fake" in body["errors"][0]["message"]
+    assert "openrouter" in body["errors"][0]["message"]
 
 
 async def test_update_agent_rejects_an_unknown_provider(client, auth_headers):
@@ -265,8 +265,7 @@ async def test_update_agent_rejects_an_unknown_provider(client, auth_headers):
 
 async def test_update_agent_accepts_every_known_provider(client, auth_headers):
     """The counterpart to the test above: the validator must not be so strict
-    that it rejects the providers that do exist -- `fake` included, which is
-    what a fresh clone's agents are actually created with."""
+    that it rejects the providers that do exist."""
     from app.llm.registry import KNOWN_PROVIDERS
 
     created = await create_agent(client, auth_headers, "Every Provider Bot")
@@ -508,14 +507,6 @@ async def test_configured_providers_lists_every_known_provider(client, auth_head
     assert [p["id"] for p in body["data"]["configuredProviders"]] == list(KNOWN_PROVIDERS)
 
 
-async def test_configured_providers_reports_fake_as_configured(client, auth_headers):
-    response = await graphql(
-        client, "{ configuredProviders { id configured } }", headers=auth_headers
-    )
-    by_id = {p["id"]: p["configured"] for p in response.json()["data"]["configuredProviders"]}
-    assert by_id["fake"] is True
-
-
 async def test_configured_providers_reflects_which_keys_are_set(client, auth_headers, monkeypatch):
     """Monkeypatched rather than read from the ambient .env: a test whose
     result depends on whether the developer happens to have an OpenAI key is
@@ -545,8 +536,8 @@ async def test_create_agent_input_declares_provider_and_model_non_null():
     """Non-null in the schema itself, not merely rejected by pydantic inside
     the resolver. This is what the dashboard's codegen reads: with these
     nullable, a `createAgent` call that omits them still type-checks in the
-    web app and only fails at runtime, which is how every agent ended up on
-    `fake` in the first place."""
+    web app and only fails at runtime, which is how every agent once ended up
+    on the offline provider the app shipped."""
     from app.graphql.schema import schema
 
     sdl = schema.as_str()

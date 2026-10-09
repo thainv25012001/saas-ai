@@ -7,15 +7,11 @@
  */
 export type ProviderInfo = {
   id: string;
-  /** Whether the server holds this provider's API key. `fake` is always true. */
+  /** Whether the server holds this provider's API key. */
   configured: boolean;
 };
 
-/** The offline provider: answers with a canned reply, needs no API key. */
-const OFFLINE = "fake";
-
 const LABELS: Record<string, string> = {
-  fake: "Fake (offline)",
   openai: "OpenAI",
   anthropic: "Anthropic",
   openrouter: "OpenRouter",
@@ -33,38 +29,25 @@ export function providerLabel(provider: string): string {
 /**
  * What the *create* form may offer: providers that can actually answer.
  *
- * `fake` is excluded even though it is always `configured`, because an agent
- * that replies with a canned string is not what anyone sets out to create.
- * Creating an agent used to send a name alone and inherit the API's
- * `DEFAULT_LLM_PROVIDER`, so every agent landed on `fake` and had to be fixed
- * afterwards on its detail page.
- *
  * An empty result is meaningful: the server holds no keys, and the form has to
  * say so rather than render an empty dropdown.
  */
 export function creatableProviders(providers: readonly ProviderInfo[]): ProviderInfo[] {
-  return providers.filter((provider) => provider.id !== OFFLINE && provider.configured);
+  return providers.filter((provider) => provider.configured);
 }
 
 /**
  * What the *edit* form may offer, given the provider the agent is on now.
  *
- * Wider than `creatableProviders` in both directions. Unconfigured providers
- * stay in the list so the form can disable them with a visible reason, rather
- * than hiding the option and leaving the user to wonder where it went. And
- * `fake` stays when it is the agent's own provider: every agent created before
- * this change is on it, and a `<select>` with no option matching its value
- * renders blank -- a user who then touched the dropdown could never put it
- * back.
+ * Wider than `creatableProviders`: unconfigured providers stay in the list so
+ * the form can disable them with a visible reason, rather than hiding the
+ * option and leaving the user to wonder where it went.
  */
 export function editableProviders(
   providers: readonly ProviderInfo[],
   currentProvider: string,
 ): ProviderInfo[] {
-  const listed = providers.filter(
-    (provider) => provider.id !== OFFLINE || currentProvider === OFFLINE,
-  );
-  if (listed.some((provider) => provider.id === currentProvider)) return listed;
+  if (providers.some((provider) => provider.id === currentProvider)) return [...providers];
   // The agent's own provider is always offered, even when the query has not
   // resolved yet or the API has since dropped the provider from
   // KNOWN_PROVIDERS. Without it the `<select>` has no option matching its
@@ -72,7 +55,7 @@ export function editableProviders(
   // provider it is not on -- and the next save moves it there. `configured`
   // is false because nothing here knows otherwise, which leaves the option
   // disabled rather than falsely inviting.
-  return [{ id: currentProvider, configured: false }, ...listed];
+  return [{ id: currentProvider, configured: false }, ...providers];
 }
 
 /**

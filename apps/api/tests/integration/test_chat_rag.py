@@ -46,7 +46,6 @@ from app.documents.service import DocumentService
 from app.embeddings.hashing import HashingEmbedder
 from app.llm.base import ModelCapabilities
 from app.llm.errors import LLMUnavailableError
-from app.llm.fake_provider import FakeProvider, FakeToolCall
 from app.llm.types import (
     CompletionRequest,
     MessageEndEvent,
@@ -63,6 +62,7 @@ from app.main import create_app
 from app.rag.retrieve import RetrievalService
 from tests.conftest import enable_builtin_tool
 from tests.factories import agent_input
+from tests.llm_doubles import FakeProvider, FakeToolCall
 
 pytestmark = pytest.mark.anyio
 
@@ -120,7 +120,7 @@ class _ToolThenFailProvider:
     `tests/unit/test_agent_loop.py`'s `_FillerThenToolProvider`.
     """
 
-    name = "fake"
+    name = "openrouter"
 
     def __init__(self, tool_call_id: str, tool_name: str, tool_input: dict) -> None:  # type: ignore[type-arg]
         self._tool_call_id = tool_call_id
@@ -168,7 +168,7 @@ class _ToolThenFailProvider:
 class _FillerThenRetrieveProvider:
     """Emits filler text AND a `tool_use` block in the SAME step --
     `FakeProvider`'s `turns=` form cannot script this (a scripted turn is
-    prose OR calls, never both -- see `app/llm/fake_provider.py`), but it is
+    prose OR calls, never both -- see `tests/llm_doubles.py`), but it is
     exactly what a real provider routinely produces ("Let me check that for
     you," followed by the call). Used to prove Task 7's new `ChatCitations`
     ordering guarantee -- "before `message_end`", not "before the first
@@ -177,7 +177,7 @@ class _FillerThenRetrieveProvider:
     happening to hold.
     """
 
-    name = "fake"
+    name = "openrouter"
 
     def __init__(
         self,

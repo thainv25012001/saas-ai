@@ -13,12 +13,12 @@ describe("Field", () => {
 
   it("describes the control with its description text", () => {
     render(
-      <Field label="Provider" description="`fake` answers offline and costs nothing.">
+      <Field label="Provider" description="OpenRouter's `:free` models cost nothing.">
         {(control) => <Input {...control} />}
       </Field>,
     );
     expect(screen.getByLabelText("Provider")).toHaveAccessibleDescription(
-      "`fake` answers offline and costs nothing.",
+      "OpenRouter's `:free` models cost nothing.",
     );
   });
 

@@ -27,7 +27,7 @@ def test_demo_agent_uses_the_configured_default_provider():
 
 
 def test_demo_agent_model_matches_its_provider():
-    """Never a hardcoded literal: pairing the `fake` provider with an OpenAI
+    """Never a hardcoded literal: pairing the `anthropic` provider with an OpenAI
     model id would give the demo an agent that cannot answer."""
     parsed = demo_agent_input()
     assert parsed.model == DEFAULT_MODELS[parsed.provider]

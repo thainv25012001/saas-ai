@@ -2,15 +2,15 @@ import pytest
 from pydantic import BaseModel
 
 from app.llm.errors import LLMUnavailableError
-from app.llm.fake_provider import FakeProvider
 from app.llm.types import CompletionRequest, Message, Usage
+from tests.llm_doubles import FakeProvider
 
 pytestmark = pytest.mark.anyio
 
 
 def _request() -> CompletionRequest:
     return CompletionRequest(
-        model="fake-1",
+        model="test/model:free",
         messages=[Message.text("user", "hello")],
         system="you are a test",
         max_tokens=100,
@@ -62,7 +62,7 @@ async def test_fail_with_raises_after_some_output_has_streamed():
 
 async def test_capabilities_are_permissive():
     provider = FakeProvider()
-    caps = provider.capabilities("fake-1")
+    caps = provider.capabilities("test/model:free")
     assert caps.supports_sampling is True
 
 

@@ -35,7 +35,7 @@ class CreateAgentInput(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     # Required, with no default on either side of the wire. Both fields used to
     # be optional and were resolved downstream — `provider` from
-    # `Settings.default_llm_provider` (`fake` out of the box) and `model` from
+    # `Settings.default_llm_provider` (then an offline provider) and `model` from
     # that provider's entry in `DEFAULT_MODELS`. The dashboard only ever sent a
     # name, so in practice every agent a real user created started on the
     # offline provider that answers with a canned reply, and they had to

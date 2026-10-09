@@ -3,8 +3,8 @@
 A multi-tenant SaaS where a business configures an AI sales assistant over its own
 knowledge — products, documents, prompts — and that assistant talks to the business's
 customers. This repository is **Phases 1 to 7**: authentication, organizations, agents
-and prompts; a real LLM call — a provider abstraction (OpenAI, Anthropic, and a
-network-free `fake`), conversations and messages, a streaming `POST /api/v1/chat/stream`
+and prompts; a real LLM call — a provider abstraction (OpenAI, Anthropic, and
+OpenRouter as the default), conversations and messages, a streaming `POST /api/v1/chat/stream`
 endpoint with per-message token and cost accounting, and a working playground; a
 knowledge base — document upload, a background ingest worker (extraction, chunking,
 embedding into pgvector), hybrid retrieval, and chat answers grounded in the
@@ -171,7 +171,8 @@ This gives you an OWNER membership in the seeded "Demo Motors" organization, wit
 demo agent already created. From there: register a second account, log in, create an
 agent, edit it, reload the page — the whole Phase 1 loop.
 
-No manual step is required beyond copying `.env.example`. `docker compose up` builds the
+Beyond copying `.env.example`, chat and the supplier quote pipeline need
+`OPENROUTER_API_KEY` (or another provider's key together with `DEFAULT_LLM_PROVIDER`). `docker compose up` builds the
 `api` and `web` images, starts Postgres and Redis, waits for both to report healthy,
 applies every Alembic migration, and then starts the API (whose own healthcheck hits
 `/health/ready`, so it only reports healthy once migrations are done) and the dashboard.
@@ -200,7 +201,7 @@ apps/
       auth/       registration, login, refresh rotation
       agents/     agent + agent-config service and schemas
       prompts/    prompt + prompt-version service (versioning, single-active invariant)
-      llm/        provider abstraction: openai, anthropic, fake; capabilities, pricing, registry
+      llm/        provider abstraction: openai, anthropic, openrouter; structured output, capabilities, pricing, registry
       embeddings/ embedding provider abstraction: openai, hashing (offline, network-free); registry
       chat/       the chat service: prompt resolution, history window, streaming, persistence
       conversations/  conversation + message + usage-event service

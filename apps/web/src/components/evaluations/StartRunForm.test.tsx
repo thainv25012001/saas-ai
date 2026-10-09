@@ -3,9 +3,11 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { type ModelsState, StartRunForm, type VersionsState } from "./StartRunForm";
 
-const AGENTS = [{ id: "agent-1", name: "Sales bot", provider: "fake", model: "fake-1" }];
+const AGENTS = [
+  { id: "agent-1", name: "Sales bot", provider: "openrouter", model: "test/model:free" },
+];
 const PROVIDERS = [
-  { id: "fake", configured: true },
+  { id: "openrouter", configured: true },
   { id: "openai", configured: true },
   { id: "anthropic", configured: false },
 ];

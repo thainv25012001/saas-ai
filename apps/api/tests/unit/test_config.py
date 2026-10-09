@@ -250,3 +250,63 @@ def test_poll_interval_rejects_values_that_do_not_divide_an_hour(minutes):
     # 4-minute gap at every hour (56 -> 0), 45 a 15-minute one.
     with pytest.raises(ValidationError):
         _settings(gmail_poll_interval_minutes=minutes)
+
+
+def test_supplier_llm_settings_default_to_the_free_model_and_five_matches(monkeypatch):
+    monkeypatch.delenv("SUPPLIER_QUOTE_LLM_MODEL", raising=False)
+    monkeypatch.delenv("GMAIL_LLM_MATCHES_PER_MESSAGE", raising=False)
+
+    settings = _settings()
+
+    assert settings.supplier_quote_llm_model is None
+    assert settings.gmail_llm_matches_per_message == 5
+
+
+@pytest.mark.parametrize("matches", [0, 1, 25])
+def test_llm_matches_per_message_accepts_zero_to_twenty_five(matches):
+    assert _settings(gmail_llm_matches_per_message=matches).gmail_llm_matches_per_message == matches
+
+
+@pytest.mark.parametrize("matches", [-1, 26])
+def test_llm_matches_per_message_rejects_values_outside_zero_to_twenty_five(matches):
+    with pytest.raises(ValidationError):
+        _settings(gmail_llm_matches_per_message=matches)
+
+
+def test_an_empty_supplier_model_is_accepted():
+    """docker-compose passes `SUPPLIER_QUOTE_LLM_MODEL=` when the host leaves
+    it unset; that must start the app, and means "use the default"."""
+    assert _settings(supplier_quote_llm_model="").supplier_quote_llm_model == ""
+
+
+def test_openrouter_is_the_default_provider(monkeypatch):
+    monkeypatch.delenv("DEFAULT_LLM_PROVIDER", raising=False)
+    assert _settings().default_llm_provider == "openrouter"
+
+
+def test_a_stale_fake_default_provider_fails_at_startup():
+    """`.env.example` used to say DEFAULT_LLM_PROVIDER=fake. A copy of it must
+    fail loudly here rather than start and fail on the first LLM call."""
+    with pytest.raises(ValidationError, match="default_llm_provider"):
+        _settings(default_llm_provider="fake")
+
+
+def test_the_default_provider_setting_lists_exactly_the_known_providers():
+    """Config cannot import the registry (the registry imports config), so the
+    two lists are pinned together here instead."""
+    from typing import get_args
+
+    from app.core.config import Settings
+    from app.llm.registry import KNOWN_PROVIDERS
+
+    annotation = Settings.model_fields["default_llm_provider"].annotation
+    assert get_args(annotation) == KNOWN_PROVIDERS
+
+
+def test_the_suite_never_sees_a_real_provider_key():
+    """`tests/conftest.py` overrides the keys a developer's `.env` may hold, so
+    no test can spend real requests."""
+    settings = get_settings()
+    assert settings.openrouter_api_key == "test-openrouter-key"
+    assert not settings.openai_api_key
+    assert not settings.anthropic_api_key
