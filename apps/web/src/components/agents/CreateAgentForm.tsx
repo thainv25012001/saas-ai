@@ -35,9 +35,9 @@ export type CreateAgentFormProps = {
  * The new-agent form.
  *
  * It asks for a provider and a model, not just a name. It used to ask only for
- * a name, and the API filled the rest in from `DEFAULT_LLM_PROVIDER` — `fake`
- * out of the box — so every agent anyone created started on the offline
- * provider that answers with a canned reply, and they had to discover that and
+ * a name, and the API filled the rest in from `DEFAULT_LLM_PROVIDER`, which
+ * then pointed at an offline provider that answered with a canned reply — so
+ * every agent anyone created started there, and they had to discover that and
  * fix it on the agent's detail page.
  *
  * Presentational on purpose: the page owns the two GraphQL queries and the

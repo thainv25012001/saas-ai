@@ -8,7 +8,6 @@ import {
 } from "./providers";
 
 const ALL: ProviderInfo[] = [
-  { id: "fake", configured: true },
   { id: "openai", configured: false },
   { id: "anthropic", configured: false },
   { id: "openrouter", configured: true },
@@ -23,10 +22,6 @@ describe("providerLabel", () => {
     expect(providerLabel("openai")).toBe("OpenAI");
     expect(providerLabel("anthropic")).toBe("Anthropic");
     expect(providerLabel("openrouter")).toBe("OpenRouter");
-  });
-
-  it("says what `fake` actually is, since its name explains nothing", () => {
-    expect(providerLabel("fake")).toBe("Fake (offline)");
   });
 
   it("falls back to the raw id for a provider the API added after this list", () => {
@@ -49,16 +44,9 @@ describe("creatableProviders", () => {
     expect(ids(creatableProviders(ALL))).toEqual(["openrouter"]);
   });
 
-  it("never offers `fake` on a new agent", () => {
-    // It is `configured`, because it needs no key -- but an agent that replies
-    // with a canned string is not what anyone is trying to create. Every agent
-    // used to land on it by default, which is the whole reason this exists.
-    expect(ids(creatableProviders(ALL))).not.toContain("fake");
-  });
-
   it("is empty when the server holds no keys at all", () => {
     // The form has to say so rather than render an empty dropdown.
-    expect(creatableProviders([{ id: "fake", configured: true }])).toEqual([]);
+    expect(creatableProviders([{ id: "openai", configured: false }])).toEqual([]);
   });
 });
 
@@ -73,15 +61,10 @@ describe("editableProviders", () => {
     ]);
   });
 
-  it("keeps `fake` when it is the agent's current provider", () => {
-    // Every agent created before this change is on `fake`. Dropping it from
-    // the list makes the select render blank for exactly those agents, and a
-    // user who touches the dropdown can never put it back.
-    expect(ids(editableProviders(ALL, "fake"))).toContain("fake");
-  });
-
-  it("drops `fake` for an agent already on a real provider", () => {
-    expect(ids(editableProviders(ALL, "anthropic"))).not.toContain("fake");
+  it("keeps a provider the API no longer lists, disabled, for the agent on it", () => {
+    // An agent stored before a provider was retired must still render its own
+    // provider rather than a blank select.
+    expect(editableProviders(ALL, "retired")[0]).toEqual({ id: "retired", configured: false });
   });
 
   it("always includes the agent's own provider, even before the list has loaded", () => {

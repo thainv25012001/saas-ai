@@ -6,7 +6,6 @@ import type { ModelChoice } from "./ModelPicker";
 import type { ProviderInfo } from "@/lib/providers";
 
 const PROVIDERS: ProviderInfo[] = [
-  { id: "fake", configured: true },
   { id: "openai", configured: true },
   { id: "anthropic", configured: false },
   { id: "openrouter", configured: true },
@@ -38,7 +37,7 @@ describe("CreateAgentForm", () => {
   it("asks for a provider and a model, not just a name", () => {
     // The whole point. The form used to send a name alone, so the API resolved
     // the provider from DEFAULT_LLM_PROVIDER and every agent silently started
-    // on `fake`.
+    // on the offline provider the app then shipped.
     renderForm();
     expect(screen.getByLabelText(/name/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/provider/i)).toBeInTheDocument();
@@ -50,13 +49,6 @@ describe("CreateAgentForm", () => {
     expect(screen.getByRole("option", { name: /OpenAI/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /OpenRouter/ })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: /Anthropic/ })).not.toBeInTheDocument();
-  });
-
-  it("never offers the offline provider", () => {
-    // An agent that replies with a canned string is not what anyone is
-    // creating, however convenient it is for the server's tests.
-    renderForm();
-    expect(screen.queryByRole("option", { name: /Fake/i })).not.toBeInTheDocument();
   });
 
   it("cannot be submitted before a model is chosen", () => {
@@ -100,7 +92,7 @@ describe("CreateAgentForm", () => {
   it("explains itself instead of rendering an empty dropdown when no key is set", () => {
     // Nothing can be created at all in this state, and an empty select gives
     // the user no idea why.
-    renderForm({ providers: [{ id: "fake", configured: true }], provider: "" });
+    renderForm({ providers: [{ id: "openai", configured: false }], provider: "" });
     expect(screen.getByRole("alert")).toHaveTextContent(/API_KEY/);
     expect(screen.getByRole("button", { name: /create agent/i })).toBeDisabled();
   });
