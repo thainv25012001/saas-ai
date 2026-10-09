@@ -332,6 +332,31 @@ async def test_a_busy_mailbox_is_retried_instead_of_dropped(
         await run_gmail_sync(mailbox_email=_MAILBOX, notification_history_id="200")
 
 
+async def test_a_busy_mailbox_is_left_to_the_next_poll(
+    owner_connection: Any,
+    tenant_a: TenantContext,
+    fake_gmail: FakeGmail,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.gmail.sync import run_gmail_sync
+
+    await seed_mailbox(owner_connection, tenant_a)
+    fake_gmail.history_message_ids = ["m-busy"]
+    monkeypatch.setattr("app.gmail.sync.get_redis", lambda: _Redis(held=True))
+
+    # No Retry: the job holding the lock is syncing this mailbox right now,
+    # and the next poll covers anything it listed too early to see.
+    await run_gmail_sync(
+        mailbox_email=_MAILBOX,
+        notification_history_id=None,
+        force_sync=True,
+        skip_if_busy=True,
+    )
+
+    assert "m-busy" not in await message_rows(tenant_a)
+    assert (await connection_row(tenant_a)).history_id == "100"
+
+
 async def test_maintenance_continues_past_a_mailbox_that_fails(
     owner_connection: Any,
     tenant_a: TenantContext,

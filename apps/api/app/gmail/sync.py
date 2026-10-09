@@ -252,6 +252,7 @@ async def run_gmail_sync(
     mailbox_email: str,
     notification_history_id: str | None,
     force_sync: bool = False,
+    skip_if_busy: bool = False,
 ) -> None:
     normalized_email = mailbox_email.strip().casefold()
     async with untenanted_session() as session:
@@ -277,6 +278,11 @@ async def run_gmail_sync(
             blocking_timeout=0,
         )
         if not await lock.acquire(blocking=False):
+            if skip_if_busy:
+                # A poll: the job holding the lock is syncing this mailbox
+                # now, and the next poll picks up whatever it listed too early.
+                logger.info("gmail_sync_busy_skipped", connection_id=str(connection_id))
+                continue
             # Another job holds this mailbox and may have listed its history
             # before the change this notification announces, so skipping
             # would strand that mail until the next notification. Retry.
