@@ -460,6 +460,34 @@ async def test_an_email_the_classifier_is_unsure_about_is_ignored(
     assert row.id not in {message.id for message in pending}
 
 
+async def test_an_unknown_sender_without_an_xlsx_is_ignored_without_an_llm_call(
+    owner_connection: Any,
+    tenant_a: TenantContext,
+    fake_gmail: FakeGmail,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.gmail.sync import run_gmail_sync
+
+    calls: list[str] = []
+
+    def _recording_get_provider(name: str) -> Any:
+        calls.append(name)
+        raise AssertionError("an email with no xlsx must not reach the model")
+
+    monkeypatch.setattr("app.supplier_quotes.classification.get_provider", _recording_get_provider)
+    await seed_mailbox(owner_connection, tenant_a)
+    message = gmail_message("m-plain", sender="news@unknown.example")
+    message["payload"]["parts"] = message["payload"]["parts"][:1]  # drop the xlsx part
+    fake_gmail.messages["m-plain"] = message
+    fake_gmail.history_message_ids = ["m-plain"]
+
+    await run_gmail_sync(mailbox_email=_MAILBOX, notification_history_id="200")
+
+    row = (await message_rows(tenant_a))["m-plain"]
+    assert row.status == "ignored"
+    assert calls == []
+
+
 async def test_maintenance_continues_past_a_mailbox_that_fails(
     owner_connection: Any,
     tenant_a: TenantContext,

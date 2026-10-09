@@ -63,9 +63,10 @@ async def generate_structured(
         # Pydantic reports invalid JSON as a ValidationError too, so this one
         # clause covers prose, arrays, `null` and wrong or missing fields.
         _log_failure(request.model, type(exc).__name__)
+        # `from None`: the ValidationError embeds the reply (`input_value`).
         raise LLMStructuredOutputError(
             "the model reply does not match the expected schema"
-        ) from exc
+        ) from None
 
 
 def _log_failure(model: str, error_type: str) -> None:

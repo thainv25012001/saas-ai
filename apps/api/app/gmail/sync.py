@@ -889,6 +889,9 @@ async def _process_gmail_message(
             subject=subject,
             snippet=snippet,
             suppliers=suppliers,
+            # Mail without a workbook gives the pipeline nothing to do, so an
+            # unknown sender's is not worth one of the free tier's daily requests.
+            allow_llm=bool(attachments),
         )
         supplier_message.classification = classification.classification
         supplier_message.classification_confidence = classification.confidence

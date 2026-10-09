@@ -106,5 +106,13 @@ async def test_a_failure_is_logged_without_the_reply_text():
     assert "12.50" not in str(logs)
 
 
+async def test_a_refusal_does_not_chain_the_validation_error():
+    """The chained ValidationError embeds the reply text (`input_value`)."""
+    provider = _ReplyingProvider("ACME quotes 12.50 per unit")
+    with pytest.raises(LLMStructuredOutputError) as raised:
+        await generate_structured(provider, _request(), _Verdict)
+    assert raised.value.__cause__ is None
+
+
 def test_text_without_a_fence_is_only_trimmed():
     assert strip_json_fence('  {"a": 1}\n') == '{"a": 1}'

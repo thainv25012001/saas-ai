@@ -5,7 +5,9 @@ from typing import Any
 
 import pytest
 from pydantic import BaseModel
+from structlog.testing import capture_logs
 
+from app.llm.errors import LLMRateLimitError
 from app.supplier_quotes.classification import (
     EmailClassification,
     ProductMatchSuggestion,
@@ -296,3 +298,116 @@ async def test_without_the_setting_the_providers_default_model_is_used(monkeypat
     await suggest_mapping(WorkbookInspection(sheets=[]), provider=provider)
 
     assert provider.request.model == DEFAULT_MODELS["openrouter"]
+
+
+class _FailingProvider:
+    name = "openrouter"
+
+    async def generate_structured(self, _request: Any, _schema: Any) -> Any:
+        raise LLMRateLimitError("rate limited: ACME quotes 12.50")
+
+
+async def test_a_provider_failure_yields_the_empty_default_and_is_logged() -> None:
+    with capture_logs() as logs:
+        result = await suggest_mapping(WorkbookInspection(sheets=[]), provider=_FailingProvider())
+
+    assert result.suggestion is None
+    failures = [entry for entry in logs if entry["event"] == "supplier_llm_call_failed"]
+    assert len(failures) == 1
+    assert failures[0]["error_type"] == "LLMRateLimitError"
+    assert failures[0]["schema"] == "MappingSuggestion"
+    assert failures[0]["model"]
+    # Never the exception text or a traceback: both can quote supplier data.
+    assert "12.50" not in str(logs)
+    assert "exc_info" not in failures[0]
+
+
+async def test_a_provider_that_cannot_be_built_is_logged_too(monkeypatch) -> None:
+    def _no_key(_name: str) -> Any:
+        raise RuntimeError("OPENROUTER_API_KEY is not set")
+
+    monkeypatch.setattr("app.supplier_quotes.classification.get_provider", _no_key)
+
+    with capture_logs() as logs:
+        await suggest_mapping(WorkbookInspection(sheets=[]))
+
+    failures = [entry for entry in logs if entry["event"] == "supplier_llm_call_failed"]
+    assert len(failures) == 1
+    assert failures[0]["error_type"] == "RuntimeError"
+    assert failures[0]["model"] is None
+
+
+class _MustNotBeCalled:
+    name = "openrouter"
+
+    async def generate_structured(self, _request: Any, _schema: Any) -> Any:
+        raise AssertionError("the model must not be called")
+
+
+async def test_without_llm_an_unknown_sender_is_skipped_and_the_model_never_called() -> None:
+    result = await classify_supplier_email(
+        sender_email="news@unknown.example",
+        subject="Hello",
+        snippet="Hi",
+        suppliers=[_acme(sender_emails=["quotes@acme.example"])],
+        provider=_MustNotBeCalled(),
+        allow_llm=False,
+    )
+
+    assert result.classification == "uncertain"
+    assert result.confidence == 0
+    assert result.review_required is False
+    assert result.supplier_id is None
+    assert result.reason == "llm_classification_skipped"
+
+
+async def test_without_llm_a_sender_two_suppliers_claim_still_needs_review() -> None:
+    suppliers = [
+        _acme(sender_domains=["acme.example"]),
+        {
+            "id": "supplier-2",
+            **SupplierInput(name="Acme Parts", sender_domains=["acme.example"]).model_dump(),
+        },
+    ]
+
+    result = await classify_supplier_email(
+        sender_email="quotes@acme.example",
+        subject="Quote",
+        snippet="Attached.",
+        suppliers=suppliers,
+        provider=_MustNotBeCalled(),
+        allow_llm=False,
+    )
+
+    assert result.review_required is True
+    assert result.reason == "llm_classification_skipped"
+
+
+async def test_without_llm_a_configured_sender_still_matches_its_rule() -> None:
+    result = await classify_supplier_email(
+        sender_email="quotes@acme.example",
+        subject="Quote",
+        snippet="Attached.",
+        suppliers=[_acme(sender_emails=["quotes@acme.example"])],
+        provider=_MustNotBeCalled(),
+        allow_llm=False,
+    )
+
+    assert result.classification == "supplier"
+    assert result.supplier_id == "supplier-1"
+    assert result.reason == "configured_sender_rule"
+
+
+async def test_the_mapping_schema_and_prompt_steer_the_model_toward_a_usable_reply() -> None:
+    from app.supplier_quotes.classification import MappingSuggestion
+
+    properties = MappingSuggestion.model_json_schema()["properties"]
+    assert "canonical field" in properties["columns"]["description"]
+    assert "header row" in properties["columns"]["description"]
+    assert "null" in properties["default_currency"]["description"]
+    assert "null" in properties["default_purchase_unit"]["description"]
+
+    provider = _CaptureProvider(MappingSuggestion())
+    await suggest_mapping(WorkbookInspection(sheets=[]), provider=provider)
+
+    assert "default_currency and default_purchase_unit null" in provider.request.system
