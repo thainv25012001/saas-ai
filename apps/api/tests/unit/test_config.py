@@ -250,3 +250,30 @@ def test_poll_interval_rejects_values_that_do_not_divide_an_hour(minutes):
     # 4-minute gap at every hour (56 -> 0), 45 a 15-minute one.
     with pytest.raises(ValidationError):
         _settings(gmail_poll_interval_minutes=minutes)
+
+
+def test_supplier_llm_settings_default_to_the_free_model_and_five_matches(monkeypatch):
+    monkeypatch.delenv("SUPPLIER_QUOTE_LLM_MODEL", raising=False)
+    monkeypatch.delenv("GMAIL_LLM_MATCHES_PER_MESSAGE", raising=False)
+
+    settings = _settings()
+
+    assert settings.supplier_quote_llm_model is None
+    assert settings.gmail_llm_matches_per_message == 5
+
+
+@pytest.mark.parametrize("matches", [0, 1, 25])
+def test_llm_matches_per_message_accepts_zero_to_twenty_five(matches):
+    assert _settings(gmail_llm_matches_per_message=matches).gmail_llm_matches_per_message == matches
+
+
+@pytest.mark.parametrize("matches", [-1, 26])
+def test_llm_matches_per_message_rejects_values_outside_zero_to_twenty_five(matches):
+    with pytest.raises(ValidationError):
+        _settings(gmail_llm_matches_per_message=matches)
+
+
+def test_an_empty_supplier_model_is_accepted():
+    """docker-compose passes `SUPPLIER_QUOTE_LLM_MODEL=` when the host leaves
+    it unset; that must start the app, and means "use the default"."""
+    assert _settings(supplier_quote_llm_model="").supplier_quote_llm_model == ""

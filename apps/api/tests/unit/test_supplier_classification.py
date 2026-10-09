@@ -267,3 +267,32 @@ async def test_product_match_uses_exact_catalog_sku_without_llm() -> None:
     assert result.status == "confirmed"
     assert result.product_id == "product-1"
     assert provider.request is None
+
+
+async def test_the_supplier_quote_model_setting_picks_the_model(monkeypatch):
+    from app.core.config import get_settings
+    from app.supplier_quotes.classification import MappingSuggestion
+
+    settings = get_settings().model_copy(update={"supplier_quote_llm_model": "vendor/paid-model"})
+    monkeypatch.setattr("app.supplier_quotes.classification.get_settings", lambda: settings)
+    provider = _CaptureProvider(MappingSuggestion())
+
+    await suggest_mapping(WorkbookInspection(sheets=[]), provider=provider)
+
+    assert provider.request.model == "vendor/paid-model"
+
+
+@pytest.mark.parametrize("configured", [None, ""])
+async def test_without_the_setting_the_providers_default_model_is_used(monkeypatch, configured):
+    from app.core.config import get_settings
+    from app.llm.registry import DEFAULT_MODELS
+    from app.supplier_quotes.classification import MappingSuggestion
+
+    settings = get_settings().model_copy(update={"supplier_quote_llm_model": configured})
+    monkeypatch.setattr("app.supplier_quotes.classification.get_settings", lambda: settings)
+    provider = _CaptureProvider(MappingSuggestion())
+    provider.name = "openrouter"
+
+    await suggest_mapping(WorkbookInspection(sheets=[]), provider=provider)
+
+    assert provider.request.model == DEFAULT_MODELS["openrouter"]

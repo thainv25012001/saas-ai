@@ -122,6 +122,16 @@ class Settings(BaseSettings):
     # works with nothing but the OAuth client.
     gmail_sync_mode: Literal["pubsub", "polling"] = "polling"
     gmail_poll_interval_minutes: int = Field(default=5, ge=1, le=60)
+    # The model the supplier pipeline asks for classification, mapping and
+    # product matches. Unset (or empty, as docker-compose passes it) means the
+    # default provider's default model, a free OpenRouter one. A paid id moves
+    # the pipeline off the free tier's 50-requests-a-day limit with no code
+    # change.
+    supplier_quote_llm_model: str | None = Field(default=None, max_length=100)
+    # LLM product-match calls per supplier email. Each one only suggests a
+    # match the owner still confirms, so a low cap costs convenience, not
+    # correctness, and keeps one large workbook from spending the free tier.
+    gmail_llm_matches_per_message: int = Field(default=5, ge=0, le=25)
     # `fake` keeps the playground working with no key configured. Set to
     # `openai` or `anthropic` once a key is present.
     default_llm_provider: str = "fake"

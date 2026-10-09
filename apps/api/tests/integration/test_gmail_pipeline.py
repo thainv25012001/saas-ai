@@ -614,3 +614,51 @@ async def test_a_remembered_supplier_sku_matches_without_review(
         assert report is not None
         _report, [quote] = await SupplierQuoteService(session, tenant_a).get_report(report.id)
     assert (quote.match_status, quote.product_id) == ("confirmed", product.id)
+
+
+@pytest.mark.parametrize("cap", [0, 2])
+async def test_ai_product_matching_stops_at_the_configured_cap(
+    owner_connection: Any,
+    tenant_a: TenantContext,
+    fake_gmail: FakeGmail,
+    monkeypatch: pytest.MonkeyPatch,
+    cap: int,
+) -> None:
+    """The free OpenRouter tier allows 50 requests a day for the whole
+    account; one large workbook must not spend them all."""
+    from app.core.config import get_settings
+    from app.gmail.sync import run_gmail_sync
+    from app.supplier_quotes.classification import ProductMatchSuggestion
+
+    schemas_asked: list[type] = []
+
+    class _CountingProvider:
+        name = "openrouter"
+
+        async def generate_structured(self, _request: Any, schema: Any) -> Any:
+            schemas_asked.append(schema)
+            return schema()
+
+    settings = get_settings().model_copy(update={"gmail_llm_matches_per_message": cap})
+    monkeypatch.setattr("app.gmail.sync.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.supplier_quotes.classification.get_provider", lambda _name: _CountingProvider()
+    )
+    await seed_mailbox(owner_connection, tenant_a)
+    fake_gmail.messages["m-1"] = gmail_message("m-1")
+    # Five rows that neither an SKU, an alias nor a name can match.
+    fake_gmail.attachments["att-1"] = workbook_bytes(
+        [(f"NEW-{index}", f"Gizmo {index}", 10) for index in range(5)]
+    )
+    fake_gmail.history_message_ids = ["m-1"]
+
+    await run_gmail_sync(mailbox_email=_MAILBOX, notification_history_id="200")
+
+    assert schemas_asked.count(ProductMatchSuggestion) == cap
+    message = (await message_rows(tenant_a))["m-1"]
+    assert message.status == "review_required"
+    async with tenant_session(tenant_a) as session:
+        report = await report_for(tenant_a, message)
+        assert report is not None
+        _report, quotes = await SupplierQuoteService(session, tenant_a).get_report(report.id)
+    assert len(quotes) == 5

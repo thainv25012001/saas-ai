@@ -304,17 +304,12 @@ async def _generate_structured(
     data: dict[str, Any],
 ) -> Any:
     if provider is None:
-        settings = get_settings()
-        provider_name = settings.default_llm_provider
-        model = model or DEFAULT_MODELS.get(provider_name, DEFAULT_MODELS["fake"])
         try:
-            provider = get_provider(provider_name)
+            provider = get_provider(get_settings().default_llm_provider)
         except Exception:
             return schema()
-    else:
-        model = model or DEFAULT_MODELS.get(provider.name, DEFAULT_MODELS["fake"])
     request = CompletionRequest(
-        model=model,
+        model=model or _supplier_quote_model(provider.name),
         messages=[Message.text("user", json.dumps(data, ensure_ascii=False, default=str))],
         system=system,
         max_tokens=800,
@@ -326,6 +321,14 @@ async def _generate_structured(
         # to guess: an unsure email classification (skipped), or a mapping or
         # product match that waits for review.
         return schema()
+
+
+def _supplier_quote_model(provider_name: str) -> str:
+    """`SUPPLIER_QUOTE_LLM_MODEL` when set, else the provider's default model."""
+    settings = get_settings()
+    if settings.supplier_quote_llm_model:
+        return settings.supplier_quote_llm_model
+    return DEFAULT_MODELS.get(provider_name, DEFAULT_MODELS[settings.default_llm_provider])
 
 
 def _normalized_list(value: object) -> set[str]:
